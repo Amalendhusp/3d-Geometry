@@ -221,7 +221,7 @@ export class XRInput {
     }
     if (slot.pressed) return;
     const tool = app.state.tool;
-    if (tool !== 'paint' && tool !== 'crease') {
+    if (tool !== 'paint' && tool !== 'crease' && tool !== 'cut') {
       if (slot.touchDown) { app.tools.up(slot.touchPtr); slot.touchDown = false; }
       return;
     }

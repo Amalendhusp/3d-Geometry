@@ -31,12 +31,13 @@ export class Tools {
   down(ptr, toolOverride) {
     const tool = toolOverride || this.state.tool;
     if (this.active.has(ptr.id)) return false;
-    if (tool === 'move') return this.beginMove(ptr);
+    if (tool === 'move') return this.beginMove(ptr, !!toolOverride);
     const hit = ptr.pick();
     if (!hit) return false;
     let g = null;
     if (tool === 'paint') g = this.beginPaint(ptr, hit);
     else if (tool === 'crease') g = this.beginCrease(ptr, hit);
+    else if (tool === 'cut') g = this.beginCut(ptr, hit);
     else if (tool === 'fold') g = this.beginFold(ptr, hit);
     if (!g) return false;
     this.active.set(ptr.id, g);
@@ -169,6 +170,10 @@ export class Tools {
     this.selectSession(s, before);
     const startTheta = 0;
     let grabOffset = null, stickDist = 0, stick = true;
+    // On a screen, dragging the flap across its crease folds it over toward
+    // you: the angle follows where the finger meets the paper's plane,
+    // from the grab point (0°) to its mirror image across the crease (180°).
+    const across = ptr.kind === 'screen';
     if (ptr.kind !== 'screen') {
       const gp = ptr.grabPoint(hit);
       stick = gp.stick;
@@ -182,7 +187,15 @@ export class Tools {
         if (p.kind === 'screen') {
           const o = this.toLocal(p.ray.origin);
           const d = this.toLocal(p.ray.origin.clone().add(p.ray.direction)).sub(o).normalize();
-          th = paper.angleFromRay(s, o, d);
+          const dn = d.dot(s.n);
+          if (across && Math.abs(dn) > 0.2) {
+            const t = s.C.clone().sub(o).dot(s.n) / dn;
+            const X = o.addScaledVector(d, t);
+            const k = X.sub(s.C).dot(s.v0n) / s.r;
+            th = Math.acos(THREE.MathUtils.clamp(k, -1, 1));
+          } else {
+            th = paper.angleFromRay(s, o, d);
+          }
         } else {
           const gp = p.grabPoint(null, stickDist, stick);
           const X = gp.point.clone().add(grabOffset);
@@ -273,7 +286,17 @@ export class Tools {
 
   // ---------------------------------------------------------------- move
 
-  beginMove(ptr) {
+  // Once the sheet is cut into several pieces, Move carries the piece you
+  // grab. The grip button (wholeSheet) always carries everything.
+  beginMove(ptr, wholeSheet) {
+    if (!wholeSheet && this.paper.pieceCount > 1) {
+      const hit = ptr.pick();
+      if (hit) {
+        const g = this.beginPieceMove(ptr, hit);
+        this.active.set(ptr.id, g);
+        return true;
+      }
+    }
     if (ptr.kind === 'screen') return false; // the camera orbits instead
     const root = this.paper.root;
     root.updateMatrixWorld(true);
@@ -295,6 +318,113 @@ export class Tools {
     return true;
   }
 }
+
+// -------------------------------------------------------------------- cut
+
+Tools.prototype.beginCut = function beginCut(ptr, hit) {
+  this.clearSelection();
+  const paper = this.paper;
+  const near = Math.max(0.006, paper.size * 0.03);
+  const line = paper.creaseLineAt(hit, near);
+  if (!line) {
+    if (ptr.kind !== 'touch') this.app.toast('Start on a crease line. Cuts follow creases.');
+    return null;
+  }
+  const snapR = Math.max(0.005, paper.size * 0.025);
+  const lo = line.stops[0], hi = line.stops[line.stops.length - 1];
+  const snapT = (t) => {
+    t = Math.min(hi, Math.max(lo, t));
+    let best = t, bd = snapR;
+    for (const v of line.stops) if (Math.abs(v - t) < bd) { bd = Math.abs(v - t); best = v; }
+    return best;
+  };
+  const t0 = line.t;
+  let t1 = t0;
+  let dragged = false;
+  const plane = paper.renderPlane(hit.face);
+  const show = () => {
+    const [a, b] = dragged ? [snapT(t0), snapT(t1)] : line.segment;
+    this.app.showCutPreview(line, Math.min(a, b), Math.max(a, b));
+  };
+  show();
+  return {
+    move: (p) => {
+      const w = p.onPlane(plane);
+      if (!w) return;
+      const q = paper.worldToPaper(hit.face, w);
+      t1 = paper.toLocal(hit.face, q[0], q[1]).sub(line.P).dot(line.u);
+      if (Math.abs(t1 - t0) > snapR * 0.8) dragged = true;
+      show();
+    },
+    end: () => {
+      this.app.hideCreasePreview();
+      let a, b;
+      if (dragged) { a = snapT(t0); b = snapT(t1); } else [a, b] = line.segment;
+      if (Math.abs(b - a) < 1e-4) { this.app.toast('Drag further along the crease to cut.'); return; }
+      const before = paper.serialize();
+      const piecesBefore = paper.pieceCount;
+      const n = paper.cutAlong(line.P, line.u, Math.min(a, b), Math.max(a, b));
+      if (!n) { this.app.toast('That part is already cut.'); return; }
+      this.app.history.push({ type: 'geom', state: before });
+      const extra = paper.pieceCount - piecesBefore;
+      this.app.toast(extra > 0
+        ? `Cut free: ${paper.pieceCount} pieces. Use Move to pull a piece away.`
+        : `Cut ${Math.round(Math.abs(b - a) * 1000)} mm${n > 1 ? ` through ${n} layers` : ''}.`);
+      this.app.geometryChanged();
+    },
+    cancel: () => this.app.hideCreasePreview(),
+  };
+};
+
+// Carry one cut-out piece. On screen it slides across the table plane; in
+// XR it follows the hand and settles flat when released near the table.
+Tools.prototype.beginPieceMove = function beginPieceMove(ptr, hit) {
+  this.clearSelection();
+  const paper = this.paper;
+  const before = paper.serialize();
+  const piece = paper.pieceOf(hit.face);
+  const M0 = new Map(piece.map((f) => [f, f.M.clone()]));
+  const off0 = new Map(paper.faces.map((f) => [f, f.off]));
+  paper.setHighlightFaces(piece, true);
+  const root = paper.root;
+  root.updateMatrixWorld(true);
+  let moved = false;
+  const apply = (D) => {
+    for (const f of piece) f.M.multiplyMatrices(D, M0.get(f));
+    paper.updateAllMatrices();
+    moved = true;
+  };
+  let move;
+  if (ptr.kind === 'screen') {
+    const nWorld = new THREE.Vector3().setFromMatrixColumn(root.matrixWorld, 2).normalize();
+    const plane = new THREE.Plane().setFromNormalAndCoplanarPoint(nWorld, hit.point);
+    const start = this.toLocal(hit.point);
+    move = (p) => {
+      const w = p.onPlane(plane);
+      if (!w) return;
+      const d = this.toLocal(w).sub(start);
+      apply(new THREE.Matrix4().makeTranslation(d.x, d.y, 0));
+    };
+  } else {
+    const startInv = ptr.grabMatrix().clone().invert();
+    move = (p) => {
+      root.updateMatrixWorld(true);
+      const rootInv = root.matrixWorld.clone().invert();
+      const D = rootInv.multiply(p.grabMatrix()).multiply(startInv).multiply(root.matrixWorld);
+      apply(D);
+    };
+  }
+  return {
+    move,
+    end: () => {
+      paper.setHighlightFaces(piece, false);
+      if (!moved) return;
+      paper.settlePiece(piece, M0, off0);
+      this.app.history.push({ type: 'geom', state: before });
+      this.app.geometryChanged();
+    },
+  };
+};
 
 export function foldLabel(theta) {
   const deg = Math.round(THREE.MathUtils.radToDeg(theta));

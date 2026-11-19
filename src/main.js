@@ -187,6 +187,8 @@ class App {
     this.creasePreview.renderOrder = 15;
     this.paper.root.add(this.creasePreview);
     this.previewMat = accent;
+    this.cutMat = new THREE.MeshBasicMaterial({ color: '#c43d1a', transparent: true, opacity: 0.95, depthTest: false, depthWrite: false, side: THREE.DoubleSide });
+    this.tickMat = new THREE.MeshBasicMaterial({ color: '#1d1f2b', transparent: true, opacity: 0.7, depthTest: false, depthWrite: false, side: THREE.DoubleSide });
     this.axisMat = new THREE.MeshBasicMaterial({ color: '#e0661d', transparent: true, opacity: 0.95, depthTest: false, depthWrite: false });
     this.axis = new THREE.Mesh(new THREE.CylinderGeometry(1, 1, 1, 10, 1, true), this.axisMat);
     this.axis.renderOrder = 16;
@@ -202,14 +204,29 @@ class App {
   }
 
   showCreasePreview(face, a, b) {
+    const segs = this.paper.creaseSegments(face, a, b);
+    const n = new THREE.Vector3().setFromMatrixColumn(face.M, 2).normalize();
+    const dots = [a, b].map((p) => this.paper.toLocal(face, p[0], p[1]));
+    this.drawPreview(segs, n, this.previewMat, dots);
+  }
+
+  // Cut preview: the span [a, b] along the crease line, plus the crossings
+  // it can snap to.
+  showCutPreview(line, a, b) {
+    const lift = this.paper.maxStackHeight() + 0.0004;
+    const at = (t) => line.P.clone().addScaledVector(line.u, t).addScaledVector(line.n, lift);
+    const stops = line.stops.filter((t, i) => i === 0 || t - line.stops[i - 1] > 1e-4).map(at);
+    this.drawPreview([[at(a), at(b)]], line.n, this.cutMat, [at(a), at(b)], stops);
+  }
+
+  drawPreview(segs, n, mat, dots, ticks = []) {
     const g = this.creasePreview;
     for (const c of g.children) c.geometry.dispose();
     g.clear();
-    const segs = this.paper.creaseSegments(face, a, b);
-    const n = new THREE.Vector3().setFromMatrixColumn(face.M, 2).normalize();
     const w = Math.max(0.0008, this.paper.size * 0.003);
     const pos = [];
     for (const [A, B] of segs) {
+      if (A.distanceTo(B) < 1e-6) continue;
       const d = B.clone().sub(A).normalize();
       const side = new THREE.Vector3().crossVectors(n, d).multiplyScalar(w);
       const p = [A.clone().add(side), B.clone().add(side), B.clone().sub(side), A.clone().sub(side)];
@@ -218,19 +235,20 @@ class App {
     if (pos.length) {
       const geo = new THREE.BufferGeometry();
       geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
-      const m = new THREE.Mesh(geo, this.previewMat);
+      const m = new THREE.Mesh(geo, mat);
       m.renderOrder = 15;
       g.add(m);
     }
     const r = Math.max(0.0025, this.paper.size * 0.008);
-    for (const p of [a, b]) {
-      const dot = new THREE.Mesh(new THREE.CircleGeometry(r, 24), this.previewMat);
-      const P = this.paper.toLocal(face, p[0], p[1]);
+    const disc = (P, radius, material) => {
+      const dot = new THREE.Mesh(new THREE.CircleGeometry(radius, 24), material);
       dot.position.copy(P);
       dot.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), n);
       dot.renderOrder = 15;
       g.add(dot);
-    }
+    };
+    for (const P of ticks) disc(P, r * 0.55, this.tickMat);
+    for (const P of dots) disc(P, r, mat);
   }
 
   hideCreasePreview() {
@@ -357,8 +375,11 @@ class App {
         const hints = {
           paint: 'Paint on either side of the sheet.',
           crease: 'Drag across the paper to draw a crease. Ends snap to corners, midpoints and crossings.',
+          cut: 'Tap a crease segment to cut it, or drag along a crease to cut part of it. Cuts go through every layer.',
           fold: 'Grab the paper next to a crease and swing it over. Or tap a flap, then Valley / Mountain.',
-          move: app.renderer.xr.isPresenting ? 'Grab the paper and move it.' : 'Drag to orbit, pinch or scroll to zoom, two fingers to pan.',
+          move: app.paper.pieceCount > 1
+            ? 'Grab a cut-out piece to move it on its own.'
+            : app.renderer.xr.isPresenting ? 'Grab the paper and move it.' : 'Drag to orbit, pinch or scroll to zoom, two fingers to pan.',
         };
         app.toast(hints[t]);
         app.notify();
@@ -520,7 +541,6 @@ class App {
         return;
       }
       if (e.pointerType === 'mouse' && e.button !== 0) return;
-      if (this.state.tool === 'move') return;
       setRay(e);
       if (this.tools.down(ptr)) {
         active = e.pointerId;
@@ -561,7 +581,7 @@ class App {
       if (e.target && (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT')) return;
       const k = e.key.toLowerCase();
       if ((e.ctrlKey || e.metaKey) && k === 'z') { e.preventDefault(); this.actions.undo(); return; }
-      const map = { 1: 'paint', 2: 'crease', 3: 'fold', 4: 'move', p: 'paint', c: 'crease', f: 'fold', m: 'move' };
+      const map = { 1: 'paint', 2: 'crease', 3: 'cut', 4: 'fold', 5: 'move', p: 'paint', c: 'crease', x: 'cut', f: 'fold', m: 'move' };
       if (map[k]) this.actions.setTool(map[k]);
       else if (k === 'e') this.actions.toggleEraser();
       else if (k === '[') this.actions.brush(-1);

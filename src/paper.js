@@ -50,6 +50,9 @@ export class Paper {
     this.root.add(this.facesGroup);
     this.faces = [];
     this.adj = [];
+    this.cutEdges = [];
+    this.cuts = []; // cut segments in sheet coordinates: { p: [x, y], q: [x, y] }
+    this.pieceCount = 1;
     this.pickables = [];
     this.W = 0.3;
     this.H = 0.3;
@@ -58,6 +61,7 @@ export class Paper {
     this.creaseColors = {
       flat: new THREE.Color('#3f5bd8'),
       folded: new THREE.Color('#2a2c38'),
+      cut: new THREE.Color('#c43d1a'),
     };
     this.makeMaterials();
   }
@@ -99,6 +103,7 @@ export class Paper {
     this.W = W;
     this.H = H;
     this.flat.makeTranslation(-W / 2, -H / 2, 0);
+    this.cuts = [];
     this.faces = [this.makeFace([[0, 0], [W, 0], [W, H], [0, H]], this.flat.clone(), 0)];
     this.afterTopologyChange();
   }
@@ -169,6 +174,7 @@ export class Paper {
     this.pickables = [];
     for (const f of this.faces) this.pickables.push(f.front, f.back);
     this.computeAdjacency();
+    this.pieceCount = this.pieces().length;
     this.rebuildRibbons();
   }
 
@@ -178,6 +184,7 @@ export class Paper {
     const F = this.faces;
     const boxes = F.map((f) => bbox(f.poly));
     const adj = [];
+    const cutEdges = [];
     for (let i = 0; i < F.length; i++) {
       for (let j = i + 1; j < F.length; j++) {
         const A = boxes[i], B = boxes[j];
@@ -187,12 +194,74 @@ export class Paper {
           const a1 = P[a], b1 = P[(a + 1) % P.length];
           for (let b = 0; b < Q.length; b++) {
             const seg = sharedSegment(a1, b1, Q[b], Q[(b + 1) % Q.length], EDGE_TOL);
-            if (seg) adj.push({ a: F[i], b: F[j], p: seg[0], q: seg[1] });
+            if (!seg) continue;
+            const { keep, cut } = this.subtractCuts(seg[0], seg[1]);
+            for (const [p, q] of keep) adj.push({ a: F[i], b: F[j], p, q });
+            for (const [p, q] of cut) cutEdges.push({ a: F[i], b: F[j], p, q });
           }
         }
       }
     }
     this.adj = adj;
+    this.cutEdges = cutEdges;
+  }
+
+  // Split a shared edge p-q into the parts that are still joined and the
+  // parts that have been cut.
+  subtractCuts(p, q) {
+    const dx = q[0] - p[0], dy = q[1] - p[1];
+    const len = Math.hypot(dx, dy);
+    const ux = dx / len, uy = dy / len;
+    const iv = [];
+    for (const c of this.cuts) {
+      const off = (r) => Math.abs((r[0] - p[0]) * uy - (r[1] - p[1]) * ux);
+      if (off(c.p) > EDGE_TOL || off(c.q) > EDGE_TOL) continue;
+      const ta = (c.p[0] - p[0]) * ux + (c.p[1] - p[1]) * uy;
+      const tb = (c.q[0] - p[0]) * ux + (c.q[1] - p[1]) * uy;
+      const lo = Math.max(0, Math.min(ta, tb)), hi = Math.min(len, Math.max(ta, tb));
+      if (hi - lo > EDGE_TOL) iv.push([lo, hi]);
+    }
+    const at = (t) => [p[0] + ux * t, p[1] + uy * t];
+    if (!iv.length) return { keep: [[p, q]], cut: [] };
+    iv.sort((a, b) => a[0] - b[0]);
+    const merged = [];
+    for (const r of iv) {
+      const last = merged[merged.length - 1];
+      if (last && r[0] <= last[1] + EDGE_TOL) last[1] = Math.max(last[1], r[1]);
+      else merged.push(r.slice());
+    }
+    const keep = [], cut = [];
+    let t = 0;
+    const minLen = EDGE_TOL * 10;
+    for (const [lo, hi] of merged) {
+      if (lo - t > minLen) keep.push([at(t), at(lo)]);
+      cut.push([at(lo), at(hi)]);
+      t = hi;
+    }
+    if (len - t > minLen) keep.push([at(t), at(len)]);
+    return { keep, cut };
+  }
+
+  // Connected pieces of paper (faces joined by uncut edges).
+  pieces() {
+    const nbrs = new Map(this.faces.map((g) => [g, []]));
+    for (const e of this.adj) { nbrs.get(e.a).push(e.b); nbrs.get(e.b).push(e.a); }
+    const seen = new Set();
+    const out = [];
+    for (const f of this.faces) {
+      if (seen.has(f)) continue;
+      const comp = [f];
+      seen.add(f);
+      for (let i = 0; i < comp.length; i++) {
+        for (const h of nbrs.get(comp[i])) if (!seen.has(h)) { seen.add(h); comp.push(h); }
+      }
+      out.push(comp);
+    }
+    return out;
+  }
+
+  pieceOf(face) {
+    return this.pieces().find((c) => c.includes(face)) || [face];
   }
 
   isFlatCrease(e) {
@@ -207,7 +276,13 @@ export class Paper {
       const col = this.isFlatCrease(e) ? this.creaseColors.flat : this.creaseColors.folded;
       for (const f of [e.a, e.b]) {
         if (!perFace.has(f)) perFace.set(f, []);
-        perFace.get(f).push({ p: e.p, q: e.q, col });
+        perFace.get(f).push({ p: e.p, q: e.q, col, w });
+      }
+    }
+    for (const e of this.cutEdges) {
+      for (const f of [e.a, e.b]) {
+        if (!perFace.has(f)) perFace.set(f, []);
+        perFace.get(f).push({ p: e.p, q: e.q, col: this.creaseColors.cut, w: w * 0.7 });
       }
     }
     for (const f of this.faces) {
@@ -226,9 +301,10 @@ export class Paper {
         let nx = -dy / len, ny = dx / len;
         if ((c[0] - s.p[0]) * nx + (c[1] - s.p[1]) * ny < 0) { nx = -nx; ny = -ny; }
         const b = pos.length / 3;
+        const sw = s.w;
         pos.push(
           s.p[0], s.p[1], 0, s.q[0], s.q[1], 0,
-          s.q[0] + nx * w, s.q[1] + ny * w, 0, s.p[0] + nx * w, s.p[1] + ny * w, 0,
+          s.q[0] + nx * sw, s.q[1] + ny * sw, 0, s.p[0] + nx * sw, s.p[1] + ny * sw, 0,
         );
         for (let k = 0; k < 4; k++) col.push(s.col.r, s.col.g, s.col.b);
         // Wind counter-clockwise when seen from +z.
@@ -395,7 +471,11 @@ export class Paper {
       const d = segDist(pt, e.p, e.q);
       if (d < bd) { bd = d; best = e; }
     }
-    if (!best) return { error: 'Draw a crease first, then grab the paper next to it.' };
+    if (!best) {
+      return { error: this.pieceCount > 1
+        ? 'This piece has no crease beside it. Draw one, or use Move to slide the piece.'
+        : 'Draw a crease first, then grab the paper next to it.' };
+    }
 
     const A = this.toLocal(f, best.p[0], best.p[1]);
     const B = this.toLocal(f, best.q[0], best.q[1]);
@@ -430,6 +510,9 @@ export class Paper {
     };
 
     const moving = component(f);
+    if (moving.size >= this.pieceOf(f).length) {
+      return { error: 'This crease does not split this piece. Draw it across the whole piece.' };
+    }
     if (layerMode === 'all') {
       const n = normalOf(f.M);
       const w = new THREE.Vector3().crossVectors(n, u);
@@ -439,12 +522,31 @@ export class Paper {
         return Math.abs(d) < AXIS_TOL ? 0 : Math.sign(d);
       };
       const grabSide = sideOf(f);
-      for (const g of this.faces) {
-        if (moving.has(g) || !this.coplanar(f, g) || sideOf(g) !== grabSide) continue;
-        const comp = component(g);
-        let ok = true;
-        for (const h of comp) if (this.coplanar(f, h) && sideOf(h) === -grabSide) { ok = false; break; }
-        if (ok) for (const h of comp) moving.add(h);
+      // Only layers stacked over or under the grabbed flap come along.
+      const fInv = new THREE.Matrix4().copy(f.M).invert();
+      const proj = new Map();
+      const flat = (g) => {
+        if (!proj.has(g)) {
+          const m = new THREE.Matrix4().multiplyMatrices(fInv, g.M);
+          proj.set(g, g.poly.map((p) => { const q = v3(p).applyMatrix4(m); return [q.x, q.y]; }));
+        }
+        return proj.get(g);
+      };
+      let grew = true;
+      while (grew) {
+        grew = false;
+        for (const g of this.faces) {
+          if (moving.has(g) || !this.coplanar(f, g) || sideOf(g) !== grabSide) continue;
+          let touches = false;
+          for (const h of moving) {
+            if (this.coplanar(f, h) && convexOverlap(flat(g), flat(h), 1e-4)) { touches = true; break; }
+          }
+          if (!touches) continue;
+          const comp = component(g);
+          let ok = true;
+          for (const h of comp) if (this.coplanar(f, h) && sideOf(h) === -grabSide) { ok = false; break; }
+          if (ok) { for (const h of comp) moving.add(h); grew = true; }
+        }
       }
     }
     if (moving.size === this.faces.length) {
@@ -599,6 +701,117 @@ export class Paper {
     }
   }
 
+  // ------------------------------------------------------------- cutting
+
+  // The crease segment nearest a hit, as a 3D line plus the positions along
+  // it where crease segments start and end (for snapping cuts to crossings).
+  creaseLineAt(hit, maxDist) {
+    const f = hit.face;
+    const pt = [hit.x, hit.y];
+    let best = null, bd = maxDist;
+    for (const e of this.adj) {
+      if (e.a !== f && e.b !== f) continue;
+      const d = segDist(pt, e.p, e.q);
+      if (d < bd) { bd = d; best = e; }
+    }
+    if (!best) return null;
+    const P = this.toLocal(f, best.p[0], best.p[1]);
+    const u = this.toLocal(f, best.q[0], best.q[1]).sub(P).normalize();
+    const stops = [];
+    for (const e of [...this.adj, ...this.cutEdges]) {
+      const a = v3(e.p).applyMatrix4(e.a.M), b = v3(e.q).applyMatrix4(e.a.M);
+      if (distToLine(a, P, u) > AXIS_TOL || distToLine(b, P, u) > AXIS_TOL) continue;
+      stops.push(a.sub(P).dot(u), b.sub(P).dot(u));
+    }
+    stops.sort((x, y) => x - y);
+    const G = this.toLocal(f, hit.x, hit.y);
+    const t = G.sub(P).dot(u);
+    // The segment under the hit: the closest pair of stops around t.
+    let lo = -Infinity, hi = Infinity;
+    for (const v of stops) {
+      if (v <= t + 1e-9 && v > lo) lo = v;
+      if (v >= t - 1e-9 && v < hi) hi = v;
+    }
+    const ta = v3(best.p).applyMatrix4(f.M).sub(P).dot(u);
+    const tb = v3(best.q).applyMatrix4(f.M).sub(P).dot(u);
+    if (!isFinite(lo) || !isFinite(hi) || hi - lo < 1e-5) { lo = Math.min(ta, tb); hi = Math.max(ta, tb); }
+    return { P, u, n: normalOf(f.M), stops, t, segment: [lo, hi], face: f };
+  }
+
+  // Cut every joined edge lying on the 3D line P + t u for t in [t0, t1]
+  // (through all layers, like scissors). Returns the number of edges cut.
+  cutAlong(P, u, t0, t1) {
+    const added = [];
+    for (const e of this.adj) {
+      const A = v3(e.p).applyMatrix4(e.a.M), B = v3(e.q).applyMatrix4(e.a.M);
+      if (distToLine(A, P, u) > AXIS_TOL || distToLine(B, P, u) > AXIS_TOL) continue;
+      const ta = A.sub(P).dot(u), tb = B.sub(P).dot(u);
+      if (Math.abs(tb - ta) < 1e-9) continue;
+      const lo = Math.max(Math.min(ta, tb), t0), hi = Math.min(Math.max(ta, tb), t1);
+      if (hi - lo < 1e-5) continue;
+      const at = (t) => {
+        const k = (t - ta) / (tb - ta);
+        return [e.p[0] + (e.q[0] - e.p[0]) * k, e.p[1] + (e.q[1] - e.p[1]) * k];
+      };
+      added.push({ p: at(lo), q: at(hi) });
+    }
+    if (!added.length) return 0;
+    this.cuts.push(...added);
+    this.afterTopologyChange();
+    return added.length;
+  }
+
+  // Lay a piece back down after it was carried: if it ended up close to the
+  // table plane and roughly level, flatten it onto the plane and stack it on
+  // top of whatever it overlaps.
+  settlePiece(piece, M0, off0) {
+    const set = new Set(piece);
+    let c = new THREE.Vector3();
+    let count = 0;
+    for (const f of piece) {
+      const pc = polyCentroid(f.poly);
+      c.add(v3(pc).applyMatrix4(f.M));
+      count++;
+    }
+    c.divideScalar(count);
+    const n = normalOf(piece[0].M);
+    if (Math.abs(n.z) > Math.cos(THREE.MathUtils.degToRad(35)) && Math.abs(c.z) < 0.08) {
+      const q = new THREE.Quaternion().setFromUnitVectors(n, new THREE.Vector3(0, 0, Math.sign(n.z)));
+      const R = new THREE.Matrix4().makeTranslation(c.x, c.y, 0)
+        .multiply(new THREE.Matrix4().makeRotationFromQuaternion(q))
+        .multiply(new THREE.Matrix4().makeTranslation(-c.x, -c.y, -c.z));
+      for (const f of piece) {
+        f.M.premultiply(R);
+        const e = f.M.elements;
+        // Remove rounding so the face counts as lying in the plane.
+        e[2] = e[6] = 0; e[8] = e[9] = 0; e[10] = Math.sign(e[10]); e[14] = 0;
+      }
+    }
+    const BIG = 10;
+    const keyed = [];
+    for (const g of this.faces) {
+      g.off = off0.get(g) ?? g.off;
+      if (!inBase(g.M)) continue;
+      if (!set.has(g)) { keyed.push({ g, key: heightOf(g.M, g.off) }); continue; }
+      const m0 = M0.get(g);
+      const h0 = inBase(m0) ? heightOf(m0, g.off) : 0;
+      const flipped = Math.sign(m0.elements[10]) !== Math.sign(g.M.elements[10]);
+      keyed.push({ g, key: BIG + (flipped ? -h0 : h0) });
+    }
+    this.stack(keyed);
+    this.updateAllMatrices();
+    this.rebuildRibbons();
+  }
+
+  setHighlightFaces(faces, on) {
+    const set = new Set(on ? faces : []);
+    for (const f of this.faces) {
+      const hi = set.has(f);
+      f.front.material = hi ? this.mat.frontHi : this.mat.front;
+      f.back.material = hi ? this.mat.backHi : this.mat.back;
+    }
+  }
+
   unfoldAll() {
     for (const f of this.faces) {
       f.M.copy(this.flat);
@@ -617,6 +830,7 @@ export class Paper {
   serialize() {
     return {
       W: this.W, H: this.H,
+      cuts: this.cuts.map((c) => ({ p: c.p.slice(), q: c.q.slice() })),
       faces: this.faces.map((f) => ({ poly: f.poly.map((p) => [p[0], p[1]]), M: f.M.toArray(), off: f.off })),
     };
   }
@@ -626,6 +840,7 @@ export class Paper {
     this.W = state.W;
     this.H = state.H;
     this.flat.makeTranslation(-this.W / 2, -this.H / 2, 0);
+    this.cuts = (state.cuts || []).map((c) => ({ p: c.p.slice(), q: c.q.slice() }));
     this.faces = state.faces.map((d) => this.makeFace(d.poly.map((p) => [p[0], p[1]]), new THREE.Matrix4().fromArray(d.M), d.off));
     this.afterTopologyChange();
   }

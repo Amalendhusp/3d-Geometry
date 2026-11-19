@@ -62,6 +62,7 @@ export class VRPanel {
     row(84, 96, [
       { label: 'Paint', action: () => a.setTool('paint'), active: s.tool === 'paint' },
       { label: 'Crease', action: () => a.setTool('crease'), active: s.tool === 'crease' },
+      { label: 'Cut', action: () => a.setTool('cut'), active: s.tool === 'cut' },
       { label: 'Fold', action: () => a.setTool('fold'), active: s.tool === 'fold' },
       { label: 'Move', action: () => a.setTool('move'), active: s.tool === 'move' },
     ]);
@@ -82,6 +83,12 @@ export class VRPanel {
         { label: 'Unfold all', action: () => a.unfoldAll() },
       ]);
       B.push({ kind: 'text', x: M, y: 296, w: W, h: 84, label: 'Trigger or pinch on the paper, drag, release. Or draw with your fingertip. The line runs through every layer.' });
+    } else if (s.tool === 'cut') {
+      row(196, 84, [
+        { label: 'Unfold all', action: () => a.unfoldAll() },
+        { label: 'Undo cut', action: () => a.undo() },
+      ]);
+      B.push({ kind: 'text', x: M, y: 296, w: W, h: 84, label: 'Point at a crease and tap to cut that segment, or hold and drag along it. Fingertip works too. Cuts go through every layer.' });
     } else if (s.tool === 'fold') {
       row(196, 84, [
         { label: 'Valley ↑', action: () => a.valley() },
@@ -97,7 +104,9 @@ export class VRPanel {
         { label: 'Flip over', action: () => a.flip() },
         { label: 'Back on table', action: () => a.resetPosition() },
       ]);
-      B.push({ kind: 'text', x: M, y: 296, w: W, h: 84, label: 'Grab the paper with trigger or pinch and move it. Grip (squeeze) carries it in any mode.' });
+      B.push({ kind: 'text', x: M, y: 296, w: W, h: 84, label: this.app.paper.pieceCount > 1
+        ? 'Trigger or pinch a cut-out piece to carry it alone. Grip (squeeze) carries the whole sheet.'
+        : 'Grab the paper with trigger or pinch and move it. Grip (squeeze) carries it in any mode.' });
     }
 
     row(396, 84, [

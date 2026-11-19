@@ -9,6 +9,7 @@ Built with [three.js](https://threejs.org) r170. It's a static site with no buil
 - **Custom sheet:** set width and height in cm (5–150) or use a preset (15 × 15, A4, Letter, and others). You can also pick the front and back colours and the paint resolution.
 - **Paint:** draw on whichever side faces you, including the back of folded flaps. There are 8 colours plus a custom colour picker, an eraser, brush sizes from 1 to 35 mm, and undo.
 - **Crease:** drag a straight line across the sheet. Its ends snap to corners, edge midpoints and crease crossings, and its angle snaps to 22.5° steps. The crease cuts through every layer in the stack, so it works on already-folded paper too.
+- **Cut:** cutting follows crease lines. Tap a crease segment (the part between two crossings) to cut it, or drag along a crease to cut just part of it; the ends snap to crossings. Cuts go through every layer under them, like scissors, so you can make slits for kirigami flaps. Once a piece is cut free, the Move tool carries that piece on its own. On a screen it slides across the table; in VR it follows your hand and settles flat when you put it down.
 - **Fold:** grab the paper next to a crease and swing it to any angle. Near flat, it snaps into a 180° fold. Valley, Mountain, Flatten buttons and an angle slider give exact folds.
   - **All layers** folds every layer on the side you grab.
   - **Top flap** folds only the piece you grab.
@@ -22,11 +23,12 @@ Built with [three.js](https://threejs.org) r170. It's a static site with no buil
 |---|---|---|---|
 | Paint | drag on the sheet | point + hold trigger | touch with index fingertip, or pinch-and-drag |
 | Crease | drag a line | trigger at start, release at end | draw with fingertip, or pinch-drag |
-| Fold | drag a flap next to a crease (swings toward you); tap a flap, then Valley/Mountain | grab a flap with trigger and swing | pinch a flap and move your hand |
-| Move sheet | Move tool orbits the camera | squeeze grip | pinch in Move mode |
+| Cut | tap a crease segment, or drag along a crease | same, with the trigger | touch or pinch on a crease segment, or drag along it |
+| Fold | drag a flap across its crease (folds over toward you); tap a flap, then Valley/Mountain | grab a flap with trigger and swing | pinch a flap and move your hand |
+| Move sheet | Move tool orbits the camera, or slides a cut-out piece | squeeze grip (whole sheet); trigger in Move mode (one cut-out piece) | pinch in Move mode |
 | UI | toolbar | point at the panel + trigger | poke the panel with a fingertip, or pinch-ray |
 
-Keyboard: `1`–`4` or `P` `C` `F` `M` switch tools, `E` toggles the eraser, `[` `]` change the brush size, and `Ctrl/Cmd+Z` undoes.
+Keyboard: `1`–`5` or `P` `C` `X` `F` `M` switch tools, `E` toggles the eraser, `[` `]` change the brush size, and `Ctrl/Cmd+Z` undoes.
 
 ## Run locally
 
@@ -47,7 +49,7 @@ Any static host works too, for example Netlify, Vercel or Cloudflare Pages. Poin
 
 ## Code map
 
-- `src/paper.js`: folding model. Convex faces are split by creases. Adjacency is computed in sheet coordinates, folds are rigid rotations about crease lines, and flat layers are re-stacked after each fold.
+- `src/paper.js`: folding model. Convex faces are split by creases. Adjacency is computed in sheet coordinates minus any cut segments, folds are rigid rotations about crease lines, and flat layers are re-stacked after each fold. Cut pieces are the connected groups of faces.
 - `src/geom2d.js`: polygon helpers (split, clip, overlap, shared edges).
 - `src/paint.js`: front and back paint canvases, with partial texture uploads so painting stays fast in VR.
 - `src/tools.js`: paint, crease, fold and move gestures, shared by every input type.

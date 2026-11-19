@@ -104,7 +104,7 @@
   .value { font-variant-numeric: tabular-nums; min-width: 44px; color: var(--washi); font-size: 13px; }
   .angle input { width: 150px; accent-color: var(--vermilion); }
 
-  .tools { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; padding: 8px; }
+  .tools { display: grid; grid-template-columns: repeat(5, 1fr); gap: 6px; padding: 8px; }
   .tools button { flex-direction: column; gap: 2px; min-height: 54px; font-size: 12px; font-weight: 700; letter-spacing: 0.02em; background: transparent; }
   .tools button:hover { background: var(--ink-2); }
   .tools button[aria-pressed="true"] { background: var(--saffron); color: var(--ink); }
@@ -214,6 +214,11 @@
       <span class="hint">Drag across the sheet. The line cuts through every layer under it.</span>
     </div>
 
+    <div class="context" data-for="cut" hidden>
+      <button class="unfoldBtn">Unfold all</button>
+      <span class="hint">Tap a crease segment to cut it, or drag along a crease to cut part of it. Ends snap to crossings.</span>
+    </div>
+
     <div class="context" data-for="fold" hidden>
       <button id="valleyBtn" disabled title="Fold toward you">Valley ↑</button>
       <button id="mountainBtn" disabled title="Fold away from you">Mountain ↓</button>
@@ -233,12 +238,13 @@
     <div class="context" data-for="move" hidden>
       <button id="flipBtn">Flip over</button>
       <button id="resetViewBtn">Reset view</button>
-      <span class="hint">Drag to orbit · pinch or scroll to zoom · two fingers to pan</span>
+      <span class="hint">Drag a cut-out piece to slide it · drag empty space to orbit · pinch or scroll to zoom</span>
     </div>
 
     <nav class="tools" aria-label="Tools">
       <button data-tool="paint" aria-pressed="true"><svg class="i" viewBox="0 0 24 24"><path d="m14.5 3.5 6 6-8.2 8.2-6-6z"/><path d="M6.3 11.7 3.6 14.4c-1 1-1 2.5 0 3.5l2.5 2.5c1 1 2.5 1 3.5 0l2.7-2.7"/></svg>Paint</button>
       <button data-tool="crease" aria-pressed="false"><svg class="i" viewBox="0 0 24 24"><rect x="3.5" y="3.5" width="17" height="17" rx="1.5"/><path d="M5 19 19 5" stroke-dasharray="2.4 2.4"/></svg>Crease</button>
+      <button data-tool="cut" aria-pressed="false"><svg class="i" viewBox="0 0 24 24"><circle cx="6" cy="6" r="2.6"/><circle cx="6" cy="18" r="2.6"/><path d="M8.2 7.5 20 16.5M8.2 16.5 20 7.5"/></svg>Cut</button>
       <button data-tool="fold" aria-pressed="false"><svg class="i" viewBox="0 0 24 24"><path d="M3.5 20.5v-17h17v9l-8 8z"/><path d="M20.5 12.5h-8v8"/></svg>Fold</button>
       <button data-tool="move" aria-pressed="false"><svg class="i" viewBox="0 0 24 24"><path d="M12 3v18M3 12h18M12 3 9.5 5.5M12 3l2.5 2.5M12 21l-2.5-2.5M12 21l2.5-2.5M3 12l2.5-2.5M3 12l2.5 2.5M21 12l-2.5-2.5M21 12l-2.5 2.5"/></svg>Move</button>
     </nav>
@@ -284,6 +290,8 @@
       <dd>Point and hold the trigger to paint, draw creases or grab a flap. Squeeze the grip to carry the sheet. Use the panel on your left.</dd>
       <dt>VR hand tracking</dt>
       <dd>Touch the sheet with your index finger to paint or draw creases. Pinch near a flap and move your hand to fold it. Pinch from a distance to use the ray. Poke panel buttons with a fingertip.</dd>
+      <dt>Cutting</dt>
+      <dd>Cut follows crease lines. Tap a segment between two crossings to cut it, or drag along a crease to cut just part of it. Cuts go through every layer under them. Once a piece is cut free, the Move tool carries that piece on its own.</dd>
       <dt>Layers</dt>
       <dd>“All” folds every layer on the side you grab. “Top flap” folds only the piece you grab.</dd>
     </dl>
