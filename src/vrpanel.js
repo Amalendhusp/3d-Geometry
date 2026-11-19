@@ -1,0 +1,271 @@
+import * as THREE from 'three';
+
+// A floating control panel for VR, drawn on a canvas. Use it with a
+// controller or hand ray (trigger / pinch) or by poking it with a fingertip.
+
+const PX_W = 1024, PX_H = 768;
+const C = {
+  bg: 'rgba(24, 28, 56, 0.94)',
+  btn: '#2d3468',
+  btnHover: '#3d478a',
+  active: '#f0b44c',
+  activeText: '#1b1e33',
+  text: '#f3f1ea',
+  muted: '#a9aed0',
+  line: 'rgba(255,255,255,0.12)',
+};
+
+export class VRPanel {
+  constructor(app) {
+    this.app = app;
+    this.canvas = document.createElement('canvas');
+    this.canvas.width = PX_W;
+    this.canvas.height = PX_H;
+    this.ctx = this.canvas.getContext('2d');
+    this.texture = new THREE.CanvasTexture(this.canvas);
+    this.texture.colorSpace = THREE.SRGBColorSpace;
+    this.texture.anisotropy = 4;
+    this.width = 0.4;
+    this.height = this.width * PX_H / PX_W;
+    this.mesh = new THREE.Mesh(
+      new THREE.PlaneGeometry(this.width, this.height),
+      new THREE.MeshBasicMaterial({ map: this.texture, transparent: true, toneMapped: false }),
+    );
+    this.mesh.name = 'vr-panel';
+    this.hover = new Map();
+    this.pokes = new Map();
+    this.flash = null;
+    this.buttons = [];
+    this.dirty = true;
+    this.font = '"Zen Kaku Gothic New", system-ui, sans-serif';
+  }
+
+  invalidate() { this.dirty = true; }
+
+  layout() {
+    const s = this.app.state;
+    const a = this.app.actions;
+    const B = [];
+    const M = 24, W = PX_W - 2 * M;
+    const btn = (x, y, w, h, label, action, opts = {}) => B.push({ x, y, w, h, label, action, ...opts });
+    const row = (y, h, items, gap = 12) => {
+      const total = items.reduce((t, it) => t + (it.w || 1), 0);
+      const free = W - gap * (items.length - 1);
+      let x = M;
+      for (const it of items) {
+        const w = Math.round(free * (it.w || 1) / total);
+        btn(x, y, w, h, it.label, it.action, it);
+        x += w + gap;
+      }
+    };
+
+    row(84, 96, [
+      { label: 'Paint', action: () => a.setTool('paint'), active: s.tool === 'paint' },
+      { label: 'Crease', action: () => a.setTool('crease'), active: s.tool === 'crease' },
+      { label: 'Fold', action: () => a.setTool('fold'), active: s.tool === 'fold' },
+      { label: 'Move', action: () => a.setTool('move'), active: s.tool === 'move' },
+    ]);
+
+    if (s.tool === 'paint') {
+      const sw = this.app.palette.map((c) => ({ label: '', swatch: c, action: () => a.setColor(c), active: !s.eraser && s.color === c }));
+      sw.push({ label: 'Eraser', w: 1.4, action: () => a.toggleEraser(), active: s.eraser });
+      row(196, 84, sw, 10);
+      row(296, 84, [
+        { label: '−', action: () => a.brush(-1) },
+        { label: `Brush ${s.brushMM} mm`, w: 2, kind: 'label' },
+        { label: '+', action: () => a.brush(1) },
+        { label: 'Clear paint', w: 2, action: () => a.clearPaint() },
+      ]);
+    } else if (s.tool === 'crease') {
+      row(196, 84, [
+        { label: `Snap ${s.snap ? 'on' : 'off'}`, action: () => a.toggleSnap(), active: s.snap },
+        { label: 'Unfold all', action: () => a.unfoldAll() },
+      ]);
+      B.push({ kind: 'text', x: M, y: 296, w: W, h: 84, label: 'Trigger or pinch on the paper, drag, release. Or draw with your fingertip. The line runs through every layer.' });
+    } else if (s.tool === 'fold') {
+      row(196, 84, [
+        { label: 'Valley ↑', action: () => a.valley() },
+        { label: 'Mountain ↓', action: () => a.mountain() },
+        { label: 'Flatten', action: () => a.flatten() },
+      ]);
+      row(296, 84, [
+        { label: 'All layers', action: () => a.setLayerMode('all'), active: s.layerMode === 'all' },
+        { label: 'Top flap', action: () => a.setLayerMode('top'), active: s.layerMode === 'top' },
+      ]);
+    } else {
+      row(196, 84, [
+        { label: 'Flip over', action: () => a.flip() },
+        { label: 'Back on table', action: () => a.resetPosition() },
+      ]);
+      B.push({ kind: 'text', x: M, y: 296, w: W, h: 84, label: 'Grab the paper with trigger or pinch and move it. Grip (squeeze) carries it in any mode.' });
+    }
+
+    row(396, 84, [
+      { label: 'Undo', action: () => a.undo() },
+      { label: 'Unfold all', action: () => a.unfoldAll() },
+      { label: 'Flip', action: () => a.flip() },
+      { label: 'Recenter', action: () => a.recenter() },
+    ]);
+
+    row(496, 84, [
+      { label: 'W −', action: () => a.draftSize(-5, 0) },
+      { label: `${s.draftW} × ${s.draftH} cm`, w: 2, kind: 'label' },
+      { label: 'W +', action: () => a.draftSize(5, 0) },
+      { label: 'H −', action: () => a.draftSize(0, -5) },
+      { label: 'H +', action: () => a.draftSize(0, 5) },
+      { label: 'New paper', w: 1.6, action: () => a.newPaper() },
+    ], 10);
+
+    B.push({ kind: 'text', x: M, y: 596, w: W - 210, h: 150, label: this.app.statusText || '', status: true });
+    btn(PX_W - M - 196, 676, 196, 70, 'Exit VR', () => a.exitXR());
+    this.buttons = B;
+  }
+
+  draw() {
+    this.layout();
+    const ctx = this.ctx;
+    ctx.clearRect(0, 0, PX_W, PX_H);
+    roundRect(ctx, 0, 0, PX_W, PX_H, 36);
+    ctx.fillStyle = C.bg;
+    ctx.fill();
+    ctx.fillStyle = C.text;
+    ctx.font = `700 36px ${this.font}`;
+    ctx.textBaseline = 'middle';
+    ctx.textAlign = 'left';
+    ctx.fillText('Paper Fold Studio', 28, 46);
+    ctx.font = `500 26px ${this.font}`;
+    ctx.fillStyle = C.muted;
+    ctx.textAlign = 'right';
+    ctx.fillText(`Sheet ${fmt(this.app.paper.W * 100)} × ${fmt(this.app.paper.H * 100)} cm`, PX_W - 28, 46);
+    const hovered = new Set(this.hover.values());
+    for (const b of this.buttons) {
+      if (b.kind === 'text') {
+        ctx.fillStyle = b.status ? C.text : C.muted;
+        ctx.font = `${b.status ? 600 : 500} 27px ${this.font}`;
+        ctx.textAlign = 'left';
+        wrapText(ctx, b.label, b.x + 4, b.y + 20, b.w - 8, 36);
+        continue;
+      }
+      if (b.kind === 'label') {
+        ctx.fillStyle = C.text;
+        ctx.font = `600 28px ${this.font}`;
+        ctx.textAlign = 'center';
+        ctx.fillText(b.label, b.x + b.w / 2, b.y + b.h / 2);
+        continue;
+      }
+      const isFlash = this.flash && this.flash.b === b.label && performance.now() - this.flash.t < 180;
+      roundRect(ctx, b.x, b.y, b.w, b.h, 18);
+      ctx.fillStyle = b.active || isFlash ? C.active : hovered.has(`${b.x},${b.y}`) ? C.btnHover : C.btn;
+      ctx.fill();
+      if (b.swatch) {
+        roundRect(ctx, b.x + 12, b.y + 12, b.w - 24, b.h - 24, 12);
+        ctx.fillStyle = b.swatch;
+        ctx.fill();
+        ctx.strokeStyle = C.line;
+        ctx.lineWidth = 2;
+        ctx.stroke();
+        continue;
+      }
+      ctx.fillStyle = b.active || isFlash ? C.activeText : C.text;
+      ctx.font = `600 30px ${this.font}`;
+      ctx.textAlign = 'center';
+      ctx.fillText(b.label, b.x + b.w / 2, b.y + b.h / 2 + 1);
+    }
+    this.texture.needsUpdate = true;
+    this.dirty = false;
+  }
+
+  update() {
+    if (this.flash && performance.now() - this.flash.t > 200 && !this.flash.done) {
+      this.flash.done = true;
+      this.dirty = true;
+    }
+    if (this.dirty && this.mesh.visible) this.draw();
+  }
+
+  buttonAtLocal(local) {
+    const px = (local.x / this.width + 0.5) * PX_W;
+    const py = (0.5 - local.y / this.height) * PX_H;
+    for (const b of this.buttons) {
+      if (!b.action) continue;
+      if (px >= b.x && px <= b.x + b.w && py >= b.y && py <= b.y + b.h) return b;
+    }
+    return null;
+  }
+
+  // Ray test in world space. Returns { distance, point, button } or null.
+  raycast(ray) {
+    if (!this.mesh.visible) return null;
+    const hits = new THREE.Raycaster(ray.origin, ray.direction, 0, 10).intersectObject(this.mesh, false);
+    if (!hits.length) return null;
+    const local = this.mesh.worldToLocal(hits[0].point.clone());
+    return { distance: hits[0].distance, point: hits[0].point, button: this.buttonAtLocal(local) };
+  }
+
+  setHover(id, button) {
+    const key = button ? `${button.x},${button.y}` : null;
+    const prev = this.hover.get(id) ?? null;
+    if (prev === key) return;
+    if (key) this.hover.set(id, key);
+    else this.hover.delete(id);
+    this.dirty = true;
+  }
+
+  click(button) {
+    if (!button || !button.action) return;
+    this.flash = { b: button.label, t: performance.now() };
+    this.app.haptic?.();
+    button.action();
+    this.dirty = true;
+  }
+
+  // Fingertip poke. Returns true while the finger is engaging the panel.
+  poke(id, tipWorld) {
+    if (!this.mesh.visible) return false;
+    const local = this.mesh.worldToLocal(tipWorld.clone());
+    const inside = Math.abs(local.x) < this.width / 2 && Math.abs(local.y) < this.height / 2;
+    const state = this.pokes.get(id) || { down: false };
+    this.pokes.set(id, state);
+    if (!inside || local.z > 0.08 || local.z < -0.05) {
+      state.down = false;
+      this.setHover(id + ':poke', null);
+      return false;
+    }
+    const b = this.buttonAtLocal(local);
+    this.setHover(id + ':poke', b);
+    if (!state.down && local.z < 0.012) {
+      state.down = true;
+      this.click(b);
+    } else if (state.down && local.z > 0.025) {
+      state.down = false;
+    }
+    return local.z < 0.04;
+  }
+}
+
+function fmt(v) { return Math.round(v * 10) / 10; }
+
+function roundRect(ctx, x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+}
+
+function wrapText(ctx, text, x, y, maxW, lh) {
+  const words = String(text).split(/\s+/);
+  let line = '';
+  let yy = y;
+  for (const w of words) {
+    const test = line ? line + ' ' + w : w;
+    if (ctx.measureText(test).width > maxW && line) {
+      ctx.fillText(line, x, yy);
+      line = w;
+      yy += lh;
+    } else line = test;
+  }
+  if (line) ctx.fillText(line, x, yy);
+}

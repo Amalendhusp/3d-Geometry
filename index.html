@@ -1,0 +1,296 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<title>Paper Fold Studio</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<meta name="description" content="Paint a sheet of paper, draw crease lines and fold it in WebXR with hands, controllers or touch.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Zen+Kaku+Gothic+New:wght@400;500;700&display=swap">
+<style>
+  /* Layout: full-bleed 3D table, ink-coloured control bars float over it (top: sheet + session, bottom: tool dock). */
+  :root {
+    --scene: #e4e0d6;      /* studio wall behind the table */
+    --ink: #181c38;        /* control surfaces */
+    --ink-2: #262c55;      /* raised controls */
+    --ink-3: #36407a;      /* hover */
+    --washi: #f6f3ea;      /* text on ink */
+    --muted: #a7acd0;      /* secondary text */
+    --saffron: #f0b44c;    /* selected state */
+    --vermilion: #e0661d;  /* fold axis, warnings */
+    --line: rgba(246, 243, 234, 0.14);
+    --font-ui: "Zen Kaku Gothic New", "Hiragino Sans", "Segoe UI", system-ui, sans-serif;
+    --r: 14px;
+    color-scheme: light;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: var(--scene);
+    color: var(--washi);
+    font: 500 14px/1.4 var(--font-ui);
+    overflow: hidden;
+    -webkit-tap-highlight-color: transparent;
+    overscroll-behavior: none;
+  }
+  [hidden] { display: none !important; }
+  #stage { position: fixed; inset: 0; }
+  #scene { display: block; width: 100%; height: 100%; touch-action: none; }
+
+  button, input, select { font: inherit; color: inherit; }
+  button {
+    border: 0; border-radius: 10px; background: var(--ink-2); color: var(--washi);
+    min-height: 44px; padding: 0 14px; cursor: pointer; white-space: nowrap;
+    display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+    transition: background-color 120ms ease, color 120ms ease, transform 80ms ease;
+  }
+  button:hover { background: var(--ink-3); }
+  button:active { transform: scale(0.97); }
+  button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px solid var(--saffron); outline-offset: 2px; }
+  button[aria-pressed="true"] { background: var(--saffron); color: var(--ink); }
+  button:disabled { opacity: 0.42; cursor: default; transform: none; }
+  svg.i { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; flex: none; }
+
+  .bar {
+    position: fixed; left: 0; right: 0; z-index: 5; pointer-events: none;
+    padding-left: max(12px, env(safe-area-inset-left, 0px));
+    padding-right: max(12px, env(safe-area-inset-right, 0px));
+  }
+  .bar > * { pointer-events: auto; }
+  .top {
+    top: 0; padding-top: calc(env(safe-area-inset-top, 0px) + 10px);
+    display: flex; justify-content: space-between; align-items: flex-start; gap: 10px;
+  }
+  .brand {
+    display: flex; align-items: center; gap: 10px; min-width: 0;
+    background: var(--ink); border-radius: var(--r); padding: 8px 14px 8px 10px;
+    box-shadow: 0 6px 20px rgba(24, 28, 56, 0.18);
+  }
+  .brand svg { width: 30px; height: 30px; flex: none; }
+  .brand h1 { margin: 0; font-size: 15px; font-weight: 700; letter-spacing: 0.01em; line-height: 1.15; }
+  .brand p { margin: 0; font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .session { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; background: var(--ink); border-radius: var(--r); padding: 6px; box-shadow: 0 6px 20px rgba(24, 28, 56, 0.18); }
+  .session button { min-height: 40px; padding: 0 12px; }
+  #vrBtn { background: var(--saffron); color: var(--ink); font-weight: 700; }
+  #vrBtn.unavailable { background: var(--ink-2); color: var(--muted); }
+  #arBtn { background: var(--washi); color: var(--ink); font-weight: 700; }
+
+  .bottom { bottom: 0; padding-bottom: calc(env(safe-area-inset-bottom, 0px) + 10px); display: flex; justify-content: center; }
+  .dock {
+    width: 100%; max-width: 900px; background: var(--ink); border-radius: 18px;
+    box-shadow: 0 10px 30px rgba(24, 28, 56, 0.25); color-scheme: dark; overflow: hidden;
+  }
+  .context {
+    display: flex; align-items: center; gap: 8px; padding: 10px; overflow-x: auto;
+    border-bottom: 1px solid var(--line); scrollbar-width: none;
+  }
+  .context::-webkit-scrollbar { display: none; }
+  .context .hint { color: var(--muted); font-size: 13px; white-space: nowrap; padding: 0 4px; }
+  .group { display: flex; align-items: center; gap: 6px; flex: none; }
+  .sep { width: 1px; align-self: stretch; background: var(--line); flex: none; margin: 4px 2px; }
+  .label { color: var(--muted); font-size: 12px; letter-spacing: 0.06em; text-transform: uppercase; flex: none; }
+
+  .swatch { width: 36px; min-width: 36px; height: 36px; min-height: 36px; padding: 0; border-radius: 50%; background: var(--c); box-shadow: inset 0 0 0 2px rgba(0,0,0,0.18); flex: none; }
+  .swatch:hover { background: var(--c); transform: scale(1.06); }
+  .swatch[aria-pressed="true"] { background: var(--c); box-shadow: 0 0 0 3px var(--ink), 0 0 0 5px var(--saffron); }
+  .colorpick { position: relative; width: 36px; height: 36px; flex: none; border-radius: 50%; overflow: hidden; background: conic-gradient(#d8452f, #f0a325, #f2d64b, #3f9b5a, #2f74c0, #7a4bb3, #d8452f); }
+  .colorpick input { position: absolute; inset: -6px; width: 48px; height: 48px; opacity: 0; cursor: pointer; }
+  .size { display: flex; align-items: center; gap: 8px; flex: none; }
+  .size input { width: 110px; accent-color: var(--saffron); }
+  #brushDot { width: 28px; height: 28px; display: grid; place-items: center; flex: none; }
+  #brushDot::after { content: ""; width: var(--d, 8px); height: var(--d, 8px); border-radius: 50%; background: var(--c, #fff); box-shadow: 0 0 0 1.5px var(--washi); }
+  .value { font-variant-numeric: tabular-nums; min-width: 44px; color: var(--washi); font-size: 13px; }
+  .angle input { width: 150px; accent-color: var(--vermilion); }
+
+  .tools { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; padding: 8px; }
+  .tools button { flex-direction: column; gap: 2px; min-height: 54px; font-size: 12px; font-weight: 700; letter-spacing: 0.02em; background: transparent; }
+  .tools button:hover { background: var(--ink-2); }
+  .tools button[aria-pressed="true"] { background: var(--saffron); color: var(--ink); }
+  .tools svg.i { width: 22px; height: 22px; }
+
+  #toast {
+    position: fixed; left: 50%; z-index: 6; transform: translate(-50%, 8px);
+    bottom: calc(env(safe-area-inset-bottom, 0px) + 150px);
+    max-width: min(560px, calc(100vw - 32px)); width: max-content;
+    background: rgba(24, 28, 56, 0.92); color: var(--washi); padding: 10px 16px; border-radius: 12px;
+    font-size: 13.5px; text-align: center; text-wrap: balance; pointer-events: none;
+    opacity: 0; transition: opacity 180ms ease, transform 180ms ease;
+  }
+  #toast.show { opacity: 1; transform: translate(-50%, 0); }
+
+  .overlay {
+    position: fixed; inset: 0; z-index: 10; display: grid; place-items: center;
+    background: rgba(24, 28, 56, 0.45);
+    padding: max(16px, env(safe-area-inset-top, 0px)) max(16px, env(safe-area-inset-right, 0px)) max(16px, env(safe-area-inset-bottom, 0px)) max(16px, env(safe-area-inset-left, 0px));
+  }
+  .sheet {
+    width: min(440px, 100%); max-height: 100%; overflow: auto; background: var(--ink); border-radius: 20px;
+    padding: 20px; color-scheme: dark; box-shadow: 0 20px 60px rgba(0,0,0,0.35);
+  }
+  .sheet h2 { margin: 0 0 4px; font-size: 18px; text-wrap: balance; }
+  .sheet p { margin: 0 0 16px; color: var(--muted); font-size: 13px; }
+  .sheet .row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 14px; }
+  .sheet label { display: grid; gap: 6px; font-size: 12px; color: var(--muted); letter-spacing: 0.04em; }
+  .sheet input[type="number"], .sheet select {
+    min-height: 44px; border-radius: 10px; border: 1px solid var(--line); background: var(--ink-2); color: var(--washi);
+    padding: 0 12px; font-variant-numeric: tabular-nums; font-size: 15px; width: 100%;
+  }
+  .sheet input[type="color"] { width: 100%; height: 44px; border: 1px solid var(--line); border-radius: 10px; background: var(--ink-2); padding: 4px; }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 16px; }
+  .chip { min-height: 36px; padding: 0 12px; font-size: 13px; }
+  .actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 6px; }
+  .primary { background: var(--saffron); color: var(--ink); font-weight: 700; }
+  .primary:hover { background: #f5c46b; }
+  .help dl { margin: 0; display: grid; gap: 12px; }
+  .help dt { font-weight: 700; color: var(--saffron); font-size: 13px; letter-spacing: 0.04em; text-transform: uppercase; }
+  .help dd { margin: 4px 0 0; color: var(--washi); font-size: 13.5px; }
+
+  @media (max-width: 640px) {
+    .brand p { display: none; }
+    .brand h1 { font-size: 13px; }
+    .session { flex-wrap: nowrap; }
+    .session button .t { display: none; }
+    .session button { padding: 0 10px; min-width: 40px; }
+    #toast { bottom: calc(env(safe-area-inset-bottom, 0px) + 140px); }
+  }
+  @media (max-width: 440px) {
+    .brand { padding: 8px; }
+    .brand h1 { display: none; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { transition: none !important; }
+  }
+</style>
+<script type="importmap">
+{
+  "imports": {
+    "three": "./vendor/three/three.module.js",
+    "three/addons/": "./vendor/three/jsm/"
+  }
+}
+</script>
+</head>
+<body>
+<div id="stage"></div>
+
+<header class="bar top">
+  <div class="brand">
+    <svg viewBox="0 0 32 32" aria-hidden="true"><path d="M3 3h26v26z" fill="#fbfaf6"/><path d="M3 3v26h26z" fill="#bcd3ee"/><path d="M3 3l26 26" stroke="#181c38" stroke-width="1.2" stroke-dasharray="2 2"/></svg>
+    <div><h1>Paper Fold Studio</h1><p id="sheetLabel">30 × 30 cm sheet</p></div>
+  </div>
+  <div class="session">
+    <button id="undoBtn" title="Undo (Ctrl+Z)"><svg class="i" viewBox="0 0 24 24"><path d="M9 7H4V2"/><path d="M4.6 7A8 8 0 1 1 4 13"/></svg><span class="t">Undo</span></button>
+    <button id="paperBtn" title="Sheet size and colours"><svg class="i" viewBox="0 0 24 24"><rect x="5" y="3" width="14" height="18" rx="1.5"/><path d="M8 8h8M8 12h8M8 16h5"/></svg><span class="t">Sheet</span></button>
+    <button id="helpBtn" title="How to use"><svg class="i" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M9.6 9.2a2.5 2.5 0 1 1 3.4 2.4c-.7.3-1 .9-1 1.6v.6"/><path d="M12 17h.01"/></svg><span class="t">Help</span></button>
+    <button id="arBtn" hidden><span class="t">Enter&nbsp;</span>AR</button>
+    <button id="vrBtn"><svg class="i" viewBox="0 0 24 24"><path d="M3 8.5h18v7a1.5 1.5 0 0 1-1.5 1.5h-4.2l-2-2.6h-2.6l-2 2.6H4.5A1.5 1.5 0 0 1 3 15.5z"/></svg><span><span class="t">Enter&nbsp;</span>VR</span></button>
+  </div>
+</header>
+
+<div id="toast" role="status" aria-live="polite"></div>
+
+<footer class="bar bottom">
+  <div class="dock">
+    <div class="context" data-for="paint">
+      <div class="group" id="swatches"></div>
+      <label class="colorpick" title="Custom colour"><input id="customColor" type="color" value="#d8452f" aria-label="Custom colour"></label>
+      <button id="eraserBtn" aria-pressed="false"><svg class="i" viewBox="0 0 24 24"><path d="M8.5 19.5 3.8 14.8a1.6 1.6 0 0 1 0-2.3l8.7-8.7a1.6 1.6 0 0 1 2.3 0l5.4 5.4a1.6 1.6 0 0 1 0 2.3l-8 8z"/><path d="M8.5 19.5H20M9 9.5l6 6"/></svg>Eraser</button>
+      <span class="sep"></span>
+      <div class="size">
+        <span id="brushDot"></span>
+        <input id="brushSize" type="range" min="1" max="35" step="1" value="5" aria-label="Brush size in millimetres">
+        <span class="value" id="brushLabel">5 mm</span>
+      </div>
+      <span class="sep"></span>
+      <button id="clearPaintBtn">Clear paint</button>
+    </div>
+
+    <div class="context" data-for="crease" hidden>
+      <button id="snapBtn" aria-pressed="true">Snap on</button>
+      <button id="removeCreasesBtn">Remove creases</button>
+      <button class="unfoldBtn">Unfold all</button>
+      <span class="hint">Drag across the sheet. The line cuts through every layer under it.</span>
+    </div>
+
+    <div class="context" data-for="fold" hidden>
+      <button id="valleyBtn" disabled title="Fold toward you">Valley ↑</button>
+      <button id="mountainBtn" disabled title="Fold away from you">Mountain ↓</button>
+      <button id="flattenBtn" disabled>Flatten</button>
+      <div class="size angle">
+        <input id="foldAngle" type="range" min="-180" max="180" step="1" value="0" disabled aria-label="Fold angle in degrees">
+        <span class="value" id="foldAngleLabel">0°</span>
+      </div>
+      <span class="sep"></span>
+      <span class="label">Layers</span>
+      <button data-layers="all" aria-pressed="true">All</button>
+      <button data-layers="top" aria-pressed="false">Top flap</button>
+      <button class="unfoldBtn">Unfold all</button>
+      <span class="hint" id="foldHint">Drag a flap next to a crease, or tap it to select.</span>
+    </div>
+
+    <div class="context" data-for="move" hidden>
+      <button id="flipBtn">Flip over</button>
+      <button id="resetViewBtn">Reset view</button>
+      <span class="hint">Drag to orbit · pinch or scroll to zoom · two fingers to pan</span>
+    </div>
+
+    <nav class="tools" aria-label="Tools">
+      <button data-tool="paint" aria-pressed="true"><svg class="i" viewBox="0 0 24 24"><path d="m14.5 3.5 6 6-8.2 8.2-6-6z"/><path d="M6.3 11.7 3.6 14.4c-1 1-1 2.5 0 3.5l2.5 2.5c1 1 2.5 1 3.5 0l2.7-2.7"/></svg>Paint</button>
+      <button data-tool="crease" aria-pressed="false"><svg class="i" viewBox="0 0 24 24"><rect x="3.5" y="3.5" width="17" height="17" rx="1.5"/><path d="M5 19 19 5" stroke-dasharray="2.4 2.4"/></svg>Crease</button>
+      <button data-tool="fold" aria-pressed="false"><svg class="i" viewBox="0 0 24 24"><path d="M3.5 20.5v-17h17v9l-8 8z"/><path d="M20.5 12.5h-8v8"/></svg>Fold</button>
+      <button data-tool="move" aria-pressed="false"><svg class="i" viewBox="0 0 24 24"><path d="M12 3v18M3 12h18M12 3 9.5 5.5M12 3l2.5 2.5M12 21l-2.5-2.5M12 21l2.5-2.5M3 12l2.5-2.5M3 12l2.5 2.5M21 12l-2.5-2.5M21 12l-2.5 2.5"/></svg>Move</button>
+    </nav>
+  </div>
+</footer>
+
+<div class="overlay" id="sheetDialog" hidden>
+  <form class="sheet" id="sheetForm" aria-labelledby="sheetTitle">
+    <h2 id="sheetTitle">New sheet</h2>
+    <p>Creating a sheet clears the current paint and creases.</p>
+    <div class="row">
+      <label for="paperW">Width (cm)<input id="paperW" type="number" min="5" max="150" step="0.1" value="30" inputmode="decimal"></label>
+      <label for="paperH">Height (cm)<input id="paperH" type="number" min="5" max="150" step="0.1" value="30" inputmode="decimal"></label>
+    </div>
+    <div class="chips" id="presets" aria-label="Presets"></div>
+    <div class="row">
+      <label for="frontColor">Front colour<input id="frontColor" type="color" value="#fbfaf6"></label>
+      <label for="backColor">Back colour<input id="backColor" type="color" value="#bcd3ee"></label>
+    </div>
+    <div class="row">
+      <label for="detail">Paint detail
+        <select id="detail">
+          <option value="1024">Standard (1024 px)</option>
+          <option value="2048">High (2048 px)</option>
+        </select>
+      </label>
+    </div>
+    <div class="actions">
+      <button type="button" id="sheetCancel">Cancel</button>
+      <button type="submit" class="primary">Create sheet</button>
+    </div>
+  </form>
+</div>
+
+<div class="overlay" id="helpDialog" hidden>
+  <div class="sheet help" role="dialog" aria-labelledby="helpTitle">
+    <h2 id="helpTitle">How to fold</h2>
+    <p>Paint the sheet, draw a crease, then swing the paper over it.</p>
+    <dl>
+      <dt>Phone or desktop</dt>
+      <dd>Paint: drag on the sheet. Crease: drag a line; its ends snap to corners, midpoints and crossings. Fold: drag the paper next to a crease and it swings toward you; or tap a flap, then press Valley or Mountain. Drag empty space to orbit.</dd>
+      <dt>VR controllers</dt>
+      <dd>Point and hold the trigger to paint, draw creases or grab a flap. Squeeze the grip to carry the sheet. Use the panel on your left.</dd>
+      <dt>VR hand tracking</dt>
+      <dd>Touch the sheet with your index finger to paint or draw creases. Pinch near a flap and move your hand to fold it. Pinch from a distance to use the ray. Poke panel buttons with a fingertip.</dd>
+      <dt>Layers</dt>
+      <dd>“All” folds every layer on the side you grab. “Top flap” folds only the piece you grab.</dd>
+    </dl>
+    <div class="actions"><button type="button" class="primary" id="helpClose">Got it</button></div>
+  </div>
+</div>
+
+<script type="module" src="./src/main.js"></script>
+</body>
+</html>
