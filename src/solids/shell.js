@@ -1,0 +1,600 @@
+import * as THREE from 'three';
+
+// A shell is the exterior surface of a composition, made of rigid panels.
+//
+//  - Panels come from the faces of the solids. A face that exactly meets a
+//    face of another solid (same vertices, opposite normals) is internal: both
+//    are dropped and never come back while the composition is unchanged.
+//  - Panels keep their rest polygon (closed form, composition frame) and a
+//    rigid matrix M that places them in their current pose.
+//  - An edge shared by exactly two panels is either a 'hinge' (the panels
+//    stay joined and can only rotate about it) or a 'cut'. Edges shared by
+//    more than two panels are always cut (locked).
+//  - Each connected group of panels has a base panel that never moves.
+
+const Q = 1e5; // 10 µm vertex quantisation
+const vkey = (v) => `${Math.round(v.x * Q)},${Math.round(v.y * Q)},${Math.round(v.z * Q)}`;
+const ekey = (a, b) => { const ka = vkey(a), kb = vkey(b); return ka < kb ? `${ka}|${kb}` : `${kb}|${ka}`; };
+
+const _v = new THREE.Vector3();
+const _w = new THREE.Vector3();
+const _m = new THREE.Matrix4();
+
+export class Shell {
+  constructor() {
+    this.panels = [];
+    this.edges = [];
+    this.internal = [];
+    this.bases = new Set();
+    this.edgeLen = 0.12;
+  }
+
+  // ------------------------------------------------------------ building
+
+  build(composition) {
+    const faces = composition.solids.flatMap((s) => s.worldFaces());
+    this.edgeLen = composition.solids.length ? Math.min(...composition.solids.map((s) => s.edge)) : 0.12;
+    const byKey = new Map();
+    for (const f of faces) {
+      const k = f.verts.map(vkey).sort().join(';');
+      if (!byKey.has(k)) byKey.set(k, []);
+      byKey.get(k).push(f);
+    }
+    const removed = new Set();
+    this.internal = [];
+    for (const list of byKey.values()) {
+      for (let i = 0; i < list.length; i++) {
+        for (let j = i + 1; j < list.length; j++) {
+          const a = list[i], b = list[j];
+          if (removed.has(a) || removed.has(b) || a.solid === b.solid) continue;
+          if (a.normal.dot(b.normal) < -0.999) {
+            removed.add(a); removed.add(b);
+            this.internal.push({ a: `${a.solid.id}:${a.fi}`, b: `${b.solid.id}:${b.fi}`, verts: a.verts.map((v) => v.clone()) });
+          }
+        }
+      }
+    }
+    this.panels = faces.filter((f) => !removed.has(f)).map((f) => ({
+      id: `${f.solid.id}:${f.fi}`,
+      solidId: f.solid.id,
+      fi: f.fi,
+      verts: f.verts,
+      normal: f.normal,
+      centroid: f.centroid,
+      M: new THREE.Matrix4(),
+      edges: [],
+    }));
+    const map = new Map();
+    for (const p of this.panels) {
+      const n = p.verts.length;
+      for (let i = 0; i < n; i++) {
+        const a = p.verts[i], b = p.verts[(i + 1) % n];
+        const k = ekey(a, b);
+        if (!map.has(k)) map.set(k, { key: k, a: a.clone(), b: b.clone(), uses: [], type: 'cut', locked: false });
+        const e = map.get(k);
+        e.uses.push({ panel: p, i });
+        p.edges[i] = e;
+      }
+    }
+    this.edges = [...map.values()];
+    for (const e of this.edges) {
+      e.shared = e.uses.length === 2;
+      e.locked = e.uses.length > 2;
+      e.type = 'cut';
+    }
+    this.panelById = new Map(this.panels.map((p) => [p.id, p]));
+    this.chooseBases();
+  }
+
+  other(e, p) {
+    if (!e.shared) return null;
+    return e.uses[0].panel === p ? e.uses[1].panel : e.uses[0].panel;
+  }
+
+  // Panels joined by any shared edge (a separate group per detached shell).
+  pieces() {
+    return components(this.panels, (p) => p.edges.filter((e) => e.shared).map((e) => this.other(e, p)));
+  }
+
+  chooseBases() {
+    this.bases = new Set();
+    for (const comp of this.pieces()) {
+      let best = null, bs = Infinity;
+      for (const p of comp) {
+        const s = p.normal.y * 10 + p.centroid.y;
+        if (s < bs - 1e-9) { bs = s; best = p; }
+      }
+      this.bases.add(best.id);
+    }
+  }
+
+  setBase(panel) {
+    const comp = this.pieces().find((c) => c.includes(panel));
+    for (const p of comp) this.bases.delete(p.id);
+    this.bases.add(panel.id);
+  }
+
+  isBase(p) { return this.bases.has(p.id); }
+
+  // ------------------------------------------------------------ geometry
+
+  // Rest-frame hinge axis for panel P on edge e, oriented so that a positive
+  // angle swings P outward (toward its outside normal).
+  axis(e, P) {
+    const u = e.b.clone().sub(e.a).normalize();
+    const v = P.centroid.clone().sub(e.a);
+    v.addScaledVector(u, -v.dot(u)).normalize();
+    if (new THREE.Vector3().crossVectors(u, v).dot(P.normal) < 0) u.negate();
+    return { a: e.a, u, v };
+  }
+
+  // Current angle of P relative to Q about their shared edge (0 = closed).
+  angle(e, P, Q) {
+    const { u, v } = this.axis(e, P);
+    const rel = _m.copy(Q.M).invert().multiply(P.M);
+    const w = v.clone().transformDirection(rel);
+    return Math.atan2(new THREE.Vector3().crossVectors(u, v).dot(w), v.dot(w));
+  }
+
+  // Interior dihedral angle at rest between P and Q (pi = coplanar).
+  interior(e, P, Q) {
+    const vp = this.axis(e, P).v, vq = this.axis(e, Q).v;
+    const phi = Math.acos(THREE.MathUtils.clamp(vp.dot(vq), -1, 1));
+    if (Math.abs(Math.PI - phi) < 1e-6) return Math.PI;
+    return vp.dot(Q.normal) < 0 ? phi : 2 * Math.PI - phi;
+  }
+
+  // Angle of P relative to Q that lays P flat in Q's plane.
+  flatAngle(e, P, Q) { return Math.PI - this.interior(e, P, Q); }
+
+  restRotation(e, P, ang) {
+    const { a, u } = this.axis(e, P);
+    return new THREE.Matrix4().makeTranslation(a.x, a.y, a.z)
+      .multiply(new THREE.Matrix4().makeRotationAxis(u, ang))
+      .multiply(new THREE.Matrix4().makeTranslation(-a.x, -a.y, -a.z));
+  }
+
+  // Do the two panels on e currently meet along it?
+  intact(e) {
+    if (!e.shared) return false;
+    const [ua, ub] = e.uses;
+    const tol = this.edgeLen * 1e-3;
+    return e.a.clone().applyMatrix4(ua.panel.M).distanceTo(_v.copy(e.a).applyMatrix4(ub.panel.M)) < tol
+      && e.b.clone().applyMatrix4(ua.panel.M).distanceTo(_w.copy(e.b).applyMatrix4(ub.panel.M)) < tol;
+  }
+
+  worldPoly(p) { return p.verts.map((v) => v.clone().applyMatrix4(p.M)); }
+  worldNormal(p) { return p.normal.clone().transformDirection(p.M); }
+
+  // --------------------------------------------------------------- hinges
+
+  hingeNeighbours(p, except = null) {
+    const out = [];
+    for (const e of p.edges) {
+      if (e === except || e.type !== 'hinge' || !e.shared) continue;
+      out.push(this.other(e, p));
+    }
+    return out;
+  }
+
+  hingeComponent(p, except = null) {
+    const seen = new Set([p]);
+    const stack = [p];
+    while (stack.length) {
+      const q = stack.pop();
+      for (const r of this.hingeNeighbours(q, except)) if (!seen.has(r)) { seen.add(r); stack.push(r); }
+    }
+    return seen;
+  }
+
+  // The panel that stays put in a hinge-connected group.
+  rootOf(comp) {
+    for (const p of comp) if (this.bases.has(p.id)) return p;
+    let best = null;
+    for (const p of comp) {
+      const y = p.centroid.clone().applyMatrix4(p.M).y;
+      if (!best || y < best.y - 1e-9 || (Math.abs(y - best.y) < 1e-9 && p.id < best.p.id)) best = { p, y };
+    }
+    return best.p;
+  }
+
+  // What would swing if P turns about edge e.
+  // mode 'group': P and everything hinged beyond it; 'one': P alone.
+  plan(P, e, mode) {
+    const Q = this.other(e, P);
+    if (!Q) return { error: 'That edge is not shared with another panel.' };
+    if (e.locked) return { error: 'More than two panels meet at this edge, so it stays cut.' };
+    if (!this.intact(e)) return { error: 'These panels are apart. Refold them before hinging this edge.' };
+    if (mode === 'one') {
+      if (this.isBase(P)) return { error: 'The base panel stays in place. Pick another panel, or set a new base.' };
+      return { P, Q, e, mode, moving: [P] };
+    }
+    if (e.type !== 'hinge') return { error: 'That edge is cut. Make it a hinge, or use One panel.' };
+    const side = this.hingeComponent(P, e);
+    if (side.has(Q)) {
+      return { error: 'These hinges form a closed loop, so the panel cannot swing. Cut one edge of the loop, or use One panel.', loop: this.loopEdges(P, Q, e) };
+    }
+    const root = this.rootOf(this.hingeComponent(P));
+    if (side.has(root)) {
+      return { error: 'That side holds the base panel. Choose a panel on the other side, or set a new base.' };
+    }
+    return { P, Q, e, mode, moving: [...side] };
+  }
+
+  // Hinges that, together with e, form a loop through P and Q.
+  loopEdges(P, Q, e) {
+    const prev = new Map([[P, null]]);
+    const queue = [P];
+    while (queue.length) {
+      const p = queue.shift();
+      if (p === Q) break;
+      for (const f of p.edges) {
+        if (f === e || f.type !== 'hinge' || !f.shared) continue;
+        const r = this.other(f, p);
+        if (!prev.has(r)) { prev.set(r, { p, f }); queue.push(r); }
+      }
+    }
+    const out = [e];
+    let cur = Q;
+    while (prev.get(cur)) { out.push(prev.get(cur).f); cur = prev.get(cur).p; }
+    return out;
+  }
+
+  // Hinge choices for a selected panel, each with whether it can be used.
+  hingeOptions(P, mode) {
+    const out = [];
+    for (const e of P.edges) {
+      if (!e.shared) continue;
+      if (mode === 'group' && e.type !== 'hinge') continue;
+      const plan = this.plan(P, e, mode);
+      out.push({ e, ok: !plan.error, reason: plan.error || null });
+    }
+    return out;
+  }
+
+  // Make e the only joined edge of P (One panel mode).
+  isolate(P, e) {
+    for (const f of P.edges) {
+      if (!f.shared || f.locked) continue;
+      f.type = f === e ? 'hinge' : 'cut';
+    }
+  }
+
+  // Rotate a planned group so that P sits at angle `ang` relative to Q.
+  setAngle(plan, ang) {
+    const { P, Q, e, moving } = plan;
+    const delta = ang - this.angle(e, P, Q);
+    if (Math.abs(delta) < 1e-12) return;
+    const { a, u } = this.axis(e, P);
+    const A = a.clone().applyMatrix4(Q.M);
+    const U = u.clone().transformDirection(Q.M);
+    const R = new THREE.Matrix4().makeTranslation(A.x, A.y, A.z)
+      .multiply(new THREE.Matrix4().makeRotationAxis(U, delta))
+      .multiply(new THREE.Matrix4().makeTranslation(-A.x, -A.y, -A.z));
+    for (const p of moving) p.M.premultiply(R);
+  }
+
+  // ----------------------------------------------------- whole-net motion
+
+  // Spanning forest of the hinge graph: parent links from each root, plus
+  // hinges that close loops.
+  forest() {
+    const parent = new Map();
+    const order = [];
+    const roots = [];
+    const loops = new Set();
+    const seen = new Set();
+    for (const p0 of this.panels) {
+      if (seen.has(p0)) continue;
+      const root = this.rootOf(this.hingeComponent(p0));
+      roots.push(root);
+      seen.add(root);
+      const queue = [root];
+      order.push(root);
+      while (queue.length) {
+        const p = queue.shift();
+        for (const e of p.edges) {
+          if (e.type !== 'hinge' || !e.shared) continue;
+          const q = this.other(e, p);
+          if (!seen.has(q)) {
+            seen.add(q);
+            parent.set(q, { parent: p, e });
+            order.push(q);
+            queue.push(q);
+          } else if (parent.get(p)?.e !== e) {
+            loops.add(e);
+          }
+        }
+      }
+    }
+    return { parent, order, roots, loops: [...loops] };
+  }
+
+  // Current hinge angles of the forest (child relative to parent).
+  forestAngles(F) {
+    const ang = new Map();
+    for (const [c, { parent, e }] of F.parent) ang.set(c, this.angle(e, c, parent));
+    return ang;
+  }
+
+  // Pose every panel from root matrices and hinge angles.
+  applyForest(F, angles, rootMs) {
+    for (const p of F.order) {
+      const link = F.parent.get(p);
+      if (!link) {
+        if (rootMs && rootMs.has(p)) p.M.copy(rootMs.get(p));
+        continue;
+      }
+      p.M.multiplyMatrices(link.parent.M, this.restRotation(link.e, p, angles.get(p)));
+    }
+  }
+
+  flatAngles(F) {
+    const ang = new Map();
+    for (const [c, { parent, e }] of F.parent) ang.set(c, this.flatAngle(e, c, parent));
+    return ang;
+  }
+
+  // ------------------------------------------------------------ the net
+
+  sharedEdges() { return this.edges.filter((e) => e.shared && !e.locked); }
+
+  setLayout(hingeSet) {
+    for (const e of this.edges) if (e.shared && !e.locked) e.type = hingeSet.has(e) ? 'hinge' : 'cut';
+  }
+
+  isCoplanar(e) { return Math.abs(this.interior(e, e.uses[0].panel, e.uses[1].panel) - Math.PI) < 1e-6; }
+
+  // How many panel pairs overlap if the current layout is unfolded flat
+  // from the closed form. The shell is left as it was.
+  flatOverlaps() {
+    const saved = this.panels.map((p) => p.M.clone());
+    for (const p of this.panels) p.M.identity();
+    const F = this.forest();
+    this.applyForest(F, this.flatAngles(F));
+    const res = this.overlaps();
+    this.panels.forEach((p, i) => p.M.copy(saved[i]));
+    return { pairs: res.pairs.length, loops: F.loops.length, pieces: F.roots.length };
+  }
+
+  // Default cut-and-hinge layout: a spanning tree of each piece whose flat
+  // unfolding has no overlapping panels. Tries breadth-first trees first,
+  // then random trees that prefer keeping coplanar panels joined.
+  defaultNet(maxTries = 400) {
+    const edges = this.sharedEdges();
+    const pieces = this.pieces();
+    const savedTypes = this.edges.map((e) => e.type);
+    let best = null;
+    const rng = mulberry32(7);
+    const tryTree = (hinges) => {
+      this.setLayout(hinges);
+      const r = this.flatOverlaps();
+      const score = r.pairs;
+      if (!best || score < best.score) best = { score, hinges: new Set(hinges) };
+      return score === 0;
+    };
+    const bfsTree = (prefer) => {
+      const hinges = new Set();
+      for (const comp of pieces) {
+        const root = comp.find((p) => this.isBase(p)) || comp[0];
+        const seen = new Set([root]);
+        const queue = [root];
+        while (queue.length) {
+          const p = queue.shift();
+          const es = p.edges.filter((e) => e.shared && !e.locked).sort(prefer);
+          for (const e of es) {
+            const q = this.other(e, p);
+            if (seen.has(q)) continue;
+            seen.add(q);
+            hinges.add(e);
+            queue.push(q);
+          }
+        }
+      }
+      return hinges;
+    };
+    const coplanarFirst = (a, b) => (this.isCoplanar(b) ? 1 : 0) - (this.isCoplanar(a) ? 1 : 0);
+    let found = tryTree(bfsTree(coplanarFirst)) || tryTree(bfsTree(() => 0));
+    for (let k = 0; !found && k < maxTries; k++) {
+      const w = new Map(edges.map((e) => [e, rng() - (this.isCoplanar(e) ? 0.6 : 0)]));
+      const sorted = edges.slice().sort((a, b) => w.get(a) - w.get(b));
+      const uf = new Map(this.panels.map((p) => [p, p]));
+      const find = (p) => { while (uf.get(p) !== p) { uf.set(p, uf.get(uf.get(p))); p = uf.get(p); } return p; };
+      const hinges = new Set();
+      for (const e of sorted) {
+        const a = find(e.uses[0].panel), b = find(e.uses[1].panel);
+        if (a === b) continue;
+        uf.set(a, b);
+        hinges.add(e);
+      }
+      found = tryTree(hinges);
+    }
+    if (best) this.setLayout(best.hinges);
+    else this.edges.forEach((e, i) => { e.type = savedTypes[i]; });
+    return { ok: !!best && best.score === 0, overlaps: best ? best.score : 0 };
+  }
+
+  // -------------------------------------------------------- intersections
+
+  // Pairs of panels that pass through each other or overlap in a plane.
+  // Contact along shared edges and at corners does not count.
+  overlaps() {
+    const inset = this.edgeLen * 0.02;
+    const polys = this.panels.map((p) => {
+      const w = this.worldPoly(p);
+      const c = w.reduce((a, v) => a.add(v), new THREE.Vector3()).divideScalar(w.length);
+      const shrunk = w.map((v) => {
+        const d = v.clone().sub(c);
+        const len = d.length();
+        return c.clone().addScaledVector(d, Math.max(0, len - inset) / len);
+      });
+      let r = 0;
+      for (const v of shrunk) r = Math.max(r, v.distanceTo(c));
+      return { poly: shrunk, c, r, n: this.worldNormal(p) };
+    });
+    const pairs = [];
+    const hit = new Set();
+    for (let i = 0; i < polys.length; i++) {
+      for (let j = i + 1; j < polys.length; j++) {
+        const A = polys[i], B = polys[j];
+        if (A.c.distanceTo(B.c) > A.r + B.r + 1e-6) continue;
+        if (polysIntersect(A, B, this.edgeLen * 2e-3)) {
+          pairs.push([this.panels[i], this.panels[j]]);
+          hit.add(this.panels[i]); hit.add(this.panels[j]);
+        }
+      }
+    }
+    return { pairs, panels: hit };
+  }
+
+  // ---------------------------------------------------------- statistics
+
+  stats() {
+    const shared = this.sharedEdges();
+    const hinges = shared.filter((e) => e.type === 'hinge').length;
+    const F = this.forest();
+    return {
+      panels: this.panels.length,
+      removed: this.internal.length * 2,
+      hinges,
+      cuts: shared.length - hinges,
+      locked: this.edges.filter((e) => e.locked).length,
+      loops: F.loops.length,
+      groups: F.roots.length,
+      pieces: this.pieces().length,
+    };
+  }
+
+  isClosed() { return this.panels.every((p) => isIdentity(p.M)); }
+
+  // ------------------------------------------------------- serialization
+
+  serialize() {
+    return {
+      types: Object.fromEntries(this.edges.filter((e) => e.shared).map((e) => [e.key, e.type])),
+      M: Object.fromEntries(this.panels.map((p) => [p.id, p.M.toArray()])),
+      bases: [...this.bases],
+    };
+  }
+
+  restore(data) {
+    if (!data) return;
+    for (const e of this.edges) if (e.shared && !e.locked && data.types[e.key]) e.type = data.types[e.key];
+    for (const p of this.panels) if (data.M[p.id]) p.M.fromArray(data.M[p.id]);
+    if (data.bases) {
+      const ids = data.bases.filter((id) => this.panelById.has(id));
+      if (ids.length) {
+        this.bases = new Set(ids);
+        for (const comp of this.pieces()) if (!comp.some((p) => this.bases.has(p.id))) this.chooseBasesFor(comp);
+      }
+    }
+  }
+
+  chooseBasesFor(comp) {
+    let best = null, bs = Infinity;
+    for (const p of comp) {
+      const s = p.normal.y * 10 + p.centroid.y;
+      if (s < bs) { bs = s; best = p; }
+    }
+    this.bases.add(best.id);
+  }
+}
+
+// ---------------------------------------------------------------- helpers
+
+function components(nodes, nbrs) {
+  const seen = new Set();
+  const out = [];
+  for (const n of nodes) {
+    if (seen.has(n)) continue;
+    const comp = [n];
+    seen.add(n);
+    for (let i = 0; i < comp.length; i++) {
+      for (const m of nbrs(comp[i])) if (m && !seen.has(m)) { seen.add(m); comp.push(m); }
+    }
+    out.push(comp);
+  }
+  return out;
+}
+
+function isIdentity(M) {
+  const e = M.elements;
+  const I = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
+  for (let i = 0; i < 16; i++) if (Math.abs(e[i] - I[i]) > 1e-6) return false;
+  return true;
+}
+
+function mulberry32(a) {
+  return () => {
+    a |= 0; a = (a + 0x6d2b79f5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+// Do two (already inset) convex planar polygons intersect?
+function polysIntersect(A, B, tol) {
+  const nA = A.n, nB = B.n;
+  const coplanar = Math.abs(nA.dot(nB)) > 0.9995 && Math.abs(B.c.clone().sub(A.c).dot(nA)) < tol;
+  if (coplanar) return overlap2D(A.poly, B.poly, nA, tol);
+  if (Math.abs(nA.dot(nB)) > 0.9995) return false; // parallel planes
+  return crosses(A, B, tol) || crosses(B, A, tol);
+}
+
+// Does polygon A cut through the interior of polygon B?
+function crosses(A, B, tol) {
+  const d = A.poly.map((v) => v.clone().sub(B.c).dot(B.n));
+  const pts = [];
+  for (let i = 0; i < d.length; i++) {
+    const j = (i + 1) % d.length;
+    if (Math.abs(d[i]) < 1e-9) pts.push(A.poly[i].clone());
+    if ((d[i] > 1e-9 && d[j] < -1e-9) || (d[i] < -1e-9 && d[j] > 1e-9)) {
+      const t = d[i] / (d[i] - d[j]);
+      pts.push(A.poly[i].clone().lerp(A.poly[j], t));
+    }
+  }
+  if (pts.length < 2) return false;
+  let p = pts[0], q = pts[1];
+  for (const r of pts) { if (r.distanceTo(p) > q.distanceTo(p)) q = r; }
+  // Clip segment p-q to polygon B (in B's plane).
+  let t0 = 0, t1 = 1;
+  const dir = q.clone().sub(p);
+  const n = B.poly.length;
+  for (let i = 0; i < n; i++) {
+    const a = B.poly[i], b = B.poly[(i + 1) % n];
+    const edge = b.clone().sub(a);
+    const inward = new THREE.Vector3().crossVectors(B.n, edge).normalize();
+    // Make it point toward B's centre.
+    if (inward.dot(B.c.clone().sub(a)) < 0) inward.negate();
+    const num = p.clone().sub(a).dot(inward);
+    const den = dir.dot(inward);
+    if (Math.abs(den) < 1e-12) { if (num < 0) return false; continue; }
+    const t = -num / den;
+    if (den > 0) t0 = Math.max(t0, t); else t1 = Math.min(t1, t);
+    if (t0 > t1) return false;
+  }
+  return (t1 - t0) * dir.length() > tol;
+}
+
+function overlap2D(P, R, n, tol) {
+  const ax = Math.abs(n.x) < 0.9 ? new THREE.Vector3(1, 0, 0) : new THREE.Vector3(0, 1, 0);
+  const e1 = new THREE.Vector3().crossVectors(n, ax).normalize();
+  const e2 = new THREE.Vector3().crossVectors(n, e1);
+  const to2 = (poly) => poly.map((v) => [v.dot(e1), v.dot(e2)]);
+  const A = to2(P), B = to2(R);
+  for (const S of [A, B]) {
+    for (let i = 0; i < S.length; i++) {
+      const a = S[i], b = S[(i + 1) % S.length];
+      let x = -(b[1] - a[1]), y = b[0] - a[0];
+      const len = Math.hypot(x, y);
+      if (len < 1e-12) continue;
+      x /= len; y /= len;
+      let a0 = Infinity, a1 = -Infinity, b0 = Infinity, b1 = -Infinity;
+      for (const p of A) { const d = p[0] * x + p[1] * y; a0 = Math.min(a0, d); a1 = Math.max(a1, d); }
+      for (const p of B) { const d = p[0] * x + p[1] * y; b0 = Math.min(b0, d); b1 = Math.max(b1, d); }
+      if (Math.min(a1, b1) - Math.max(a0, b0) <= tol) return false;
+    }
+  }
+  return true;
+}
