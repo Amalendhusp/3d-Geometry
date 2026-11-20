@@ -103,10 +103,10 @@ export class XRInput {
       pick: () => {
         const pp = this.pinchPoint(slot);
         if (pp) {
-          const near = app.paper.nearestFace(pp, 0.03);
+          const near = app.nearestActive(pp, 0.03);
           if (near) return near;
         }
-        return app.pickPaper(slot.ray);
+        return app.pickActive(slot.ray);
       },
       onPlane: (plane) => {
         const pp = this.pinchPoint(slot);
@@ -137,7 +137,7 @@ export class XRInput {
       id: 'xr-touch-' + slot.i, kind: 'touch', ray: slot.ray,
       pick: () => {
         const t = this.tip(slot);
-        return t ? app.paper.nearestFace(t, 0.02) : null;
+        return t ? app.nearestActive(t, 0.02) : null;
       },
       onPlane: (plane) => {
         const t = this.tip(slot);
@@ -157,33 +157,33 @@ export class XRInput {
   onSelectStart(slot) {
     const app = this.app;
     slot.pressed = true;
-    if (slot.touchDown) { app.tools.up(slot.touchPtr); slot.touchDown = false; }
+    if (slot.touchDown) { app.activeTools.up(slot.touchPtr); slot.touchDown = false; }
     this.updateRay(slot);
     const ph = app.panel.raycast(slot.ray);
-    const hit = app.pickPaper(slot.ray);
+    const hit = app.pickActive(slot.ray);
     if (ph && (!hit || ph.distance < hit.distance)) {
       slot.panelPress = true;
       app.panel.click(ph.button);
       return;
     }
-    if (app.tools.down(slot.rayPtr)) this.pulse(slot, 0.25, 20);
+    if (app.activeTools.down(slot.rayPtr)) this.pulse(slot, 0.25, 20);
   }
 
   onSelectEnd(slot) {
     slot.pressed = false;
     if (slot.panelPress) { slot.panelPress = false; return; }
-    this.app.tools.up(slot.rayPtr);
+    this.app.activeTools.up(slot.rayPtr);
   }
 
   onSqueeze(slot, on) {
     slot.squeezing = on;
     this.updateRay(slot);
-    if (on) { if (this.app.tools.down(slot.gripPtr, 'move')) this.pulse(slot, 0.3, 30); }
-    else this.app.tools.up(slot.gripPtr);
+    if (on) { if (this.app.activeTools.down(slot.gripPtr, 'move')) this.pulse(slot, 0.3, 30); }
+    else this.app.activeTools.up(slot.gripPtr);
   }
 
   releaseAll(slot) {
-    const t = this.app.tools;
+    const t = this.app.activeTools;
     t.up(slot.rayPtr); t.up(slot.gripPtr); t.up(slot.touchPtr);
     slot.pressed = slot.squeezing = slot.touchDown = slot.panelPress = false;
   }
@@ -200,7 +200,7 @@ export class XRInput {
     for (const slot of this.slots) {
       if (!slot.connected) continue;
       this.updateRay(slot);
-      const t = app.tools;
+      const t = app.activeTools;
       if (slot.pressed && t.active.has(slot.rayPtr.id)) t.move(slot.rayPtr);
       if (slot.squeezing && t.active.has(slot.gripPtr.id)) t.move(slot.gripPtr);
       this.updateTouch(slot);
@@ -212,26 +212,25 @@ export class XRInput {
     const app = this.app;
     const tip = this.tip(slot);
     if (!tip || slot.pressed) {
-      if (slot.touchDown) { app.tools.up(slot.touchPtr); slot.touchDown = false; }
+      if (slot.touchDown) { app.activeTools.up(slot.touchPtr); slot.touchDown = false; }
       if (!tip) return;
     }
     if (app.panel.poke('h' + slot.i, tip)) {
-      if (slot.touchDown) { app.tools.up(slot.touchPtr); slot.touchDown = false; }
+      if (slot.touchDown) { app.activeTools.up(slot.touchPtr); slot.touchDown = false; }
       return;
     }
     if (slot.pressed) return;
-    const tool = app.state.tool;
-    if (tool !== 'paint' && tool !== 'crease' && tool !== 'cut') {
-      if (slot.touchDown) { app.tools.up(slot.touchPtr); slot.touchDown = false; }
+    if (!app.touchAllowed()) {
+      if (slot.touchDown) { app.activeTools.up(slot.touchPtr); slot.touchDown = false; }
       return;
     }
-    const near = app.paper.nearestFace(tip, slot.touchDown ? 0.02 : 0.008);
+    const near = app.nearestActive(tip, slot.touchDown ? 0.02 : 0.008);
     if (!slot.touchDown) {
-      if (near && app.tools.down(slot.touchPtr)) slot.touchDown = true;
+      if (near && app.activeTools.down(slot.touchPtr)) slot.touchDown = true;
     } else if (near) {
-      app.tools.move(slot.touchPtr);
+      app.activeTools.move(slot.touchPtr);
     } else {
-      app.tools.up(slot.touchPtr);
+      app.activeTools.up(slot.touchPtr);
       slot.touchDown = false;
     }
   }
@@ -239,11 +238,11 @@ export class XRInput {
   updateVisuals(slot) {
     const app = this.app;
     const ph = app.panel.raycast(slot.ray);
-    const hit = app.pickPaper(slot.ray);
+    const hit = app.pickActive(slot.ray);
     const panelFirst = ph && (!hit || ph.distance < hit.distance);
     app.panel.setHover('r' + slot.i, panelFirst ? ph.button : null);
     const dist = panelFirst ? ph.distance : hit ? hit.distance : null;
-    const busy = app.tools.active.has(slot.rayPtr.id);
+    const busy = app.activeTools.active.has(slot.rayPtr.id);
     // Hands only show a ray while it points at something useful.
     slot.line.visible = !slot.touchDown && (dist !== null || (!slot.isHand && !busy));
     slot.line.scale.z = dist !== null ? dist : 0.6;
@@ -252,12 +251,15 @@ export class XRInput {
     const target = !panelFirst && hit ? hit : null;
     c.visible = !!target;
     if (target) {
-      const n = _v.setFromMatrixColumn(target.face.group.matrixWorld, 2).normalize();
-      if (target.side === 'back') n.negate();
+      let n;
+      if (target.normal) n = _v.copy(target.normal);
+      else {
+        n = _v.setFromMatrixColumn(target.face.group.matrixWorld, 2).normalize();
+        if (target.side === 'back') n.negate();
+      }
       c.position.copy(target.point).addScaledVector(n, 0.0008);
       c.quaternion.copy(_q.setFromUnitVectors(new THREE.Vector3(0, 0, 1), n));
-      const r = app.state.tool === 'paint' ? Math.max(0.0015, app.state.brushMM / 2000) : 0.004;
-      c.scale.setScalar(r);
+      c.scale.setScalar(app.cursorRadius());
     }
   }
 }

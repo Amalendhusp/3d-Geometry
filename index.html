@@ -105,6 +105,20 @@
   .angle input { width: 150px; accent-color: var(--vermilion); }
 
   .tools { display: grid; grid-template-columns: repeat(5, 1fr); gap: 6px; padding: 8px; }
+  .tools.tools-3 { grid-template-columns: repeat(3, 1fr); }
+  .spaces { display: flex; gap: 2px; padding: 3px; border-radius: 11px; background: var(--ink-2); flex: none; }
+  .spaces button { min-height: 34px; padding: 0 12px; font-size: 13px; font-weight: 700; background: transparent; border-radius: 8px; }
+  .spaces button[aria-pressed="true"] { background: var(--saffron); color: var(--ink); }
+  select { min-height: 44px; border-radius: 10px; border: 1px solid var(--line); background: var(--ink-2); color: var(--washi); padding: 0 10px; flex: none; }
+  .legend { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-size: 12px; white-space: nowrap; flex: none; }
+  .lg { display: inline-block; width: 18px; height: 4px; border-radius: 2px; margin-left: 4px; }
+  .lg-hinge { background: #1e9a5f; }
+  .lg-cut { background: repeating-linear-gradient(90deg, #d4462a 0 4px, transparent 4px 7px); }
+  .lg-chosen { background: #f0b44c; height: 6px; }
+  .lg-option { background: #2fe08f; height: 6px; }
+  .lg-sel { background: #f6d9a0; height: 12px; width: 14px; border-radius: 3px; }
+  .lg-overlap { background: #ff5a3d; height: 12px; width: 14px; border-radius: 3px; }
+  .actions-row { border-bottom: 1px solid var(--line); }
   .tools button { flex-direction: column; gap: 2px; min-height: 54px; font-size: 12px; font-weight: 700; letter-spacing: 0.02em; background: transparent; }
   .tools button:hover { background: var(--ink-2); }
   .tools button[aria-pressed="true"] { background: var(--saffron); color: var(--ink); }
@@ -119,6 +133,7 @@
     opacity: 0; transition: opacity 180ms ease, transform 180ms ease;
   }
   #toast.show { opacity: 1; transform: translate(-50%, 0); }
+  body[data-space="solids"] #toast { bottom: calc(env(safe-area-inset-bottom, 0px) + 222px); }
 
   .overlay {
     position: fixed; inset: 0; z-index: 10; display: grid; place-items: center;
@@ -154,10 +169,14 @@
     .session button .t { display: none; }
     .session button { padding: 0 10px; min-width: 40px; }
     #toast { bottom: calc(env(safe-area-inset-bottom, 0px) + 140px); }
+    body[data-space="solids"] #toast { bottom: calc(env(safe-area-inset-bottom, 0px) + 212px); }
   }
   @media (max-width: 440px) {
-    .brand { padding: 8px; }
-    .brand h1 { display: none; }
+    .brand { padding: 6px; }
+    .brand h1, .brand .titles { display: none; }
+    .brand svg { display: none; }
+    .session { gap: 4px; padding: 4px; }
+    .session button { min-width: 38px; padding: 0 8px; }
   }
   @media (prefers-reduced-motion: reduce) {
     *, *::before, *::after { transition: none !important; }
@@ -178,7 +197,11 @@
 <header class="bar top">
   <div class="brand">
     <svg viewBox="0 0 32 32" aria-hidden="true"><path d="M3 3h26v26z" fill="#fbfaf6"/><path d="M3 3v26h26z" fill="#bcd3ee"/><path d="M3 3l26 26" stroke="#181c38" stroke-width="1.2" stroke-dasharray="2 2"/></svg>
-    <div><h1>Paper Fold Studio</h1><p id="sheetLabel">30 × 30 cm sheet</p></div>
+    <div class="titles"><h1>Paper Fold Studio</h1><p id="sheetLabel">30 × 30 cm sheet</p></div>
+    <div class="spaces" role="group" aria-label="Workspace">
+      <button data-space="paper" aria-pressed="true">Paper</button>
+      <button data-space="solids" aria-pressed="false">Solids</button>
+    </div>
   </div>
   <div class="session">
     <button id="undoBtn" title="Undo (Ctrl+Z)"><svg class="i" viewBox="0 0 24 24"><path d="M9 7H4V2"/><path d="M4.6 7A8 8 0 1 1 4 13"/></svg><span class="t">Undo</span></button>
@@ -192,7 +215,7 @@
 <div id="toast" role="status" aria-live="polite"></div>
 
 <footer class="bar bottom">
-  <div class="dock">
+  <div class="dock" id="paperDock">
     <div class="context" data-for="paint">
       <div class="group" id="swatches"></div>
       <label class="colorpick" title="Custom colour"><input id="customColor" type="color" value="#d8452f" aria-label="Custom colour"></label>
@@ -249,6 +272,60 @@
       <button data-tool="move" aria-pressed="false"><svg class="i" viewBox="0 0 24 24"><path d="M12 3v18M3 12h18M12 3 9.5 5.5M12 3l2.5 2.5M12 21l-2.5-2.5M12 21l2.5-2.5M3 12l2.5-2.5M3 12l2.5 2.5M21 12l-2.5-2.5M21 12l-2.5 2.5"/></svg>Move</button>
     </nav>
   </div>
+
+  <div class="dock" id="solidsDock" hidden>
+    <div class="context actions-row">
+      <button id="unfoldAllBtn">Unfold all</button>
+      <button id="refoldAllBtn">Refold all</button>
+      <button id="resetShellBtn">Reset</button>
+      <span class="sep"></span>
+      <button id="saveShellBtn">Save</button>
+      <button id="loadShellBtn">Load</button>
+      <span class="hint" id="solidsStats"></span>
+    </div>
+
+    <div class="context" data-sfor="build">
+      <button id="addCubeBtn">Add cube</button>
+      <button id="dupCubeBtn">Duplicate</button>
+      <button id="rotCubeBtn">Rotate</button>
+      <button id="delCubeBtn">Remove</button>
+      <span class="sep"></span>
+      <label class="label" for="presetSel">Start from</label>
+      <select id="presetSel" aria-label="Start from a preset"></select>
+      <button id="tipBtn">Tip over</button>
+      <span class="hint">Tap a face, then Add cube. Drag a cube to move it; it snaps face to face.</span>
+    </div>
+
+    <div class="context" data-sfor="open" hidden>
+      <span class="label">Swing</span>
+      <button data-omode="group" aria-pressed="true" title="The panel and every panel hinged beyond it">Group</button>
+      <button data-omode="one" aria-pressed="false" title="Only this panel; its other edges are released">One panel</button>
+      <span class="sep"></span>
+      <button id="openFlatBtn">Open flat</button>
+      <button id="closePanelBtn">Close</button>
+      <div class="size angle">
+        <input id="hingeAngle" type="range" min="-180" max="180" step="1" value="0" disabled aria-label="Hinge angle in degrees">
+        <span class="value" id="hingeAngleLabel">—</span>
+      </div>
+      <button id="setBaseBtn">Set as base</button>
+      <span class="sep"></span>
+      <span class="legend"><i class="lg lg-sel"></i>selected <i class="lg lg-chosen"></i>hinge in use <i class="lg lg-option"></i>other hinges</span>
+    </div>
+
+    <div class="context" data-sfor="edges" hidden>
+      <button id="defaultNetBtn">Default net</button>
+      <button id="checkNetBtn">Check net</button>
+      <span class="sep"></span>
+      <span class="legend"><i class="lg lg-hinge"></i>hinge <i class="lg lg-cut"></i>cut <i class="lg lg-overlap"></i>intersecting</span>
+      <span class="hint">Tap an edge to switch it between hinge and cut.</span>
+    </div>
+
+    <nav class="tools tools-3" aria-label="Solid tools">
+      <button data-stool="build" aria-pressed="false"><svg class="i" viewBox="0 0 24 24"><path d="M12 3 4 7.5v9L12 21l8-4.5v-9z"/><path d="M4 7.5 12 12l8-4.5M12 12v9"/></svg>Build</button>
+      <button data-stool="open" aria-pressed="true"><svg class="i" viewBox="0 0 24 24"><path d="M4 20h16"/><path d="M4 20V9h9v11"/><path d="m13 9 6-4v11l-6 4"/></svg>Open</button>
+      <button data-stool="edges" aria-pressed="false"><svg class="i" viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="1.5"/><path d="M4 12h16" stroke-dasharray="2.4 2.4"/></svg>Edges</button>
+    </nav>
+  </div>
 </footer>
 
 <div class="overlay" id="sheetDialog" hidden>
@@ -292,6 +369,8 @@
       <dd>Touch the sheet with your index finger to paint or draw creases. Pinch near a flap and move your hand to fold it. Pinch from a distance to use the ray. Poke panel buttons with a fingertip.</dd>
       <dt>Cutting</dt>
       <dd>Cut follows crease lines. Tap a segment between two crossings to cut it, or drag along a crease to cut just part of it. Cuts go through every layer under them. Once a piece is cut free, the Move tool carries that piece on its own.</dd>
+      <dt>Solid → Unfold</dt>
+      <dd>Switch to Solids in the header. Open: tap a panel to select it; its usable hinges glow green and the one in use is yellow. Drag the panel (or use the slider) to swing it. Group swings everything hinged beyond it; One panel keeps only the chosen hinge. Unfold all lays the default net flat; Refold all closes it. Build: tap a face and Add cube; joined faces disappear so the inside stays hollow. Edges: tap an edge to switch hinge and cut. Panels that pass through each other turn red.</dd>
       <dt>Layers</dt>
       <dd>“All” folds every layer on the side you grab. “Top flap” folds only the piece you grab.</dd>
     </dl>

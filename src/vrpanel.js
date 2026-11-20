@@ -3,7 +3,7 @@ import * as THREE from 'three';
 // A floating control panel for VR, drawn on a canvas. Use it with a
 // controller or hand ray (trigger / pinch) or by poking it with a fingertip.
 
-const PX_W = 1024, PX_H = 768;
+const PX_W = 1024, PX_H = 900;
 const C = {
   bg: 'rgba(24, 28, 56, 0.94)',
   btn: '#2d3468',
@@ -59,7 +59,21 @@ export class VRPanel {
       }
     };
 
-    row(84, 96, [
+    // Workspace switch, then the active workspace's controls.
+    const space = this.app.space;
+    row(84, 60, [
+      { label: 'Paper folding', action: () => a.setSpace('paper'), active: space === 'paper' },
+      { label: 'Solid → Unfold', action: () => a.setSpace('solids'), active: space === 'solids' },
+    ]);
+    if (space === 'solids') {
+      this.app.solids.panelRows(row, B, M, W, 160);
+      B.push({ kind: 'text', x: M, y: 672, w: W - 210, h: 170, label: this.app.statusText || '', status: true });
+      btn(PX_W - M - 196, 752, 196, 70, 'Exit VR', () => a.exitXR());
+      this.buttons = B;
+      return;
+    }
+
+    row(160, 96, [
       { label: 'Paint', action: () => a.setTool('paint'), active: s.tool === 'paint' },
       { label: 'Crease', action: () => a.setTool('crease'), active: s.tool === 'crease' },
       { label: 'Cut', action: () => a.setTool('cut'), active: s.tool === 'cut' },
@@ -70,53 +84,53 @@ export class VRPanel {
     if (s.tool === 'paint') {
       const sw = this.app.palette.map((c) => ({ label: '', swatch: c, action: () => a.setColor(c), active: !s.eraser && s.color === c }));
       sw.push({ label: 'Eraser', w: 1.4, action: () => a.toggleEraser(), active: s.eraser });
-      row(196, 84, sw, 10);
-      row(296, 84, [
+      row(272, 84, sw, 10);
+      row(372, 84, [
         { label: '−', action: () => a.brush(-1) },
         { label: `Brush ${s.brushMM} mm`, w: 2, kind: 'label' },
         { label: '+', action: () => a.brush(1) },
         { label: 'Clear paint', w: 2, action: () => a.clearPaint() },
       ]);
     } else if (s.tool === 'crease') {
-      row(196, 84, [
+      row(272, 84, [
         { label: `Snap ${s.snap ? 'on' : 'off'}`, action: () => a.toggleSnap(), active: s.snap },
         { label: 'Unfold all', action: () => a.unfoldAll() },
       ]);
-      B.push({ kind: 'text', x: M, y: 296, w: W, h: 84, label: 'Trigger or pinch on the paper, drag, release. Or draw with your fingertip. The line runs through every layer.' });
+      B.push({ kind: 'text', x: M, y: 372, w: W, h: 84, label: 'Trigger or pinch on the paper, drag, release. Or draw with your fingertip. The line runs through every layer.' });
     } else if (s.tool === 'cut') {
-      row(196, 84, [
+      row(272, 84, [
         { label: 'Unfold all', action: () => a.unfoldAll() },
         { label: 'Undo cut', action: () => a.undo() },
       ]);
-      B.push({ kind: 'text', x: M, y: 296, w: W, h: 84, label: 'Point at a crease and tap to cut that segment, or hold and drag along it. Fingertip works too. Cuts go through every layer.' });
+      B.push({ kind: 'text', x: M, y: 372, w: W, h: 84, label: 'Point at a crease and tap to cut that segment, or hold and drag along it. Fingertip works too. Cuts go through every layer.' });
     } else if (s.tool === 'fold') {
-      row(196, 84, [
+      row(272, 84, [
         { label: 'Valley ↑', action: () => a.valley() },
         { label: 'Mountain ↓', action: () => a.mountain() },
         { label: 'Flatten', action: () => a.flatten() },
       ]);
-      row(296, 84, [
+      row(372, 84, [
         { label: 'All layers', action: () => a.setLayerMode('all'), active: s.layerMode === 'all' },
         { label: 'Top flap', action: () => a.setLayerMode('top'), active: s.layerMode === 'top' },
       ]);
     } else {
-      row(196, 84, [
+      row(272, 84, [
         { label: 'Flip over', action: () => a.flip() },
         { label: 'Back on table', action: () => a.resetPosition() },
       ]);
-      B.push({ kind: 'text', x: M, y: 296, w: W, h: 84, label: this.app.paper.pieceCount > 1
+      B.push({ kind: 'text', x: M, y: 372, w: W, h: 84, label: this.app.paper.pieceCount > 1
         ? 'Trigger or pinch a cut-out piece to carry it alone. Grip (squeeze) carries the whole sheet.'
         : 'Grab the paper with trigger or pinch and move it. Grip (squeeze) carries it in any mode.' });
     }
 
-    row(396, 84, [
+    row(472, 84, [
       { label: 'Undo', action: () => a.undo() },
       { label: 'Unfold all', action: () => a.unfoldAll() },
       { label: 'Flip', action: () => a.flip() },
       { label: 'Recenter', action: () => a.recenter() },
     ]);
 
-    row(496, 84, [
+    row(572, 84, [
       { label: 'W −', action: () => a.draftSize(-5, 0) },
       { label: `${s.draftW} × ${s.draftH} cm`, w: 2, kind: 'label' },
       { label: 'W +', action: () => a.draftSize(5, 0) },
@@ -125,8 +139,8 @@ export class VRPanel {
       { label: 'New paper', w: 1.6, action: () => a.newPaper() },
     ], 10);
 
-    B.push({ kind: 'text', x: M, y: 596, w: W - 210, h: 150, label: this.app.statusText || '', status: true });
-    btn(PX_W - M - 196, 676, 196, 70, 'Exit VR', () => a.exitXR());
+    B.push({ kind: 'text', x: M, y: 672, w: W - 210, h: 170, label: this.app.statusText || '', status: true });
+    btn(PX_W - M - 196, 752, 196, 70, 'Exit VR', () => a.exitXR());
     this.buttons = B;
   }
 
@@ -145,7 +159,9 @@ export class VRPanel {
     ctx.font = `500 26px ${this.font}`;
     ctx.fillStyle = C.muted;
     ctx.textAlign = 'right';
-    ctx.fillText(`Sheet ${fmt(this.app.paper.W * 100)} × ${fmt(this.app.paper.H * 100)} cm`, PX_W - 28, 46);
+    ctx.fillText(this.app.space === 'solids'
+      ? `${this.app.solids.comp.solids.length} cube${this.app.solids.comp.solids.length === 1 ? '' : 's'} · ${this.app.solids.shell.panels.length} panels`
+      : `Sheet ${fmt(this.app.paper.W * 100)} × ${fmt(this.app.paper.H * 100)} cm`, PX_W - 28, 46);
     const hovered = new Set(this.hover.values());
     for (const b of this.buttons) {
       if (b.kind === 'text') {

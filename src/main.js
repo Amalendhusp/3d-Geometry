@@ -6,6 +6,8 @@ import { Tools } from './tools.js';
 import { VRPanel } from './vrpanel.js';
 import { XRInput } from './xr.js';
 import { UI } from './ui.js';
+import { SolidsWorkspace } from './solids/workspace.js';
+import { SolidsUI } from './solids/ui.js';
 
 const PALETTE = ['#1d1f2b', '#d8452f', '#f0a325', '#f2d64b', '#3f9b5a', '#2f74c0', '#7a4bb3', '#ffffff'];
 const BRUSH_SIZES = [1, 2, 3, 5, 8, 12, 18, 25, 35];
@@ -48,6 +50,9 @@ class App {
     this.panel.mesh.visible = false;
     this.workspace.add(this.panel.mesh);
     this.initPreviews();
+    this.space = location.hash === '#solids' ? 'solids' : 'paper';
+    this.solids = new SolidsWorkspace(this);
+    this.workspace.add(this.solids.root);
     this.actions = this.makeActions();
     this.xrInput = new XRInput(this);
     this.haptic = () => this.xrInput.hapticAll();
@@ -59,6 +64,9 @@ class App {
     this.controls.minDistance = 0.12;
     this.controls.maxDistance = 6;
     this.ui = new UI(this);
+    this.solidsUI = new SolidsUI(this);
+    this.applySpace();
+    if (this.space === 'solids') this.statusText = 'Solid → Unfold: tap a panel to see its hinges, then swing it open. Build adds and joins cubes.';
     this.layoutTable();
     this.resetPosition();
     this.fitCamera();
@@ -148,7 +156,8 @@ class App {
 
   // Size the table and cutting mat to the sheet.
   layoutTable() {
-    const W = this.paper.W, H = this.paper.H;
+    const ext = this.space === 'solids' && this.solids ? this.solids.extent() : null;
+    const W = ext ?? this.paper.W, H = ext ?? this.paper.H;
     const tw = Math.max(1.0, W + 0.45), td = Math.max(0.7, H + 0.35);
     const top = this.tableTop;
     this.tableTopMesh.scale.set(tw, 1, td);
@@ -167,15 +176,17 @@ class App {
     this.mat.material.needsUpdate = true;
 
     const s = this.sun.shadow.camera;
-    const ext = Math.max(tw, td) * 0.75 + 0.2;
-    s.left = -ext; s.right = ext; s.top = ext; s.bottom = -ext;
+    const shadowExt = Math.max(tw, td) * 0.75 + 0.2;
+    s.left = -shadowExt; s.right = shadowExt; s.top = shadowExt; s.bottom = -shadowExt;
     s.updateProjectionMatrix();
     this.sun.position.set(0.5, top + 1.6, 0.7);
     this.sun.target.position.set(0, top, 0);
 
+    if (this.solids && !this.solids.carried) this.solids.root.position.set(0, top + 0.002, 0);
+
     // VR panel to the left of the sheet, angled toward the user.
     const px = -Math.max(0.36, W / 2 + 0.16);
-    this.panel.mesh.position.set(px, top + 0.27, Math.min(0.2, H / 2 + 0.05));
+    this.panel.mesh.position.set(px, top + 0.29, Math.min(0.2, H / 2 + 0.05));
     this.panel.mesh.rotation.set(0, 0, 0);
     this.panel.mesh.rotateY(0.62);
     this.panel.mesh.rotateX(-0.42);
@@ -301,6 +312,52 @@ class App {
     return cam.getWorldPosition(new THREE.Vector3());
   }
 
+  // ---------------------------------------------------- workspace routing
+
+  get activeTools() { return this.space === 'solids' ? this.solids.tools : this.tools; }
+
+  pickActive(ray) { return this.space === 'solids' ? this.solids.pick(ray) : this.pickPaper(ray); }
+
+  nearestActive(point, maxDist) {
+    return this.space === 'solids' ? this.solids.nearest(point, maxDist) : this.paper.nearestFace(point, maxDist);
+  }
+
+  // Tools that fingertips can use by touching the surface.
+  touchAllowed() {
+    return this.space === 'solids' || ['paint', 'crease', 'cut'].includes(this.state.tool);
+  }
+
+  cursorRadius() {
+    if (this.space === 'solids') return this.solids.edgeLen * 0.035;
+    return this.state.tool === 'paint' ? Math.max(0.0015, this.state.brushMM / 2000) : 0.004;
+  }
+
+  applySpace() {
+    const solids = this.space === 'solids';
+    this.paper.root.visible = !solids;
+    this.solids.root.visible = solids;
+    this.hideCreasePreview();
+    this.hideAxis();
+    this.hoverCursor.visible = false;
+    document.body.dataset.space = this.space;
+  }
+
+  setSpace(space) {
+    if (space === this.space) return;
+    this.tools.finishAll();
+    this.solids.tools.finishAll();
+    this.tools.clearSelection();
+    this.space = space;
+    this.applySpace();
+    try { history.replaceState(null, '', space === 'solids' ? '#solids' : '#paper'); } catch { /* ignore */ }
+    this.layoutTable();
+    if (!this.renderer.xr.isPresenting) this.fitCamera();
+    this.toast(space === 'solids'
+      ? 'Solid → Unfold: tap a panel to see its hinges, then swing it open. Build adds and joins cubes.'
+      : 'Paper folding: paint, crease, cut and fold a sheet.');
+    this.notify();
+  }
+
   pickPaper(ray) {
     this.paper.root.updateMatrixWorld(true);
     this.raycaster = this.raycaster || new THREE.Raycaster();
@@ -343,14 +400,14 @@ class App {
   }
 
   fitCamera() {
-    const s = this.paper.size;
+    const s = this.space === 'solids' ? Math.max(0.3, this.solids.extent() * 0.75) : this.paper.size;
     const aspect = window.innerWidth / window.innerHeight;
     const vfov = THREE.MathUtils.degToRad(this.camera.fov);
     const visible = 2 * Math.tan(vfov / 2);
     // Keep the sheet in the middle half of the screen, clear of the tool dock.
     const d = s / (0.5 * visible * Math.min(1, aspect)) + 0.05;
     const el = THREE.MathUtils.degToRad(60);
-    const target = new THREE.Vector3(0, this.tableTop, 0.16 * s);
+    const target = new THREE.Vector3(0, this.tableTop + (this.space === 'solids' ? 0.04 : 0), 0.16 * s);
     this.camera.position.set(0, target.y + Math.sin(el) * d, target.z + Math.cos(el) * d);
     this.controls.target.copy(target);
     this.controls.update();
@@ -421,7 +478,9 @@ class App {
           app.foldChanged(s, true);
         }
       },
+      setSpace(space) { app.setSpace(space); },
       undo() {
+        if (app.space === 'solids') { app.solids.undo(); return; }
         app.tools.finishAll();
         const e = app.history.stack.pop();
         if (!e) { app.toast('Nothing to undo.'); return; }
@@ -476,10 +535,11 @@ class App {
       },
       resetPosition() { app.resetPosition(); app.toast('Back on the table.'); },
       recenter() {
+        app.solids.carried = false;
         if (app.renderer.xr.isPresenting) app.recenterXR();
         else app.fitCamera();
       },
-      resetView() { app.fitCamera(); },
+      resetView() { app.solids.carried = false; app.layoutTable(); app.fitCamera(); },
       draftSize(dw, dh) {
         st.draftW = THREE.MathUtils.clamp(st.draftW + dw, 5, 150);
         st.draftH = THREE.MathUtils.clamp(st.draftH + dh, 5, 150);
@@ -518,7 +578,7 @@ class App {
     const rc = new THREE.Raycaster();
     const ptr = {
       id: 'screen', kind: 'screen', ray: new THREE.Ray(),
-      pick: () => this.pickPaper(ptr.ray),
+      pick: () => this.pickActive(ptr.ray),
       onPlane: (plane) => ptr.ray.intersectPlane(plane, new THREE.Vector3()),
     };
     this.screenPtr = ptr;
@@ -534,7 +594,7 @@ class App {
       if (active !== null) {
         // A second finger shortly after the first means pinch-zoom, not drawing.
         if (e.pointerType === 'touch' && performance.now() - activeAt < 250) {
-          this.tools.cancel(ptr);
+          this.activeTools.cancel(ptr);
           active = null;
         }
         e.stopImmediatePropagation();
@@ -542,7 +602,7 @@ class App {
       }
       if (e.pointerType === 'mouse' && e.button !== 0) return;
       setRay(e);
-      if (this.tools.down(ptr)) {
+      if (this.activeTools.down(ptr)) {
         active = e.pointerId;
         activeAt = performance.now();
         try { el.setPointerCapture(e.pointerId); } catch { /* ignore */ }
@@ -553,7 +613,7 @@ class App {
     el.addEventListener('pointermove', (e) => {
       if (e.pointerId === active) {
         setRay(e);
-        this.tools.move(ptr);
+        this.activeTools.move(ptr);
         e.stopImmediatePropagation();
         return;
       }
@@ -565,14 +625,14 @@ class App {
     const end = (e) => {
       if (e.pointerId !== active) return;
       setRay(e);
-      this.tools.up(ptr);
+      this.activeTools.up(ptr);
       active = null;
       e.stopImmediatePropagation();
     };
     el.addEventListener('pointerup', end);
     el.addEventListener('pointercancel', (e) => {
       if (e.pointerId !== active) return;
-      this.tools.cancel(ptr);
+      this.activeTools.cancel(ptr);
       active = null;
     });
     el.addEventListener('pointerleave', () => { this.hoverCursor.visible = false; });
@@ -581,6 +641,13 @@ class App {
       if (e.target && (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT')) return;
       const k = e.key.toLowerCase();
       if ((e.ctrlKey || e.metaKey) && k === 'z') { e.preventDefault(); this.actions.undo(); return; }
+      if (this.space === 'solids') {
+        const sm = { 1: 'build', 2: 'open', 3: 'edges', b: 'build', o: 'open', e: 'edges' };
+        if (sm[k]) this.solids.setTool(sm[k]);
+        else if (k === 'u') this.solids.unfoldAll();
+        else if (k === 'r') this.solids.refoldAll();
+        return;
+      }
       const map = { 1: 'paint', 2: 'crease', 3: 'cut', 4: 'fold', 5: 'move', p: 'paint', c: 'crease', x: 'cut', f: 'fold', m: 'move' };
       if (map[k]) this.actions.setTool(map[k]);
       else if (k === 'e') this.actions.toggleEraser();
@@ -591,16 +658,21 @@ class App {
 
   updateHoverCursor(ptr) {
     const c = this.hoverCursor;
-    const hit = this.state.tool === 'move' ? null : ptr.pick();
+    const hit = this.space === 'paper' && this.state.tool === 'move' ? null : ptr.pick();
     c.visible = !!hit;
     if (!hit) return;
-    const n = new THREE.Vector3().setFromMatrixColumn(hit.face.group.matrixWorld, 2).normalize();
-    if (hit.side === 'back') n.negate();
+    let n;
+    if (hit.normal) n = hit.normal.clone();
+    else {
+      n = new THREE.Vector3().setFromMatrixColumn(hit.face.group.matrixWorld, 2).normalize();
+      if (hit.side === 'back') n.negate();
+    }
     c.position.copy(hit.point).addScaledVector(n, 0.0006);
     c.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), n);
-    const r = this.state.tool === 'paint' ? Math.max(0.001, this.state.brushMM / 2000) : Math.max(0.002, this.paper.size * 0.008);
+    const r = this.space === 'solids' ? this.cursorRadius()
+      : this.state.tool === 'paint' ? Math.max(0.001, this.state.brushMM / 2000) : Math.max(0.002, this.paper.size * 0.008);
     c.scale.setScalar(r);
-    c.material.color.set(this.state.tool === 'paint' && !this.state.eraser ? this.state.color : '#1d1f2b');
+    c.material.color.set(this.space === 'paper' && this.state.tool === 'paint' && !this.state.eraser ? this.state.color : '#1d1f2b');
   }
 
   // ----------------------------------------------------------------- XR
@@ -675,7 +747,7 @@ class App {
     fwd.y = 0;
     if (fwd.lengthSq() < 1e-6) fwd.set(0, 0, -1);
     fwd.normalize();
-    const reach = 0.42 + this.paper.H / 2;
+    const reach = 0.42 + (this.space === 'solids' ? Math.min(0.3, this.solids.extent() / 2) : this.paper.H / 2);
     this.workspace.position.set(head.x + fwd.x * reach, 0, head.z + fwd.z * reach);
     this.workspace.rotation.set(0, Math.atan2(-fwd.x, -fwd.z), 0);
     const h = head.y > 0.5 ? head.y : 1.6;
@@ -699,7 +771,7 @@ class App {
     }
     if (xr) this.xrInput.update();
     else this.controls.update();
-    this.tools.update(dt);
+    this.activeTools.update(dt);
     this.panel.update();
     this.paint.flush();
     this.renderer.render(this.scene, this.camera);

@@ -17,6 +17,21 @@ Built with [three.js](https://threejs.org) r170. It's a static site with no buil
 - **Move:** carry the sheet in VR (grip button, or pinch in Move mode). Use **Flip over** to turn it, **Unfold all** to see the crease pattern, and **Recenter** to reposition the table.
 - **VR:** a table appears in front of you at a height based on yours, with a control panel on the left. Hands and controllers render as 3D models. AR passthrough is available on headsets that support it.
 
+## Solid → Unfold workspace
+
+Switch with **Paper | Solids** in the header (or open the page with `#solids`). It explores how a 3D form relates to its surface panels and the nets it can unfold into.
+
+- **Panels and hinges:** the shell is a set of rigid panels (the solids' faces). Each shared edge is a **hinge** (green) or a **cut** (red, dashed). Panels never stretch.
+- **Open:** tap or pinch a panel to select it. Its usable hinges glow bright green and the one in use is yellow; tap another to choose it. Drag the panel, move your hand, or use the angle slider to swing it. **Group** swings the panel with every panel hinged beyond it. **One panel** keeps only the chosen hinge and releases the panel's other edges. **Open flat**, **Close**, **Unfold all** and **Refold all** animate; **Undo** and **Reset** restore.
+- **Default net:** each composition gets a cut-and-hinge layout that unfolds flat without overlaps. It's found by searching spanning trees of the panel graph and checking each flattened layout for overlaps.
+- **Edges:** tap an edge to switch hinge ↔ cut. A closed loop of hinges can't move; it's reported and drawn in orange. **Check net** tests whether the current layout unfolds without overlaps.
+- **Build:** tap a face, then **Add cube** to attach a cube flush to it. Drag a cube to move it; it snaps face to face, and positions that would overlap another cube are refused. **Duplicate**, **Rotate**, **Remove**, **Tip over** and presets are in the toolbar. Changing solids needs the shell closed first.
+- **Merging:** when two cubes share a complete face, both faces are removed from the shell, so the inside is one hollow space. This is a real topology change: the panel and edge graph is rebuilt without them, and they stay absent through opening, unfolding, refolding, undo and save/load. The outside keeps its square panel divisions.
+- **Intersections:** panels that pass through or lie on each other turn red, and the status line counts the pairs.
+- **Save / Load** keep one composition, with its layout and pose, in this browser.
+
+Stage 4 (tetrahedra, octahedra, cuboctahedra) isn't enabled yet. The templates, face matching and snapping code are written to take any convex polyhedron with a consistent edge length.
+
 ## Controls
 
 | | Phone / desktop | VR controllers | VR hands |
@@ -56,3 +71,10 @@ Any static host works too, for example Netlify, Vercel or Cloudflare Pages. Poin
 - `src/xr.js`: controllers, hand pinch rays, fingertip touch and panel poking.
 - `src/vrpanel.js`: in-VR control panel.
 - `src/ui.js`, `index.html`: phone and desktop interface.
+- `src/solids/shell.js`: panel-and-hinge shell. It removes internal faces, sorts edges into hinge, cut or locked, holds rigid panel poses, handles group and single-panel opening, the hinge forest for unfold/refold, the default-net search and intersection tests.
+- `src/solids/composition.js`, `src/solids/polyhedra.js`: solids, face-to-face alignment and convex overlap tests.
+- `src/solids/workspace.js`, `src/solids/ui.js`, `src/solids/hinge.js`: rendering, gestures (screen, controller ray, pinch, fingertip), VR panel rows and the toolbar.
+
+## Testing notes
+
+The VR paths are tested in an emulated Meta Quest 3 (the IWER WebXR emulator, driving controllers and tracked hands from a script). They haven't been run on a real headset yet.

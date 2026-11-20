@@ -125,7 +125,7 @@ export class UI {
     const app = this.app;
     const st = app.state;
     $$('[data-tool]').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.tool === st.tool)));
-    $$('.context').forEach((c) => { c.hidden = c.dataset.for !== st.tool; });
+    $$('#paperDock .context').forEach((c) => { c.hidden = c.dataset.for !== st.tool; });
     $$('.swatch').forEach((b) => b.setAttribute('aria-pressed', String(!st.eraser && b.dataset.color === st.color)));
     $('#eraserBtn').setAttribute('aria-pressed', String(st.eraser));
     $('#brushSize').value = String(st.brushMM);
