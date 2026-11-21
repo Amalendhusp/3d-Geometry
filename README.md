@@ -17,6 +17,14 @@ Built with [three.js](https://threejs.org) r170. It's a static site with no buil
 - **Move:** carry the sheet in VR (grip button, or pinch in Move mode). Use **Flip over** to turn it, **Unfold all** to see the crease pattern, and **Recenter** to reposition the table.
 - **VR:** a table appears in front of you at a height based on yours, with a control panel on the left. Hands and controllers render as 3D models. AR passthrough is available on headsets that support it.
 
+## In VR: placing, targeting, tools and scenery
+
+- **Work surface placement:** the table carries everything on it (paper, solids, control panel, tool tray). Grab the yellow **bar** at the front edge to slide it and raise or lower it, and the round **knobs** at the corners to turn it. The bar under the control panel moves the panel. **Place in front of me** puts the table at arm's length; **Seated** and **Standing** set a comfortable height. The **Place & view** page also has fine steps (lower/higher, closer/farther, left/right, turn), a **placement lock**, and a choice of surface: **cutting mat**, **plain table** or **no table**.
+- **Targeting feedback:** whatever you aim at is highlighted before you press. Panel buttons get a bold outline, with a forgiving snap to the nearest button. Rays thicken and change colour (white idle, amber on a target, green while grabbing) and leave a cursor ring where they land. The fingertip shows a dot, plus a ring on the surface that shrinks as you approach (amber near, green touching). A ring between thumb and index closes as you pinch. Previews: hovering a flap shows the flap and its hinge crease in blue; hovering with the cutter shows the segment it would cut; the crease tool shows its snap point; in Solids, the panel, its hinge or the edge under you.
+- **Stable hands:** a pinch that drops for a moment (a tracking blip) keeps the grab. If a hand is lost during a fold, cut, drag or table move, the action is cancelled instead of committed. Hand jitter is smoothed without lag.
+- **Hand tools:** a tray at the front right of the table holds a **crease stylus** and a **cutter**. Pinch one, or reach it or point at it with a controller and pull the trigger, to pick it up. It stays in that hand (an extension of the index finger, or out of the front of a controller). Touch the paper with the glowing tip and draw: the crease or crease segment is previewed, and lifting commits it. The cutter only cuts along crease segments. Pinch next to the tray to put the tool down, which returns you to pinch-folding.
+- **Scenery:** a quiet **mountain terrace** with a wooden deck, a glass railing and layered ridges in haze (default), or the plain **studio**. It's separate from the work surface. **Face the view** turns the terrace to your current direction without moving the table. All of it is generated in code, so it stays light on a standalone headset.
+
 ## Solid → Unfold workspace
 
 Switch with **Paper | Solids** in the header (or open the page with `#solids`). It explores how a 3D form relates to its surface panels and the nets it can unfold into.
@@ -74,6 +82,10 @@ Any static host works too, for example Netlify, Vercel or Cloudflare Pages. Poin
 - `src/solids/shell.js`: panel-and-hinge shell. It removes internal faces, sorts edges into hinge, cut or locked, holds rigid panel poses, handles group and single-panel opening, the hinge forest for unfold/refold, the default-net search and intersection tests.
 - `src/solids/composition.js`, `src/solids/polyhedra.js`: solids, face-to-face alignment and convex overlap tests.
 - `src/solids/workspace.js`, `src/solids/ui.js`, `src/solids/hinge.js`: rendering, gestures (screen, controller ray, pinch, fingertip), VR panel rows and the toolbar.
+- `src/placement.js`: table and panel placement, handles, seated/standing, lock, surface styles.
+- `src/handtools.js`: the tool tray, crease stylus and cutter.
+- `src/environment.js`: terrace and studio surroundings.
+- `vendor/three/jsm/webxr/XRControllerModelFactory.js` has one small patch: it ignores a controller model that finishes loading after the controller has already disconnected.
 
 ## Testing notes
 

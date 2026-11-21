@@ -10,6 +10,7 @@ import { SolidsWorkspace } from './solids/workspace.js';
 import { SolidsUI } from './solids/ui.js';
 import { Placement, SURFACES, SURFACE_LABELS } from './placement.js';
 import { HandTools } from './handtools.js';
+import { Environments, ENV_LABELS } from './environment.js';
 
 const PALETTE = ['#1d1f2b', '#d8452f', '#f0a325', '#f2d64b', '#3f9b5a', '#2f74c0', '#7a4bb3', '#ffffff'];
 const BRUSH_SIZES = [1, 2, 3, 5, 8, 12, 18, 25, 35];
@@ -72,6 +73,8 @@ class App {
     this.ui = new UI(this);
     this.solidsUI = new SolidsUI(this);
     this.applySpace();
+    this.environments.set('terrace');
+    this.environments.align(new THREE.Vector3(0, 0, 0.5), 0);
     if (this.space === 'solids') this.statusText = 'Solid → Unfold: tap a panel to see its hinges, then swing it open. Build adds and joins cubes.';
     this.layoutTable();
     this.resetPosition();
@@ -106,7 +109,7 @@ class App {
     this.bg = new THREE.Color('#e4e0d6');
     scene.background = this.bg;
     this.scene = scene;
-    this.camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.03, 60);
+    this.camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.03, 4000);
     this.camera.position.set(0, 1.25, 0.55);
 
     // workspace: the table's footprint on the floor (position + yaw).
@@ -120,6 +123,7 @@ class App {
 
     const hemi = new THREE.HemisphereLight('#fffaf0', '#8c8476', 1.5);
     scene.add(hemi);
+    this.hemi = hemi;
     const sun = new THREE.DirectionalLight('#ffffff', 1.9);
     sun.position.set(0.5, 1.6, 0.7);
     sun.target.position.set(0, 0, 0);
@@ -132,17 +136,10 @@ class App {
     this.sun = sun;
     this.surface.add(sun, sun.target);
 
-    this.env = new THREE.Group();
+    // Surroundings are separate from the work surface (environment.js).
+    this.environments = new Environments(this, hemi);
+    this.env = this.environments.root;
     scene.add(this.env);
-    const floorTex = new THREE.CanvasTexture(makeFloorCanvas());
-    floorTex.wrapS = floorTex.wrapT = THREE.RepeatWrapping;
-    floorTex.repeat.set(12, 12);
-    floorTex.colorSpace = THREE.SRGBColorSpace;
-    floorTex.anisotropy = 8;
-    const floor = new THREE.Mesh(new THREE.PlaneGeometry(24, 24), new THREE.MeshStandardMaterial({ map: floorTex, roughness: 1 }));
-    floor.rotation.x = -Math.PI / 2;
-    floor.receiveShadow = true;
-    this.env.add(floor);
 
     this.table = new THREE.Group(); // legs (floor based)
     this.workspace.add(this.table);
@@ -224,6 +221,30 @@ class App {
     this.panel.mesh.rotation.set(0, 0, 0);
     this.panel.mesh.rotateY(0.62);
     this.panel.mesh.rotateX(seated ? -0.55 : -0.42);
+  }
+
+  envLabel() { return ENV_LABELS[this.environments.current]; }
+
+  setEnvironment(name) {
+    this.environments.set(name);
+    this.toast(`View: ${ENV_LABELS[name]}.`);
+    this.notify();
+  }
+
+  cycleEnvironment() {
+    const keys = Object.keys(ENV_LABELS);
+    this.setEnvironment(keys[(keys.indexOf(this.environments.current) + 1) % keys.length]);
+  }
+
+  // Stand the viewer on the terrace facing the view (does not move the table).
+  faceTheView() {
+    const head = this.viewerPosition();
+    const cam = this.renderer.xr.isPresenting ? this.renderer.xr.getCamera() : this.camera;
+    const fwd = new THREE.Vector3(0, 0, -1).applyQuaternion(cam.getWorldQuaternion(new THREE.Quaternion()));
+    fwd.y = 0;
+    if (fwd.lengthSq() < 1e-6) fwd.set(0, 0, -1);
+    fwd.normalize();
+    this.environments.align(head, Math.atan2(-fwd.x, -fwd.z));
   }
 
   setSurface(style) {
@@ -754,7 +775,7 @@ class App {
       const ar = this.state.xr === 'immersive-ar';
       this.env.visible = !ar;
       this.applySurfaceStyle();
-      this.scene.background = ar ? null : this.bg;
+      this.environments.applyBackground();
       this.panel.invalidate();
       this.notify();
     });
@@ -762,7 +783,8 @@ class App {
       this.state.xr = null;
       this.panel.mesh.visible = false;
       this.env.visible = true;
-      this.scene.background = this.bg;
+      this.environments.applyBackground();
+      this.environments.align(new THREE.Vector3(0, 0, 0.5), 0);
       this.workspace.position.set(0, 0, 0);
       this.workspace.rotation.set(0, 0, 0);
       this.tableTop = TABLE_TOP;
@@ -820,6 +842,7 @@ class App {
       if (p.lengthSq() > 0) {
         this.needRecenter = false;
         this.recenterXR();
+        this.faceTheView();
       }
     }
     if (xr) this.xrInput.update();
@@ -829,24 +852,6 @@ class App {
     this.paint.flush();
     this.renderer.render(this.scene, this.camera);
   }
-}
-
-function makeFloorCanvas() {
-  const c = document.createElement('canvas');
-  c.width = c.height = 256;
-  const g = c.getContext('2d');
-  g.fillStyle = '#d6d0c3';
-  g.fillRect(0, 0, 256, 256);
-  g.strokeStyle = 'rgba(80, 70, 55, 0.18)';
-  g.lineWidth = 3;
-  g.strokeRect(0, 0, 256, 256);
-  g.strokeStyle = 'rgba(80, 70, 55, 0.07)';
-  g.lineWidth = 1;
-  for (let i = 1; i < 4; i++) {
-    g.beginPath(); g.moveTo(i * 64, 0); g.lineTo(i * 64, 256); g.stroke();
-    g.beginPath(); g.moveTo(0, i * 64); g.lineTo(256, i * 64); g.stroke();
-  }
-  return c;
 }
 
 // A self-healing cutting mat with a 1 cm grid and 5 cm major lines.

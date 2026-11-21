@@ -47,7 +47,7 @@ export class Placement {
     m.userData.handle = { kind, label, ...shape };
     // A larger invisible shape makes it easier to hit with a ray.
     const collider = new THREE.Mesh(
-      shape.len ? new THREE.CapsuleGeometry(0.035, shape.len, 2, 8).rotateZ(Math.PI / 2) : new THREE.SphereGeometry(0.04, 10, 8),
+      shape.len ? new THREE.CapsuleGeometry(0.02, shape.len, 2, 8).rotateZ(Math.PI / 2) : new THREE.SphereGeometry(0.027, 10, 8),
       new THREE.MeshBasicMaterial({ visible: false }),
     );
     collider.userData.owner = m;

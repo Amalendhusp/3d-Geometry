@@ -184,9 +184,12 @@ export class VRPanel {
       { label: `Surface: ${surf}`, w: 1.4, action: () => this.app.cycleSurface() },
       ...(this.app.envLabel ? [{ label: `View: ${this.app.envLabel()}`, w: 1.3, action: () => this.app.cycleEnvironment() }] : []),
     ]);
-    B.push({ kind: 'text', x: M, y: 530, w: W, h: 130, label: locked
+    row(522, 70, [
+      { label: 'Face the view', action: () => { this.app.faceTheView(); this.app.toast('Facing the view. The table stays where it is.'); } },
+    ]);
+    B.push({ kind: 'text', x: M, y: 602, w: W, h: 70, label: locked
       ? 'Placement is locked. Unlock to move the table or this panel.'
-      : 'Grab the yellow bar at the front edge to slide, raise or lower the table; the round knobs turn it; the bar under this panel moves the panel.' });
+      : 'Yellow bar at the front edge: slide, raise, lower. Round knobs: turn. Bar under this panel: move the panel.' });
   }
 
   draw() {

@@ -860,7 +860,8 @@ export class Paper {
   worldBounds() {
     const box = new THREE.Box3();
     const p = new THREE.Vector3();
-    this.root.updateMatrixWorld(true);
+    // Parents too: the table may have moved since the last frame.
+    this.root.updateWorldMatrix(true, true);
     for (const f of this.faces) {
       for (const q of f.poly) {
         p.set(q[0], q[1], 0).applyMatrix4(f.group.matrixWorld);

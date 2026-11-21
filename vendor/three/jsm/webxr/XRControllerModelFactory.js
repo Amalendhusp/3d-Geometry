@@ -267,9 +267,13 @@ class XRControllerModelFactory {
 					}
 
 					this.gltfLoader.setPath( '' );
-					this.gltfLoader.load( controllerModel.motionController.assetUrl, ( asset ) => {
+					const assetUrl = controllerModel.motionController.assetUrl;
+					this.gltfLoader.load( assetUrl, ( asset ) => {
 
-						this._assetCache[ controllerModel.motionController.assetUrl ] = asset;
+						// Paper Fold Studio patch: the controller may have disconnected
+						// (e.g. switching to hands) before its model finished loading.
+						this._assetCache[ assetUrl ] = asset;
+						if ( ! controllerModel.motionController ) return;
 
 						scene = asset.scene.clone();
 
