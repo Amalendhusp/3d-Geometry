@@ -3,6 +3,8 @@ import { Composition, alignFace } from './composition.js';
 import { Shell } from './shell.js';
 import { template, TEMPLATES, SOLID_TYPES, restHeight } from './polyhedra.js';
 import { makeFrame, angleFromPoint, angleFromRay } from './hinge.js';
+import { flatTargets, pieceCentre, planarMove, edgeSnap } from './layout.js';
+import { LabelLayer } from './labels.js';
 
 // "Solid → Unfold" workspace: build a composition of solids, then open its
 // exterior shell panel by panel along hinges.
@@ -124,12 +126,20 @@ export class SolidsWorkspace {
     this.app = app;
     this.root = new THREE.Group();
     this.root.name = 'solids-root';
+    // root (on the table) → inspect (view turn, never geometry) → shell.
+    this.inspect = new THREE.Group();
+    this.inspect.name = 'solids-inspect';
+    this.root.add(this.inspect);
     this.shellGroup = new THREE.Group();
-    this.root.add(this.shellGroup);
+    this.inspect.add(this.shellGroup);
+    this.view = { q: new THREE.Quaternion(), target: null, lift: 0 };
+    this.pivot = new THREE.Vector3();
     this.comp = new Composition();
     this.shell = new Shell();
-    this.state = { tool: 'open', openMode: 'group' };
-    this.sel = { panel: null, hinge: null, solidId: null, fi: null };
+    this.labels = new LabelLayer(this);
+    this.state = { tool: 'open', openMode: 'group', showLabels: true, showIds: false };
+    this.sel = { panel: null, hinge: null, solidId: null, fi: null, piece: null };
+    this.inspectHover = false;
     this.loopEdges = new Set();
     this.hoverPanel = null;
     this.hoverEdge = null;
@@ -181,10 +191,13 @@ export class SolidsWorkspace {
     this.shell.build(this.comp);
     if (shellState) this.shell.restore(shellState);
     else this.shell.defaultNet();
-    this.sel = { panel: null, hinge: null, solidId: null, fi: null };
+    this.sel = { panel: null, hinge: null, solidId: null, fi: null, piece: null };
     this.loopEdges.clear();
     this.moving.clear();
+    this.netCycle = null;
+    this.updatePivot();
     this.buildMeshes();
+    this.applyView();
     this.checkOverlaps();
     if (this.ready) { this.app.layoutTable(); this.app.notify(); }
   }
@@ -240,10 +253,13 @@ export class SolidsWorkspace {
     this.comp.restore(snap.comp);
     this.shell.build(this.comp);
     this.shell.restore(snap.shell);
-    this.sel = { panel: null, hinge: null, solidId: null, fi: null };
+    this.sel = { panel: null, hinge: null, solidId: null, fi: null, piece: null };
     this.loopEdges.clear();
     this.moving.clear();
+    this.netCycle = null;
+    this.updatePivot();
     this.buildMeshes();
+    this.applyView();
     this.checkOverlaps();
     if (this.ready) { this.app.layoutTable(); this.app.notify(); }
   }
@@ -265,7 +281,7 @@ export class SolidsWorkspace {
 
   save() {
     try {
-      localStorage.setItem(STORE_KEY, JSON.stringify({ v: 2, ...this.snapshot() }));
+      localStorage.setItem(STORE_KEY, JSON.stringify({ v: 3, ...this.fullSnapshot() }));
       this.app.toast(`Saved: ${this.describe()}.`);
     } catch {
       this.app.toast('Saving is blocked in this browser view.');
@@ -284,13 +300,25 @@ export class SolidsWorkspace {
     if (!data || !data.comp || !Array.isArray(data.comp.solids)) { this.app.toast('That file is not a saved composition.'); return false; }
     this.pushHistory();
     this.restoreSnapshot(data);
+    // The view turn is saved with the composition but is not part of undo.
+    this.view.target = null;
+    if (Array.isArray(data.view) && data.view.length === 4) this.view.q.fromArray(data.view).normalize();
+    else this.view.q.identity();
+    this.applyView();
     this.frameView();
-    this.app.toast(`${verb}: ${this.describe()}. ${this.netSentence()}`, 5000);
+    const pieces = this.shell.hingePieces().length;
+    const extra = [];
+    if (this.isTurned()) extra.push(`turned ${Math.round(this.viewTurnDegrees())}° for viewing`);
+    if (!this.shell.isClosed() && this.shell.flatReport().ok) extra.push(`laid flat in ${pieces} piece${pieces > 1 ? 's' : ''}`);
+    this.app.toast(`${verb}: ${this.describe()}${extra.length ? ` (${extra.join(', ')})` : ''}. ${this.netSentence()}`, 5000);
     return true;
   }
 
+  // Undo history holds geometry and layout; saved files also hold the view.
+  fullSnapshot() { return { ...this.snapshot(), view: this.view.q.toArray().map((v) => Math.round(v * 1e9) / 1e9) }; }
+
   // A file you can keep or share (download), and read back with Import.
-  exportText() { return JSON.stringify({ v: 2, app: 'paper-fold-studio', ...this.snapshot() }, null, 1); }
+  exportText() { return JSON.stringify({ v: 3, app: 'paper-fold-studio', ...this.fullSnapshot() }, null, 1); }
 
   // ---------------------------------------------------------- rendering
 
@@ -313,6 +341,7 @@ export class SolidsWorkspace {
 
   buildMeshes() {
     this.hoverPanel = this.hoverEdge = this.hoverHinge = null;
+    this.labels.reset();
     for (const m of this.meshes.values()) {
       this.shellGroup.remove(m.group);
       m.geometry.dispose();
@@ -354,8 +383,15 @@ export class SolidsWorkspace {
 
   panelState(p) {
     const tool = this.state.tool;
+    if (this.clean) return 'none';
     if (this.overlapSet.has(p)) return 'overlap';
     if (this.flash && this.flash.id === p.solidId) return 'overlap';
+    if (tool === 'inspect') return this.inspectHover || this.tools.inspecting() ? 'hover' : 'none';
+    if (tool === 'layout') {
+      if (this.sel.piece && this.sel.piece.has(p)) return 'selected';
+      if (this.moving.has(p)) return 'moving';
+      return this.hoverPanel === p ? 'hover' : 'none';
+    }
     if (tool === 'build') {
       if (this.sel.solidId === p.solidId) return p.fi === this.sel.fi ? 'face' : 'solid';
       return this.hoverPanel === p ? 'hover' : 'none';
@@ -367,7 +403,7 @@ export class SolidsWorkspace {
   }
 
   refreshStyles() {
-    const options = this.sel.panel && this.state.tool === 'open' ? this.hingeOptions() : [];
+    const options = this.sel.panel && this.state.tool === 'open' && !this.clean ? this.hingeOptions() : [];
     const okEdges = new Set(options.filter((o) => o.ok).map((o) => o.e));
     for (const [p, m] of this.meshes) {
       const st = this.panelState(p);
@@ -375,6 +411,7 @@ export class SolidsWorkspace {
       m.inn.material = this.material('in', m.parity, st, m.type);
       this.buildRibbon(p, m, okEdges);
     }
+    this.labels.refresh();
   }
 
   // Materials only (cheap; used every frame while a panel swings).
@@ -388,6 +425,10 @@ export class SolidsWorkspace {
 
   edgeStyle(p, e, okEdges) {
     const w = this.edgeLen * 0.022;
+    if (this.clean) {
+      if (!e.shared || e.locked) return { color: COLORS.locked, w, dashed: true };
+      return e.type === 'hinge' ? { color: COLORS.hinge, w } : { color: COLORS.cut, w, dashed: true };
+    }
     if (this.hoverEdge === e) return { color: '#ffffff', w: w * 2.6 };
     if (this.hoverPanel === p && this.hoverHinge === e && this.sel.panel !== p) return { color: '#5aa0ff', w: w * 2.2 };
     if (this.sel.panel === p && this.sel.hinge === e && this.state.tool === 'open') return { color: COLORS.chosen, w: w * 2.4 };
@@ -458,7 +499,13 @@ export class SolidsWorkspace {
     this.raycaster.set(ray.origin, ray.direction);
     this.raycaster.far = 20;
     const hits = this.raycaster.intersectObjects(this.pickables || [], false);
-    if (!hits.length) return null;
+    if (!hits.length) {
+      if (this.state.tool !== 'inspect') return null;
+      const f = this.formSphere();
+      const pt = ray.intersectSphere(new THREE.Sphere(f.centre, f.radius), new THREE.Vector3());
+      if (!pt) return null;
+      return { panel: null, form: true, point: pt, distance: pt.distanceTo(ray.origin), normal: pt.clone().sub(f.centre).normalize() };
+    }
     return this.hitFromWorld(hits[0].object.userData.panel, hits[0].point, hits[0].distance, ray.direction);
   }
 
@@ -473,12 +520,19 @@ export class SolidsWorkspace {
   // Preview what a press would do: the panel (and the hinge it would swing
   // on) in Open, the edge in Edges, the face in Build.
   setHover(hit, ptr) {
+    if (this.state.tool === 'inspect') {
+      const h = !!hit;
+      if (h !== this.inspectHover) { this.inspectHover = h; this.refreshMaterials(); }
+      return;
+    }
     let panel = null, edge = null, hinge = null;
     if (hit && hit.panel) {
       panel = hit.panel;
       if (this.state.tool === 'edges') {
         edge = this.edgeNear(panel, hit.local, ptr && ptr.kind === 'ray' && !hit.near ? 0.32 : 0.25);
         panel = null;
+      } else if (this.state.tool === 'layout') {
+        edge = this.edgeNear(panel, hit.local, ptr && ptr.kind === 'ray' && !hit.near ? 0.2 : 0.14);
       } else if (this.state.tool === 'open' && this.sel.panel !== panel) {
         hinge = this.defaultHinge(panel);
       }
@@ -494,6 +548,12 @@ export class SolidsWorkspace {
   nearest(point, maxDist) {
     if (!this.root.visible) return null;
     this.root.updateMatrixWorld(true);
+    if (this.state.tool === 'inspect') {
+      const f = this.formSphere();
+      const d = point.distanceTo(f.centre);
+      if (d > f.radius + maxDist) return null;
+      return { panel: null, form: true, point: point.clone(), distance: Math.max(0, d - f.radius), normal: point.clone().sub(f.centre).normalize() };
+    }
     // Prefer a panel the point is outside of (the side you can see); only
     // when it is behind every nearby panel (a hand inside an opened shell)
     // take the nearest from behind. Near sharp corners a point just outside
@@ -530,7 +590,98 @@ export class SolidsWorkspace {
     return best;
   }
 
-  toLocal(world) { return this.root.worldToLocal(world.clone()); }
+  toLocal(world) {
+    this.shellGroup.updateWorldMatrix(true, false);
+    return this.shellGroup.worldToLocal(world.clone());
+  }
+
+  // ---------------------------------------------------------- inspection
+  // Inspect turns the whole form freely to look at it. It is a view
+  // transform between the table and the shell: the solids, panels, hinges,
+  // fold angles and cuts are never touched, and it stays out of undo. The
+  // form turns about its centre and keeps resting on the table.
+
+  updatePivot() {
+    const box = new THREE.Box3();
+    for (const p of this.shell.panels) for (const v of p.verts) box.expandByPoint(v);
+    if (box.isEmpty()) this.pivot.set(0, 0, 0); else box.getCenter(this.pivot);
+  }
+
+  isTurned() { return 1 - Math.abs(this.view.q.w) > 1e-9; }
+
+  viewTurnDegrees() { return deg(2 * Math.acos(Math.min(1, Math.abs(this.view.q.w)))); }
+
+  applyView() {
+    const q = this.view.q, c = this.pivot;
+    let lift = 0;
+    if (this.isTurned()) {
+      let minY = Infinity;
+      const v = new THREE.Vector3();
+      for (const p of this.shell.panels) for (const r of p.verts) { v.copy(r).applyMatrix4(p.M).sub(c).applyQuaternion(q); minY = Math.min(minY, v.y); }
+      if (minY < Infinity) lift = -minY - c.y;
+    }
+    this.view.lift = lift;
+    this.inspect.position.set(c.x, c.y + lift, c.z);
+    this.inspect.quaternion.copy(q);
+    this.shellGroup.position.set(-c.x, -c.y, -c.z);
+    this.inspect.updateMatrix();
+    this.shellGroup.updateMatrix();
+  }
+
+  // A rotation given in world space, as a turn of the view in the table's frame.
+  localTurn(worldDelta) {
+    this.root.updateWorldMatrix(true, false);
+    const R = this.root.getWorldQuaternion(new THREE.Quaternion());
+    return R.clone().invert().multiply(worldDelta).multiply(R);
+  }
+
+  // Live turn while dragging: q = delta · q0.
+  turnView(worldDelta, q0) {
+    this.view.target = null;
+    this.view.q.copy(this.localTurn(worldDelta).multiply(q0)).normalize();
+    this.applyView();
+  }
+
+  // Animated step: a quarter turn about the vertical, or a tip toward you.
+  stepView(axis, degrees = 90) {
+    let a = new THREE.Vector3(0, 1, 0);
+    if (axis === 'tip') {
+      const cam = this.app.renderer?.xr?.isPresenting ? null : this.app.camera;
+      a = cam ? new THREE.Vector3(1, 0, 0).applyQuaternion(cam.getWorldQuaternion(new THREE.Quaternion())) : new THREE.Vector3(1, 0, 0).applyQuaternion(this.root.getWorldQuaternion(new THREE.Quaternion()));
+      a.y = 0;
+      if (a.lengthSq() < 1e-9) a.set(1, 0, 0);
+      a.normalize();
+    }
+    const from = this.view.target || this.view.q;
+    const dq = this.localTurn(new THREE.Quaternion().setFromAxisAngle(a, rad(degrees)));
+    this.view.target = dq.multiply(from).normalize();
+    this.app.notify?.();
+  }
+
+  resetOrientation(announce = true) {
+    if (!this.isTurned() && !this.view.target) { if (announce) this.app.toast('Already in its resting orientation.'); return; }
+    this.view.target = new THREE.Quaternion();
+    if (announce) this.app.toast('Back to its resting orientation. Nothing about the shape changed.');
+    this.app.notify?.();
+  }
+
+  // Bring the whole form into view (screen) or in front of you (VR).
+  fitView() {
+    if (this.app.renderer?.xr?.isPresenting) { this.app.actions.recenter(); this.app.toast('Placed in front of you.'); return; }
+    this.app.fitCamera?.();
+    this.app.toast('View fitted to the form.');
+  }
+
+  // Centre and radius (world) of everything shown, for Inspect grabs.
+  formSphere() {
+    this.root.updateMatrixWorld(true);
+    const box = new THREE.Box3();
+    for (const p of this.shell.panels) for (const v of this.shell.worldPoly(p)) box.expandByPoint(v);
+    const c = box.isEmpty() ? new THREE.Vector3() : box.getCenter(new THREE.Vector3());
+    let r = 0;
+    for (const p of this.shell.panels) for (const v of this.shell.worldPoly(p)) r = Math.max(r, v.distanceTo(c));
+    return { centre: this.shellGroup.localToWorld(c), radius: r * 1.05 + this.edgeLen * 0.1 };
+  }
 
   // ----------------------------------------------------------- selection
 
@@ -606,18 +757,30 @@ export class SolidsWorkspace {
 
   setTool(t) {
     this.tools.finishAll();
+    const prev = this.state.tool;
     this.state.tool = t;
     this.hoverPanel = this.hoverEdge = this.hoverHinge = null;
+    this.inspectHover = false;
     if (t !== 'open') this.sel.panel = this.sel.hinge = null;
     if (t !== 'build') this.sel.solidId = this.sel.fi = null;
+    if (t !== 'layout') this.sel.piece = null;
     this.loopEdges.clear();
     this.refreshStyles();
     const hints = {
-      build: 'Tap a face to pick it, then Add cube. Drag a cube to move it; it snaps face to face.',
+      inspect: 'Drag the form to turn it and look at it from any side (on a screen, dragging empty space still moves the camera). In VR, grab it with one hand and turn your wrist, or with both hands. Nothing about the shape changes.',
+      build: 'Tap a face to pick it, then Add. Drag a solid to move it; it snaps to a matching face.',
       open: 'Tap a panel to select it and see its hinges. Drag it, or use the slider, to swing it open.',
       edges: 'Tap an edge to switch it between hinge (green) and cut (red, dashed).',
+      layout: 'Flat layout: drag a piece to move it, turn it with ⟲ ⟳, tap a hinge to cut it apart, tap a cut whose sides meet to join it. Matching numbers mark edges that join.',
     };
-    this.app.toast(hints[t]);
+    let msg = hints[t];
+    // Building and the flat layout work on the form resting on the table.
+    if ((t === 'build' || t === 'layout') && (this.isTurned() || this.view.target)) {
+      this.view.target = new THREE.Quaternion();
+      if (t === 'build') msg = `Orientation reset so the solids rest on the table while you build. ${msg}`;
+    }
+    this.app.toast(msg, t === 'inspect' || t === 'layout' ? 6000 : undefined);
+    if (t === 'layout' && prev !== 'layout' && !this.shell.flatReport().ok) this.layFlat({ intro: true });
     this.app.notify?.();
   }
 
@@ -748,6 +911,7 @@ export class SolidsWorkspace {
       return;
     }
     this.pushHistory();
+    if (this.isTurned()) this.view.target = new THREE.Quaternion();
     const to = this.shell.flatAngles(F);
     this.anim = { kind: 'forest', F, from: this.shell.forestAngles(F), to, roots: this.centredRoots(F, to), t: 0, dur: 1.2, label: 'unfold' };
   }
@@ -803,7 +967,9 @@ export class SolidsWorkspace {
 
   stepAnim(a, t) {
     const e = t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
-    if (a.kind === 'hinge') {
+    if (a.kind === 'poses') {
+      for (const [p, from, to] of a.items) p.M.copy(t >= 1 ? to : lerpMatrix(from, to, e));
+    } else if (a.kind === 'hinge') {
       this.shell.setAngle(a.plan, a.from + (a.to - a.from) * e);
     } else {
       const ang = new Map();
@@ -823,6 +989,8 @@ export class SolidsWorkspace {
     if (a.label === 'refold') for (const p of this.shell.panels) p.M.identity();
     this.updateMatrices();
     this.afterMotion(false);
+    if (a.label === 'layflat') { this.frameView(true); this.reportLayout(a.prefix || 'Laid on the surface.'); return; }
+    if (a.label === 'piece') { this.reportLayout(a.prefix || 'Piece moved.'); return; }
     if (a.label === 'unfold') {
       // Report what actually happened, and never call an overlapping layout a net.
       const net = this.shell.classify(this.shell.net && this.shell.net.searched);
@@ -848,6 +1016,11 @@ export class SolidsWorkspace {
 
   update(dt) {
     if (this.flash && performance.now() > this.flash.until) { this.flash = null; this.refreshMaterials(); }
+    if (this.view.target) {
+      this.view.q.slerp(this.view.target, 1 - Math.exp(-dt * 9));
+      if (this.view.q.angleTo(this.view.target) < 2e-3) { this.view.q.copy(this.view.target); this.view.target = null; this.app.notify?.(); }
+      this.applyView();
+    }
     const a = this.anim;
     if (a) {
       a.t = Math.min(1, a.t + dt / a.dur);
@@ -861,6 +1034,185 @@ export class SolidsWorkspace {
     }
   }
 
+  // --------------------------------------------------------- flat layout
+  // The net lies on the work surface as one or more pieces. A piece is a
+  // hinge-connected group of panels, so it is rigid and coplanar; pieces
+  // move and turn only as wholes, which keeps every panel's size and every
+  // edge's number. Refold all returns to the assembled form from any layout.
+
+  // Lay every piece flat (outside down) on the surface. Pieces that already
+  // lie flat stay put unless arrange is set; the others are placed clear.
+  layFlat({ arrange = false, record = true, prefix = null, intro = false } = {}) {
+    this.tools.finishAll();
+    this.stopAnim();
+    const F = this.shell.forest();
+    if (F.loops.length) {
+      const P = F.loops[0].uses[0].panel;
+      this.loopEdges = new Set(this.shell.loopEdges(P, this.shell.other(F.loops[0], P), F.loops[0]));
+      this.refreshStyles();
+      this.app.toast(`The hinges form ${F.loops.length} closed loop${F.loops.length > 1 ? 's' : ''} (orange), so the net cannot lie flat. Cut an orange edge first.`);
+      return false;
+    }
+    if (this.isTurned()) this.view.target = new THREE.Quaternion();
+    const t = flatTargets(this.shell, { keepFlat: !arrange });
+    if (!t.moved && !arrange) { this.reportLayout(prefix || 'Already lying flat.'); return true; }
+    if (record) this.pushHistory();
+    const roots = new Map([...t.roots].map(([r, M]) => [r, { from: r.M.clone(), to: M }]));
+    this.anim = { kind: 'forest', F: t.F, from: this.shell.forestAngles(t.F), to: t.angles, roots, t: 0, dur: intro ? 1.2 : 0.9, label: 'layflat', prefix: prefix || (arrange ? 'Pieces arranged.' : 'Laid on the surface.') };
+    return true;
+  }
+
+  arrangePieces() { this.layFlat({ arrange: true, prefix: 'Pieces arranged side by side.' }); }
+
+  // Flatness and overlaps of the current layout, in words.
+  layoutText() {
+    const fr = this.shell.flatReport();
+    const ov = this.shell.overlapReport();
+    const parts = [`${fr.pieces} piece${fr.pieces > 1 ? 's' : ''}`];
+    parts.push(fr.ok ? 'every panel flat on the surface' : 'not lying flat');
+    if (ov.within) parts.push(`${ov.within} overlap${ov.within > 1 ? 's' : ''} within a piece`);
+    if (ov.between) parts.push(`${ov.between} overlap${ov.between > 1 ? 's' : ''} between pieces`);
+    if (!ov.within && !ov.between && fr.ok) parts.push('no overlaps');
+    return { text: parts.join(' · '), fr, ov };
+  }
+
+  reportLayout(prefix = '') {
+    const { fr, ov } = this.layoutText();
+    let msg = prefix ? `${prefix} ` : '';
+    if (fr.ok) msg += `${fr.pieces} piece${fr.pieces > 1 ? 's' : ''}, ${fr.panels} panels: every panel lies in the surface plane (checked to 1 µm; largest gap ${(fr.maxDev * 1e6).toFixed(3)} µm).`;
+    else msg += `Not lying flat yet${fr.tilted ? ` (${fr.tilted} panel${fr.tilted > 1 ? 's' : ''} tilted)` : ''}. Press Lay net on surface.`;
+    if (ov.within) msg += ` ${ov.within} panel pair${ov.within > 1 ? 's' : ''} overlap inside a piece (red), so that piece is not a valid net. Press Other nets to look for an overlap-free arrangement first; cutting a hinge to split the piece is the fallback.`;
+    if (ov.between) msg += ` ${ov.between} pair${ov.between > 1 ? 's' : ''} overlap between pieces: drag them apart or press Arrange pieces.`;
+    if (fr.ok && !ov.within && !ov.between) msg += ' No overlaps within or between pieces.';
+    this.app.toast(msg.trim(), 7000);
+    this.app.notify?.();
+  }
+
+  pieceOf(P) { return this.shell.hingePieces().find((pc) => pc.includes(P)) || [P]; }
+
+  selectPiece(P) {
+    const piece = this.pieceOf(P);
+    this.sel.piece = new Set(piece);
+    this.refreshStyles();
+    this.app.haptic?.();
+    this.app.toast(`Piece of ${piece.length} panel${piece.length > 1 ? 's' : ''} selected. Drag it to move it, ⟲ ⟳ to turn it, or tap an edge to cut or join.`);
+    this.app.notify?.();
+  }
+
+  // Animate panels to new matrices.
+  animatePoses(items, label, prefix, dur = 0.35) {
+    this.stopAnim();
+    this.anim = { kind: 'poses', items, t: 0, dur, label, prefix };
+  }
+
+  rotatePiece(degrees) {
+    this.tools.finishAll();
+    this.stopAnim();
+    let piece = this.sel.piece ? [...this.sel.piece] : null;
+    if (!piece) {
+      const all = this.shell.hingePieces();
+      if (all.length === 1) piece = all[0];
+      else { this.app.toast('Tap a piece first, then turn it.'); return; }
+    }
+    if (!this.shell.flatReport().ok) { this.app.toast('Lay the net on the surface first, then turn its pieces.'); return; }
+    this.pushHistory();
+    const m = planarMove(0, 0, rad(degrees), pieceCentre(this.shell, piece));
+    this.animatePoses(piece.map((p) => [p, p.M.clone(), m.clone().multiply(p.M)]), 'piece', `Piece turned ${degrees > 0 ? '⟲' : '⟳'} ${Math.abs(degrees)}°.`);
+  }
+
+  // Tap on an edge in the flat layout: cut a hinge (and separate the two
+  // pieces), or join a cut whose two sides meet.
+  layoutEdge(e, P) {
+    if (!e.shared || e.locked) { this.app.toast(`Edge ${e.no} joins more than two panels, so it stays cut.`); return; }
+    const Q = this.shell.other(e, P);
+    if (e.type === 'hinge') { this.cutHinge(e, P, Q); return; }
+    if (!this.shell.intact(e)) {
+      const rootOf = this.shell.pieceRoots();
+      const where = rootOf.get(P) === rootOf.get(Q) ? 'elsewhere on this piece' : 'on another piece';
+      this.app.toast(`Edge ${e.no} is cut. Its matching edge, also labelled ${e.no}, is ${where}. Drag a piece so the two ${e.no} edges meet (they snap), then tap to join.`, 6000);
+      return;
+    }
+    const rootOf = this.shell.pieceRoots();
+    if (rootOf.get(P) === rootOf.get(Q)) { this.app.toast(`Joining edge ${e.no} would close a loop of hinges inside this piece, so it stays cut.`); return; }
+    this.pushHistory();
+    e.type = 'hinge';
+    this.shell.classify();
+    this.netCycle = null;
+    this.sel.piece = null;
+    this.refreshStyles();
+    this.reportLayout(`Joined at edge ${e.no}.`);
+  }
+
+  cutHinge(e, P, Q) {
+    this.tools.finishAll();
+    this.stopAnim();
+    this.pushHistory();
+    e.type = 'cut';
+    this.shell.classify();
+    this.netCycle = null;
+    const pieces = this.shell.hingePieces();
+    this.sel.piece = null;
+    this.refreshStyles();
+    if (!this.shell.flatReport().ok) {
+      this.app.toast(`Cut edge ${e.no}. Lay the net on the surface to separate the pieces.`);
+      this.app.notify?.();
+      return;
+    }
+    // Slide the smaller piece straight away from the cut so the split shows.
+    const a = pieces.find((pc) => pc.includes(P)), b = pieces.find((pc) => pc.includes(Q));
+    const mover = a.length <= b.length ? a : b;
+    const mid = e.a.clone().add(e.b).multiplyScalar(0.5).applyMatrix4(P.M);
+    const dir = pieceCentre(this.shell, mover).sub(mid);
+    dir.y = 0;
+    if (dir.lengthSq() < 1e-12) dir.set(1, 0, 0);
+    dir.normalize().multiplyScalar(this.edgeLen * 0.35);
+    const m = new THREE.Matrix4().makeTranslation(dir.x, 0, dir.z);
+    this.animatePoses(mover.map((p) => [p, p.M.clone(), m.clone().multiply(p.M)]), 'piece', `Cut edge ${e.no}: now ${pieces.length} pieces. The two edges labelled ${e.no} are the ones that join.`);
+  }
+
+  // Cycle through different verified nets (alternatives to splitting).
+  otherNets() {
+    this.tools.finishAll();
+    this.stopAnim();
+    const keyOf = (h) => [...h].map((e) => e.no).sort((x, y) => x - y).join(',');
+    if (!this.netCycle) {
+      const r = this.shell.findNets(8, 1500);
+      this.netCycle = { nets: r.nets, i: -1, tries: r.tries, ms: r.ms };
+    }
+    const c = this.netCycle;
+    if (!c.nets.length) {
+      this.app.toast(`The search tried ${c.tries} cut layouts in ${(c.ms / 1000).toFixed(1)} s and found no overlap-free single net for this composition. That does not prove none exists. You can split the net instead: tap a hinge to cut it, then move the pieces apart.`, 8000);
+      return;
+    }
+    const cur = keyOf(this.shell.hingeSet());
+    let next = (c.i + 1) % c.nets.length;
+    if (c.nets.length > 1 && keyOf(c.nets[next]) === cur) next = (next + 1) % c.nets.length;
+    c.i = next;
+    this.pushHistory();
+    for (const p of this.shell.panels) p.M.identity();
+    this.shell.setLayout(c.nets[c.i]);
+    this.shell.classify();
+    this.sel.piece = null;
+    this.updateMatrices();
+    this.refreshStyles();
+    const many = c.nets.length >= 8 ? 'the search stopped at 8; there are more' : `the search found ${c.nets.length} in ${c.tries} layouts tried; there may be others`;
+    this.layFlat({ arrange: true, record: false, prefix: `Net ${c.i + 1} of ${c.nets.length} overlap-free nets (${many}). Undo brings back your previous cuts.` });
+  }
+
+  toggleLabels() {
+    this.state.showLabels = !this.state.showLabels;
+    this.refreshStyles();
+    this.app.toast(this.state.showLabels ? 'Edge numbers shown: the same number marks the two edges that join.' : 'Edge numbers hidden.');
+    this.app.notify?.();
+  }
+
+  toggleIds() {
+    this.state.showIds = !this.state.showIds;
+    this.refreshStyles();
+    this.app.toast(this.state.showIds ? 'Panel numbers shown.' : 'Panel numbers hidden.');
+    this.app.notify?.();
+  }
+
   // ------------------------------------------------------------- edges
 
   toggleEdge(e) {
@@ -868,6 +1220,7 @@ export class SolidsWorkspace {
     if (e.type === 'cut' && !this.shell.intact(e)) { this.app.toast('These panels are apart. Refold them before joining this edge with a hinge.'); return; }
     this.pushHistory();
     e.type = e.type === 'hinge' ? 'cut' : 'hinge';
+    this.netCycle = null;
     this.loopEdges.clear();
     // Re-check the layout straight away so its status is always current.
     this.shell.classify();
@@ -1054,7 +1407,7 @@ export class SolidsWorkspace {
 
   // Ghost preview for moving a solid.
   showGhost(type, edge, position, quaternion, state) {
-    if (this.ghost && this.ghost.userData.type !== type) { this.root.remove(this.ghost); this.ghost.geometry.dispose(); this.ghost = null; }
+    if (this.ghost && this.ghost.userData.type !== type) { this.shellGroup.remove(this.ghost); this.ghost.geometry.dispose(); this.ghost = null; }
     if (!this.ghost) {
       const tm = template(type);
       const pos = [];
@@ -1069,7 +1422,7 @@ export class SolidsWorkspace {
       this.ghost = new THREE.Mesh(g, new THREE.MeshStandardMaterial({ transparent: true, opacity: 0.45, depthWrite: false, roughness: 0.6 }));
       this.ghost.add(new THREE.LineSegments(new THREE.EdgesGeometry(g), new THREE.LineBasicMaterial({ color: '#1d1f2b' })));
       this.ghost.userData.type = type;
-      this.root.add(this.ghost);
+      this.shellGroup.add(this.ghost);
     }
     this.ghost.visible = true;
     this.ghost.position.copy(position);
@@ -1088,6 +1441,8 @@ export class SolidsWorkspace {
     if (s.pieces > 1) parts.push(`${s.pieces} separate shells`);
     if (this.overlapPairs) parts.push(`${this.overlapPairs} intersecting pair${this.overlapPairs > 1 ? 's' : ''} now`);
     if (this.state.tool === 'build') { const jt = this.jointText(); if (jt) parts.push(`Joints: ${jt}`); }
+    if (this.state.tool === 'layout') parts.push(`Layout: ${this.layoutText().text}`);
+    if (this.state.tool === 'inspect') parts.push(this.isTurned() ? `Turned ${Math.round(this.viewTurnDegrees())}° for viewing` : 'Resting orientation');
     parts.push(this.netText());
     return parts.join(' · ');
   }
@@ -1097,12 +1452,34 @@ export class SolidsWorkspace {
     const s = this.state;
     const a = this;
     row(y0, 84, [
+      { label: 'Inspect', action: () => a.setTool('inspect'), active: s.tool === 'inspect' },
       { label: 'Build', action: () => a.setTool('build'), active: s.tool === 'build' },
       { label: 'Open', action: () => a.setTool('open'), active: s.tool === 'open' },
       { label: 'Edges', action: () => a.setTool('edges'), active: s.tool === 'edges' },
-    ]);
+      { label: 'Layout', action: () => a.setTool('layout'), active: s.tool === 'layout' },
+    ], 8);
     const y1 = y0 + 100, y2 = y0 + 190;
-    if (s.tool === 'build') {
+    if (s.tool === 'inspect') {
+      row(y1, 78, [
+        { label: 'Reset orientation', w: 1.5, action: () => a.resetOrientation() },
+        { label: 'Fit view', action: () => a.fitView() },
+        { label: 'Turn 90°', action: () => a.stepView('up', 90) },
+        { label: 'Tip 90°', action: () => a.stepView('tip', 90) },
+      ], 8);
+      B.push({ kind: 'text', x: M, y: y2, w: W, h: 78, label: 'Pinch or pull the trigger on the form and turn your wrist; with both hands, move them around each other. Only the view turns.' });
+    } else if (s.tool === 'layout') {
+      row(y1, 78, [
+        { label: 'Lay flat', action: () => a.layFlat() },
+        { label: 'Arrange', action: () => a.arrangePieces() },
+        { label: 'Other nets', action: () => a.otherNets() },
+      ], 8);
+      row(y2, 78, [
+        { label: '⟲ 15°', action: () => a.rotatePiece(15) },
+        { label: '⟳ 15°', action: () => a.rotatePiece(-15) },
+        { label: 'Numbers', action: () => a.toggleLabels(), active: s.showLabels },
+        { label: 'Panel IDs', action: () => a.toggleIds(), active: s.showIds },
+      ], 8);
+    } else if (s.tool === 'build') {
       const short = { cube: 'Cube', tetra: 'Tetra', octa: 'Octa', cubocta: 'Cubocta' };
       row(y1, 78, SOLID_TYPES.map((t) => ({ label: short[t], action: () => a.setAddType(t), active: a.addType === t })), 10);
       row(y2, 78, [
@@ -1162,10 +1539,13 @@ export class SolidsWorkspace {
   // workspace's own frame.
   bounds() {
     const box = new THREE.Box3();
+    this.inspect.updateMatrix();
+    this.shellGroup.updateMatrix();
+    const V = this.inspect.matrix.clone().multiply(this.shellGroup.matrix);
     if (this.shell && this.shell.panels.length) {
-      for (const p of this.shell.panels) for (const v of this.shell.worldPoly(p)) box.expandByPoint(v);
+      for (const p of this.shell.panels) for (const v of this.shell.worldPoly(p)) box.expandByPoint(v.applyMatrix4(V));
     } else {
-      for (const s of this.comp.solids) for (const v of s.worldVerts()) box.expandByPoint(v);
+      for (const s of this.comp.solids) for (const v of s.worldVerts()) box.expandByPoint(v.applyMatrix4(V));
     }
     return box;
   }
@@ -1215,9 +1595,12 @@ class SolidsTools {
     const hit = ptr.pick();
     if (!hit) return false;
     const tool = this.ws.state.tool;
-    const g = tool === 'build' ? this.beginBuild(ptr, hit)
-      : tool === 'edges' ? this.beginEdge(ptr, hit)
-        : this.beginOpen(ptr, hit);
+    if (!hit.panel && tool !== 'inspect') return false;
+    const g = tool === 'inspect' ? this.beginInspect(ptr, hit)
+      : tool === 'build' ? this.beginBuild(ptr, hit)
+        : tool === 'edges' ? this.beginEdge(ptr, hit)
+          : tool === 'layout' ? this.beginLayout(ptr, hit)
+            : this.beginOpen(ptr, hit);
     if (!g) return false;
     this.active.set(ptr.id, g);
     return true;
@@ -1413,8 +1796,9 @@ class SolidsTools {
       d.state = best ? 'snap' : 'free';
     } else {
       // Follow the hand, including its rotation.
-      const local = ws.root.matrixWorld.clone().invert();
-      const D = local.clone().multiply(p.grabMatrix()).multiply(d.grabStart.clone().invert()).multiply(ws.root.matrixWorld);
+      ws.shellGroup.updateWorldMatrix(true, false);
+      const frame = ws.shellGroup.matrixWorld;
+      const D = frame.clone().invert().multiply(p.grabMatrix()).multiply(d.grabStart.clone().invert()).multiply(frame);
       const m = new THREE.Matrix4().compose(d.startPos, d.startQuat, new THREE.Vector3(1, 1, 1)).premultiply(D);
       pos = new THREE.Vector3(); quat = new THREE.Quaternion();
       m.decompose(pos, quat, new THREE.Vector3());
@@ -1460,6 +1844,208 @@ class SolidsTools {
     ws.app.toast(d.state === 'snap' ? `Snapped face to face. ${ws.describe()}.${jt ? ` Joints: ${jt}.` : ''} ${ws.netSentence()}` : 'Placed on its own. Snap it to a matching face of another solid to merge the shells.', 6000);
   }
 
+  // ------------------------------------------------------------ inspect
+
+  inspecting() { return !!(this.grabs && this.grabs.size); }
+
+  // One pointer turns the form (mouse or finger: drag; controller or hand:
+  // turn the wrist). A second hand switches to turning it by the line
+  // between the two hands. Only the view turns.
+  beginInspect(ptr) {
+    if (ptr.kind === 'touch') return null;
+    if (!this.grabs) this.grabs = new Map();
+    // Each grab keeps the pose from its own latest accepted move, so a hand
+    // that is letting go (and no longer moving the form) cannot pull it.
+    const g = { ptr, m: ptr.kind === 'screen' ? null : ptr.grabMatrix().clone() };
+    this.grabs.set(ptr.id, g);
+    this.anchorInspect();
+    this.ws.refreshMaterials();
+    this.ws.app.haptic?.();
+    return {
+      move: (p) => { g.ptr = p; if (p.kind !== 'screen') g.m = p.grabMatrix().clone(); this.dragInspect(); },
+      end: () => {
+        // Fingers start opening just before a pinch release registers; drop
+        // a small turn made in that last moment.
+        if (ptr.isHand && this.trail && this.trail.length) {
+          const last = this.trail[this.trail.length - 1].t;
+          const before = this.trail.find((x) => x.t >= last - 100);
+          if (before && before.q.angleTo(this.ws.view.q) < THREE.MathUtils.degToRad(4)) {
+            this.ws.view.q.copy(before.q);
+            this.ws.applyView();
+          }
+        }
+        this.grabs.delete(ptr.id);
+        this.anchorInspect();
+        this.ws.refreshMaterials();
+        this.ws.app.notify?.();
+      },
+    };
+  }
+
+  anchorInspect() {
+    const ws = this.ws;
+    const list = [...this.grabs.values()];
+    if (ws.view.target) { ws.view.q.copy(ws.view.target); ws.view.target = null; ws.applyView(); }
+    const q0 = ws.view.q.clone();
+    this.trail = [];
+    if (!list.length) { this.inspectAnchor = null; return; }
+    if (list.length === 1) {
+      const p = list[0].ptr;
+      this.inspectAnchor = p.kind === 'screen'
+        ? { mode: 'screen', q0, d0: p.ray.direction.clone() }
+        : { mode: 'hand', q0, h0: quatOf(list[0].m) };
+    } else {
+      const [a, b] = list;
+      this.inspectAnchor = { mode: 'two', q0, a, b, v0: posOf(b.m).sub(posOf(a.m)) };
+    }
+    // Hands settle for a moment as the fingers close: keep re-anchoring
+    // until then, so closing the pinch does not turn anything.
+    if (list.some((g) => g.ptr.kind !== 'screen')) this.inspectAnchor.settleUntil = performance.now() + 150;
+  }
+
+  dragInspect() {
+    const ws = this.ws;
+    const A = this.inspectAnchor;
+    if (!A) return;
+    const list = [...this.grabs.values()];
+    if (A.settleUntil && performance.now() < A.settleUntil) {
+      if (A.mode === 'hand') A.h0 = quatOf(list[0].m);
+      else if (A.mode === 'two') A.v0 = posOf(A.b.m).sub(posOf(A.a.m));
+      return;
+    }
+    let dq;
+    if (A.mode === 'screen') {
+      // Sideways drags turn it about the vertical, up/down tip it toward you.
+      const qc = ws.app.camera.getWorldQuaternion(new THREE.Quaternion());
+      const inv = qc.clone().invert();
+      const d0 = A.d0.clone().applyQuaternion(inv);
+      const d1 = list[0].ptr.ray.direction.clone().applyQuaternion(inv);
+      const yaw = Math.atan2(d1.x, -d1.z) - Math.atan2(d0.x, -d0.z);
+      const pitch = Math.asin(THREE.MathUtils.clamp(d1.y, -1, 1)) - Math.asin(THREE.MathUtils.clamp(d0.y, -1, 1));
+      const K = 3.2;
+      const right = new THREE.Vector3(1, 0, 0).applyQuaternion(qc);
+      dq = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), yaw * K)
+        .multiply(new THREE.Quaternion().setFromAxisAngle(right, -pitch * K));
+    } else if (A.mode === 'hand') {
+      dq = quatOf(list[0].m).multiply(A.h0.clone().invert());
+    } else {
+      const v1 = posOf(A.b.m).sub(posOf(A.a.m));
+      if (v1.lengthSq() < 1e-8 || A.v0.lengthSq() < 1e-8) return;
+      dq = new THREE.Quaternion().setFromUnitVectors(A.v0.clone().normalize(), v1.normalize());
+    }
+    ws.turnView(dq, A.q0);
+    const now = performance.now();
+    this.trail.push({ t: now, q: ws.view.q.clone() });
+    while (this.trail.length && this.trail[0].t < now - 400) this.trail.shift();
+  }
+
+  // ------------------------------------------------------------- layout
+
+  beginLayout(ptr, hit) {
+    const ws = this.ws;
+    const P = hit.panel;
+    const moved = this.dragDetector(ptr, hit);
+    // A narrower edge band than the Edges tool: a tap in the middle of a
+    // panel selects its piece rather than cutting.
+    const tapEdge = ws.edgeNear(P, hit.local, ptr.kind === 'ray' && !hit.near ? 0.2 : 0.14);
+    let drag = null, started = false;
+    return {
+      move: (p) => {
+        if (!started) {
+          if (!moved(p)) return;
+          started = true;
+          drag = this.startPieceDrag(ptr, hit);
+        }
+        if (drag) this.pieceDragTo(drag, p);
+      },
+      end: () => {
+        if (!started) {
+          if (tapEdge) ws.layoutEdge(tapEdge, P);
+          else ws.selectPiece(P);
+          return;
+        }
+        if (drag) this.endPieceDrag(drag);
+      },
+      cancel: () => {
+        // Tracking lost mid-drag: the piece goes back.
+        if (!drag) return;
+        drag.piece.forEach((p, i) => p.M.copy(drag.M0[i]));
+        ws.history.pop();
+        ws.moving.clear();
+        ws.updateMatrices();
+        ws.afterMotion(false);
+      },
+    };
+  }
+
+  // Heading of a hand or controller about the vertical, in the shell frame.
+  handYaw(p) {
+    const ws = this.ws;
+    const x = new THREE.Vector3().setFromMatrixColumn(p.grabMatrix(), 0);
+    ws.shellGroup.updateWorldMatrix(true, false);
+    x.transformDirection(ws.shellGroup.matrixWorld.clone().invert());
+    return Math.atan2(x.z, x.x);
+  }
+
+  startPieceDrag(ptr, hit) {
+    const ws = this.ws;
+    if (!ws.shell.flatReport().ok) { ws.app.toast('Lay the net on the surface first (Lay net on surface).'); return null; }
+    ws.stopAnim();
+    const piece = ws.pieceOf(hit.panel);
+    ws.pushHistory();
+    ws.sel.piece = new Set(piece);
+    ws.moving = new Set(piece);
+    const start = ws.toLocal(hit.point);
+    const d = { piece, M0: piece.map((p) => p.M.clone()), start, kind: ptr.kind };
+    if (ptr.kind !== 'screen') {
+      const gp = ptr.grabPoint(hit);
+      d.stick = gp.stick;
+      d.dist = hit.distance;
+      d.grab0 = ws.toLocal(gp.point);
+      d.yaw0 = this.handYaw(ptr);
+    }
+    ws.refreshStyles();
+    return d;
+  }
+
+  pieceDragTo(d, p) {
+    const ws = this.ws;
+    let m;
+    if (p.kind === 'screen') {
+      const o = ws.toLocal(p.ray.origin);
+      const dir = ws.toLocal(p.ray.origin.clone().add(p.ray.direction)).sub(o).normalize();
+      const pt = new THREE.Ray(o, dir).intersectPlane(new THREE.Plane(new THREE.Vector3(0, 1, 0), -d.start.y), new THREE.Vector3());
+      if (!pt) return;
+      m = planarMove(pt.x - d.start.x, pt.z - d.start.z, 0, d.start);
+    } else {
+      // Follow the hand, and turn with it about the vertical.
+      const gp = p.grabPoint(null, d.dist, d.stick);
+      const g = ws.toLocal(gp.point);
+      let yaw = d.yaw0 - this.handYaw(p);
+      yaw = Math.atan2(Math.sin(yaw), Math.cos(yaw));
+      m = planarMove(g.x - d.grab0.x, g.z - d.grab0.z, yaw, d.grab0);
+    }
+    d.piece.forEach((pp, i) => pp.M.multiplyMatrices(m, d.M0[i]));
+    ws.updateMatrices();
+    ws.checkOverlaps();
+    ws.refreshMaterials();
+  }
+
+  endPieceDrag(d) {
+    const ws = this.ws;
+    ws.moving.clear();
+    const snap = edgeSnap(ws.shell, d.piece);
+    let prefix = 'Piece moved.';
+    if (snap) {
+      for (const p of d.piece) p.M.premultiply(snap.move);
+      prefix = `Edge ${snap.e.no} lined up with its matching edge ${snap.e.no}. Tap it to join the pieces there.`;
+      ws.app.haptic?.();
+    }
+    ws.updateMatrices();
+    ws.afterMotion(false);
+    ws.reportLayout(prefix);
+  }
+
   // Grip / squeeze: carry the whole composition.
   beginCarry(ptr) {
     const root = this.ws.root;
@@ -1503,6 +2089,14 @@ function insidePoly(verts, n, q) {
   }
   return true;
 }
+
+function quatOf(m) {
+  const q = new THREE.Quaternion();
+  m.decompose(new THREE.Vector3(), q, new THREE.Vector3());
+  return q;
+}
+
+function posOf(m) { return new THREE.Vector3().setFromMatrixPosition(m); }
 
 function lerpMatrix(a, b, t) {
   const pa = new THREE.Vector3(), qa = new THREE.Quaternion(), sa = new THREE.Vector3();

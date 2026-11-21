@@ -115,11 +115,15 @@ export class Shell {
       }
     }
     this.edges = [...map.values()];
+    // Stable edge numbers: the matching labels on both sides of a cut.
+    let no = 1;
     for (const e of this.edges) {
       e.shared = e.uses.length === 2;
       e.locked = e.uses.length > 2;
       e.type = 'cut';
+      e.no = e.uses.length >= 2 ? no++ : 0;
     }
+    this.panels.forEach((p, i) => { p.no = i + 1; });
     this.panelById = new Map(this.panels.map((p) => [p.id, p]));
     this.net = { status: 'unchecked' };
     this.chooseBases();
@@ -417,6 +421,138 @@ export class Shell {
     return this.net;
   }
 
+  // Spanning tree of each shell piece, grown breadth- or depth-first from
+  // its base, taking edges in the order given by `prefer`.
+  treeFrom(prefer, depthFirst, pieces = this.pieces()) {
+    const hinges = new Set();
+    for (const comp of pieces) {
+      const root = comp.find((p) => this.isBase(p)) || comp[0];
+      const seen = new Set([root]);
+      const list = [root];
+      while (list.length) {
+        const p = depthFirst ? list.pop() : list.shift();
+        const es = p.edges.filter((e) => e.shared && !e.locked).sort(prefer);
+        for (const e of es) {
+          const q = this.other(e, p);
+          if (seen.has(q)) continue;
+          seen.add(q);
+          hinges.add(e);
+          list.push(q);
+        }
+      }
+    }
+    return hinges;
+  }
+
+  // Random spanning forest (one tree per shell piece) that prefers keeping
+  // coplanar panels joined.
+  randomTree(edges, rng) {
+    const w = new Map(edges.map((e) => [e, rng() - (this.isCoplanar(e) ? 0.6 : 0)]));
+    const sorted = edges.slice().sort((a, b) => w.get(a) - w.get(b));
+    const uf = new Map(this.panels.map((p) => [p, p]));
+    const find = (p) => { while (uf.get(p) !== p) { uf.set(p, uf.get(uf.get(p))); p = uf.get(p); } return p; };
+    const hinges = new Set();
+    for (const e of sorted) {
+      const a = find(e.uses[0].panel), b = find(e.uses[1].panel);
+      if (a === b) continue;
+      uf.set(a, b);
+      hinges.add(e);
+    }
+    return hinges;
+  }
+
+  hingeSet() { return new Set(this.sharedEdges().filter((e) => e.type === 'hinge')); }
+
+  // Several different verified nets (one piece per shell piece, flat, no
+  // overlaps), for offering alternatives. Leaves the current layout as it
+  // was. `exhaustive` is true only when every spanning tree was tried.
+  findNets(want = 6, budgetMs = 1500, seed = 11) {
+    const now = () => (typeof performance !== 'undefined' ? performance.now() : Date.now());
+    const t0 = now();
+    const saved = this.hingeSet();
+    const edges = this.sharedEdges();
+    const shellPieces = this.pieces().length;
+    const rng = mulberry32(seed);
+    const keyOf = (h) => [...h].map((e) => e.no).sort((a, b) => a - b).join(',');
+    const seen = new Set();
+    const nets = [];
+    let tries = 0;
+    let best = null;
+    const test = (h) => {
+      const k = keyOf(h);
+      if (seen.has(k)) return false;
+      seen.add(k);
+      this.setLayout(h);
+      tries++;
+      const r = this.flatOverlaps();
+      if (!best || r.pairs < best.score) best = { score: r.pairs, hinges: new Set(h) };
+      if (r.pairs === 0 && r.loops === 0 && r.pieces === shellPieces) { nets.push(new Set(h)); return true; }
+      return false;
+    };
+    const coplanarFirst = (a, b) => (this.isCoplanar(b) ? 1 : 0) - (this.isCoplanar(a) ? 1 : 0);
+    test(this.treeFrom(coplanarFirst, false));
+    test(this.treeFrom(() => 0, false));
+    test(this.treeFrom(coplanarFirst, true));
+    let misses = 0;
+    while (nets.length < want && now() - t0 < budgetMs * 0.75 && misses < 400) {
+      if (!test(this.randomTree(edges, rng))) misses++;
+    }
+    if (!nets.length && best) {
+      const score = (h) => { this.setLayout(h); tries++; return this.flatOverlaps().pairs; };
+      if (this.repairNet(best, edges, score, rng, t0 + budgetMs, now)) {
+        const k = keyOf(best.hinges);
+        if (!nets.some((n) => keyOf(n) === k)) nets.push(new Set(best.hinges));
+      }
+    }
+    this.setLayout(saved);
+    this.classify();
+    return { nets, tries, ms: Math.round(now() - t0) };
+  }
+
+  // Map from each panel to the root of its hinge tree (one per flat piece).
+  pieceRoots(F = this.forest()) {
+    const rootOf = new Map();
+    for (const p of F.order) { const l = F.parent.get(p); rootOf.set(p, l ? rootOf.get(l.parent) : p); }
+    return rootOf;
+  }
+
+  // Hinge-connected pieces as arrays of panels.
+  hingePieces(F = this.forest()) {
+    const rootOf = this.pieceRoots(F);
+    const out = new Map();
+    for (const p of F.order) {
+      const r = rootOf.get(p);
+      if (!out.has(r)) out.set(r, []);
+      out.get(r).push(p);
+    }
+    return [...out.values()];
+  }
+
+  // Is every panel lying in the surface plane (y = 0 of the shell frame)?
+  // Each flat piece is then coplanar. Reports the largest distance from the
+  // plane and which way the panels face.
+  flatReport(tol = 1e-6) {
+    let maxDev = 0, down = 0, up = 0, tilted = 0;
+    for (const p of this.panels) {
+      for (const v of this.worldPoly(p)) maxDev = Math.max(maxDev, Math.abs(v.y));
+      const n = this.worldNormal(p);
+      if (n.y < -1 + 1e-9) down++;
+      else if (n.y > 1 - 1e-9) up++;
+      else tilted++;
+    }
+    return { ok: maxDev <= tol && tilted === 0, maxDev, down, up, tilted, panels: this.panels.length, pieces: this.hingePieces().length };
+  }
+
+  // Overlapping pairs split into pairs inside one flat piece and pairs
+  // between different pieces.
+  overlapReport() {
+    const rootOf = this.pieceRoots();
+    const res = this.overlaps();
+    let within = 0, between = 0;
+    for (const [a, b] of res.pairs) { if (rootOf.get(a) === rootOf.get(b)) within++; else between++; }
+    return { ...res, within, between };
+  }
+
   // Default cut-and-hinge layout: a spanning tree of each shell piece whose
   // flat unfolding has no overlapping panels. Tries breadth- and depth-first
   // trees, then random trees that prefer keeping coplanar panels joined,
@@ -437,40 +573,8 @@ export class Shell {
       return sc === 0;
     };
     const coplanarFirst = (a, b) => (this.isCoplanar(b) ? 1 : 0) - (this.isCoplanar(a) ? 1 : 0);
-    const treeFrom = (prefer, depthFirst) => {
-      const hinges = new Set();
-      for (const comp of pieces) {
-        const root = comp.find((p) => this.isBase(p)) || comp[0];
-        const seen = new Set([root]);
-        const list = [root];
-        while (list.length) {
-          const p = depthFirst ? list.pop() : list.shift();
-          const es = p.edges.filter((e) => e.shared && !e.locked).sort(prefer);
-          for (const e of es) {
-            const q = this.other(e, p);
-            if (seen.has(q)) continue;
-            seen.add(q);
-            hinges.add(e);
-            list.push(q);
-          }
-        }
-      }
-      return hinges;
-    };
-    const randomTree = () => {
-      const w = new Map(edges.map((e) => [e, rng() - (this.isCoplanar(e) ? 0.6 : 0)]));
-      const sorted = edges.slice().sort((a, b) => w.get(a) - w.get(b));
-      const uf = new Map(this.panels.map((p) => [p, p]));
-      const find = (p) => { while (uf.get(p) !== p) { uf.set(p, uf.get(uf.get(p))); p = uf.get(p); } return p; };
-      const hinges = new Set();
-      for (const e of sorted) {
-        const a = find(e.uses[0].panel), b = find(e.uses[1].panel);
-        if (a === b) continue;
-        uf.set(a, b);
-        hinges.add(e);
-      }
-      return hinges;
-    };
+    const treeFrom = (prefer, depthFirst) => this.treeFrom(prefer, depthFirst, pieces);
+    const randomTree = () => this.randomTree(edges, rng);
     let found = consider(treeFrom(coplanarFirst, false)) || consider(treeFrom(() => 0, false)) || consider(treeFrom(coplanarFirst, true));
     while (!found && now() - t0 < budgetMs * 0.4) found = consider(randomTree());
     if (!found && best) found = this.repairNet(best, edges, score, rng, t0 + budgetMs, now);

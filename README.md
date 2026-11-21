@@ -42,8 +42,14 @@ Switch with **Paper | Solids** in the header (or open the page with `#solids`). 
 - **Build:** tap a face, pick a solid type and press **Add** to attach it flush to that face. Drag a solid to move it; it snaps face to face onto a matching face. Every placement is checked geometrically: a solid that would overlap another, or touch one with only part of a face, is refused and the solid in the way flashes red. **Duplicate**, **Rotate** (by the bottom face's symmetry), **Remove**, **Tip over** and presets are in the toolbar. Changing solids needs the shell closed first.
 - **Merging:** when two solids share a complete matching face, both faces are removed from the shell, so the inside is one continuous hollow space. The panel and edge graph is rebuilt without them, and they stay absent through opening, unfolding, refolding, undo, save/load and export/import. The outside keeps its panel divisions.
 - **Joints:** around an edge shared by several solids the app adds up their dihedral angles. It reports edges where the solids close a full 360° turn and edges that leave a gap narrower than any solid can fill (for example five tetrahedra leave 7.4°; a cube, a cuboctahedron and an octahedron leave 35.3°). Nothing assumes these solids fill space.
+- **Inspect:** turn the whole form freely to look at it from any side. On a screen, drag the form (arrow keys too; dragging empty space still moves the camera). In VR, pull the trigger or pinch on the form and turn your wrist, or grab it with both hands and move them around each other. **Reset orientation**, **Fit view**, **Turn 90°** and **Tip 90°** are in the toolbar. This is only a view turn between the table and the shell: solids, panels, hinges, cuts and fold angles never change, it is not part of undo, and the form keeps resting on the table. Building and the flat layout put it back to rest.
+- **Layout (flat net):** entering Layout lays the net on the surface. Each piece is a hinge-connected group of panels, so it is rigid and flat; pieces move and turn only as wholes, which keeps every panel's size and every edge's identity. Drag a piece to move it (in VR it also turns with your hand), select it and use **⟲ 15° / ⟳ 15°**. Tap a hinge to cut it: the smaller piece slides away. Tap a cut whose two sides meet to join it. Dropping a piece near its matching edge snaps the two edges together. Every cut edge carries a number shown on both sides, so equal numbers mark the edges that join; **Panel IDs** adds a number per panel. **Lay net on surface** lays every piece flat (outside down) and checks that each panel lies in the surface plane to 1 µm; pieces already lying flat stay put. **Arrange pieces** packs them side by side. Overlaps are reported separately within a piece (the net itself is invalid) and between pieces (move them apart). **Other nets** cycles through different overlap-free nets before you split one; if the search finds none it says how many layouts it tried and that this does not prove none exists. **Refold all** goes back to the assembled 3D form from any layout, and **Undo** steps back through cuts, joins and moves.
 - **Intersections:** panels that pass through or lie on each other turn red, and the status line counts the pairs.
-- **Save / Load** keep one composition, with its layout and pose, in this browser. **Export** downloads it as a JSON file and **Import** reads one back. Saves from earlier versions (cube only) load unchanged and get their net status re-checked.
+- **Save / Load** keep one composition in this browser: solids, cuts and hinges, panel poses (so the net pieces and their layout), and the view turn. **Import** reads back a composition file. Saves from earlier versions load unchanged and get their net status re-checked.
+- **Export…** offers three files:
+  - **Composition (.json)**: everything Save keeps, as a file.
+  - **Net drawing (.svg)**: the flat layout at full size in millimetres, seen from the printed (outside) side. Cut lines are solid black, mountain folds red dash-dot, valley folds blue dashed, and divisions between coplanar panels grey dotted (no fold). A hinge is one line shared by two panels and is drawn once; the two sides of a cut are drawn once each, or once in total when they lie on top of each other. Options: matching edge numbers, panel IDs, and glue tabs (one per cut edge, on whichever side overlaps nothing; any that must overlap are counted in the message).
+  - **View image (.png)**: the current 3D view at twice the screen resolution without the interface, selection or hover highlights, either object only on a transparent background or with the scene behind it. (Leave VR first.)
 
 Presets cover cube blocks, 1–3 tetrahedra, octahedron + tetrahedron, the big tetrahedron (four tetrahedra around an octahedron), and cuboctahedron compositions with octahedra and cubes, including one closed joint and one with a gap.
 
@@ -57,8 +63,10 @@ Presets cover cube blocks, 1–3 tetrahedra, octahedron + tetrahedron, the big t
 | Fold | drag a flap across its crease (folds over toward you); tap a flap, then Valley/Mountain | grab a flap with trigger and swing | pinch a flap and move your hand |
 | Move sheet | Move tool orbits the camera, or slides a cut-out piece | squeeze grip (whole sheet); trigger in Move mode (one cut-out piece) | pinch in Move mode |
 | UI | toolbar | point at the panel + trigger | poke the panel with a fingertip, or pinch-ray |
+| Inspect (Solids) | drag the form; arrow keys | trigger on the form and turn the wrist | pinch the form and turn the hand, or pinch with both hands and move them around each other |
+| Layout (Solids) | drag a piece; tap a hinge to cut, a met cut to join | trigger-drag a piece (it turns with the controller) | pinch-drag a piece |
 
-Keyboard: `1`–`5` or `P` `C` `X` `F` `M` switch tools, `E` toggles the eraser, `[` `]` change the brush size, and `Ctrl/Cmd+Z` undoes.
+Keyboard: `1`–`5` or `P` `C` `X` `F` `M` switch tools, `E` toggles the eraser, `[` `]` change the brush size, and `Ctrl/Cmd+Z` undoes. In Solids: `1` Build, `2` Open, `3` Edges, `4` or `L` Layout, `5` or `I` Inspect, `U` unfold all, `R` refold all, arrow keys turn the form in Inspect.
 
 ## Run locally
 
@@ -89,7 +97,10 @@ Any static host works too, for example Netlify, Vercel or Cloudflare Pages. Poin
 - `src/solids/shell.js`: panel-and-hinge shell. It removes internal faces, sorts edges into hinge, cut or locked, holds rigid panel poses, handles group and single-panel opening, the hinge forest for unfold/refold, the default-net search and intersection tests.
 - `src/solids/polyhedra.js`: solid templates (faces from the convex hull, unit edge, resting pose).
 - `src/solids/composition.js`: solids, face-to-face alignment, placement checks (convex overlap and partial face contact) and the joint report.
-- `src/solids/workspace.js`, `src/solids/ui.js`, `src/solids/hinge.js`: rendering, gestures (screen, controller ray, pinch, fingertip), VR panel rows and the toolbar.
+- `src/solids/workspace.js`, `src/solids/ui.js`, `src/solids/hinge.js`: rendering, the Inspect view turn, gestures (screen, controller ray, pinch, two hands, fingertip), VR panel rows and the toolbar.
+- `src/solids/layout.js`: laying pieces flat, packing them, rigid moves in the surface plane and snapping matching edges.
+- `src/solids/labels.js`: matching edge numbers and panel IDs drawn on the panels.
+- `src/solids/exporter.js`: SVG net in millimetres and PNG of the view.
 - `src/placement.js`: table and panel placement, handles, seated/standing, lock, surface styles.
 - `src/handtools.js`: the tool tray, crease stylus and cutter.
 - `src/environment.js`: terrace and studio surroundings.

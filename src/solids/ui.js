@@ -1,4 +1,5 @@
 import { PRESETS } from './workspace.js';
+import { netSVG, viewPNG } from './exporter.js';
 
 // Screen controls for the Solid → Unfold workspace.
 
@@ -28,7 +29,22 @@ export class SolidsUI {
     on('#loadShellBtn', () => ws.load());
     on('#addCubeBtn', () => ws.addSolid($('#addTypeSel').value));
     $('#addTypeSel').addEventListener('change', (e) => ws.setAddType(e.target.value));
-    on('#exportShellBtn', () => this.exportFile());
+    on('#exportShellBtn', () => this.openExport());
+    on('#exportClose', () => { $('#exportDialog').hidden = true; });
+    on('#exportJsonBtn', () => this.exportFile());
+    on('#exportSvgBtn', () => this.exportSVG());
+    on('#exportPngBtn', () => this.exportPNG());
+    on('#resetOrientBtn', () => ws.resetOrientation());
+    on('#fitViewBtn', () => ws.fitView());
+    on('#turnViewBtn', () => ws.stepView('up', 90));
+    on('#tipViewBtn', () => ws.stepView('tip', 90));
+    on('#layFlatBtn', () => ws.layFlat());
+    on('#arrangeBtn', () => ws.arrangePieces());
+    on('#otherNetsBtn', () => ws.otherNets());
+    on('#rotLeftBtn', () => ws.rotatePiece(15));
+    on('#rotRightBtn', () => ws.rotatePiece(-15));
+    on('#labelsBtn', () => ws.toggleLabels());
+    on('#idsBtn', () => ws.toggleIds());
     on('#importShellBtn', () => $('#importShellFile').click());
     $('#importShellFile').addEventListener('change', async (e) => {
       const f = e.target.files && e.target.files[0];
@@ -57,21 +73,63 @@ export class SolidsUI {
     ang.addEventListener('change', () => ws.setAngle(Number(ang.value), true));
   }
 
-  // Download the composition (works on a normal web page; embedded
-  // previews may block downloads).
-  exportFile() {
+  openExport() {
+    $('#exportMsg').textContent = '';
+    $('#exportDialog').hidden = false;
+  }
+
+  note(msg) {
+    $('#exportMsg').textContent = msg;
+    this.app.toast(msg, 5000);
+  }
+
+  // Download a blob (works on a normal web page; embedded previews may
+  // block downloads).
+  download(blob, name) {
     try {
-      const blob = new Blob([this.ws.exportText()], { type: 'application/json' });
       const a = document.createElement('a');
       a.href = URL.createObjectURL(blob);
-      a.download = `composition-${new Date().toISOString().slice(0, 10)}.json`;
+      a.download = name;
       document.body.appendChild(a);
       a.click();
-      setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
-      this.app.toast('Composition exported as a file.');
+      setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1500);
+      this.lastDownload = { name, size: blob.size, type: blob.type };
+      return true;
     } catch {
-      this.app.toast('This browser view blocks downloads.');
+      this.note('This browser view blocks downloads.');
+      return false;
     }
+  }
+
+  stamp() { return new Date().toISOString().slice(0, 10); }
+
+  exportFile() {
+    const blob = new Blob([this.ws.exportText()], { type: 'application/json' });
+    if (this.download(blob, `composition-${this.stamp()}.json`)) this.note('Composition saved as a file.');
+  }
+
+  exportSVG() {
+    const ws = this.ws;
+    const r = netSVG(ws.shell, { labels: $('#svgLabels').checked, ids: $('#svgIds').checked, tabs: $('#svgTabs').checked, title: `Net: ${ws.solidsText()}` });
+    if (r.error) { this.note(`${r.error} (Layout → Lay net on surface.)`); return; }
+    this.lastSVG = r;
+    const ov = ws.shell.overlapReport();
+    const blob = new Blob([r.svg], { type: 'image/svg+xml' });
+    if (!this.download(blob, `net-${this.stamp()}.svg`)) return;
+    let msg = `Net saved: ${Math.round(r.width)} × ${Math.round(r.height)} mm, ${r.counts.cut} cut, ${r.counts.mountain} mountain, ${r.counts.valley} valley${r.counts.flat ? `, ${r.counts.flat} no-fold` : ''} lines.`;
+    if (r.tabs) msg += ` ${r.tabs} glue tabs${r.tabConflicts ? `, ${r.tabConflicts} of them overlap another part (check before cutting)` : ''}.`;
+    if (ov.within || ov.between) msg += ` Warning: ${ov.within + ov.between} overlapping panel pair${ov.within + ov.between > 1 ? 's' : ''} in this layout.`;
+    this.note(msg);
+  }
+
+  exportPNG() {
+    const transparent = (document.querySelector('input[name="pngBg"]:checked') || {}).value !== 'scene';
+    const r = viewPNG(this.app, { transparent });
+    if (r.error) { this.note(r.error); return; }
+    this.lastPNG = { width: r.width, height: r.height, transparent, length: r.url.length };
+    fetch(r.url).then((res) => res.blob()).then((blob) => {
+      if (this.download(blob, `view-${this.stamp()}.png`)) this.note(`Image saved: ${r.width} × ${r.height} px, ${transparent ? 'object only on a transparent background' : 'with the scene'}.`);
+    });
   }
 
   label(v) { $('#hingeAngleLabel').textContent = v === null ? '—' : `${Math.round(v)}°`; }
@@ -100,6 +158,8 @@ export class SolidsUI {
     $('#undoBtn').disabled = ws.history.length === 0;
     $('#sheetLabel').textContent = `${ws.solidsText()} · ${ws.shell.panels.length} panels`;
     if ($('#addTypeSel').value !== ws.addType) $('#addTypeSel').value = ws.addType;
+    $('#labelsBtn').setAttribute('aria-pressed', String(!!ws.state.showLabels));
+    $('#idsBtn').setAttribute('aria-pressed', String(!!ws.state.showIds));
     this.syncSolidAngle();
   }
 }

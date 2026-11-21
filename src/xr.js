@@ -26,6 +26,7 @@ const CDN_CONTROLLERS = 'https://cdn.jsdelivr.net/npm/@webxr-input-profiles/asse
 
 const DEBOUNCE = 0.15; // s: a pinch release must last this long
 const LOST_CANCEL = 0.45; // s: hand lost this long during a gesture -> cancel
+const PINCH_OPEN = 0.035; // m: thumb-index gap of a pinch that is letting go
 const NEAR_WORK = 0.035; // m: pinch this close to the work grabs it directly
 const COLORS = { idle: '#ffffff', hover: '#ffc54d', active: '#36d98a' };
 
@@ -188,6 +189,7 @@ export class XRInput {
     const app = this.app;
     return {
       id, kind: 'ray', ray: slot.ray,
+      get isHand() { return !!slot.isHand; },
       pick: () => {
         const pp = this.pinchPoint(slot);
         if (pp) {
@@ -213,10 +215,22 @@ export class XRInput {
       grabMatrix: () => {
         const m = slot.ctrl.matrixWorld.clone();
         const pp = this.pinchPoint(slot);
-        if (pp) m.setPosition(pp);
+        if (pp) {
+          // A hand's aim ray swings as the fingers close and open; the
+          // wrist turns only when the hand does.
+          const wq = this.wristQuat(slot);
+          if (wq) m.compose(pp, wq, new THREE.Vector3(1, 1, 1));
+          else m.setPosition(pp);
+        }
         return m;
       },
     };
+  }
+
+  wristQuat(slot) {
+    const j = slot.isHand && slot.hand.joints && slot.hand.joints.wrist;
+    if (!j || !j.visible) return null;
+    return j.getWorldQuaternion(new THREE.Quaternion());
   }
 
   makeTouchPointer(slot) {
@@ -419,7 +433,10 @@ export class XRInput {
       }
       slot.lostSince = null;
       const g = slot.gesture;
-      if (g && g.kind === 'work' && slot.pressed) app.activeTools.move(slot.rayPtr);
+      // While a pinch is opening or its release is pending, hold still: the
+      // fingers opening would otherwise nudge whatever the pinch holds.
+      const opening = slot.isHand && slot.gap > PINCH_OPEN;
+      if (g && g.kind === 'work' && slot.pressed && !slot.pendingEnd && !opening) app.activeTools.move(slot.rayPtr);
       if (g && g.kind === 'handle') app.placement.move(slot.rayPtr);
       if (slot.squeeze === 'work') app.activeTools.move(slot.gripPtr);
       if (slot.squeeze === 'handle') app.placement.move(slot.gripPtr);

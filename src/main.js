@@ -736,10 +736,15 @@ class App {
       const k = e.key.toLowerCase();
       if ((e.ctrlKey || e.metaKey) && k === 'z') { e.preventDefault(); this.actions.undo(); return; }
       if (this.space === 'solids') {
-        const sm = { 1: 'build', 2: 'open', 3: 'edges', b: 'build', o: 'open', e: 'edges' };
+        const sm = { 1: 'build', 2: 'open', 3: 'edges', 4: 'layout', 5: 'inspect', b: 'build', o: 'open', e: 'edges', l: 'layout', i: 'inspect' };
         if (sm[k]) this.solids.setTool(sm[k]);
         else if (k === 'u') this.solids.unfoldAll();
         else if (k === 'r') this.solids.refoldAll();
+        else if (this.solids.state.tool === 'inspect' && k.startsWith('arrow')) {
+          e.preventDefault();
+          if (k === 'arrowleft' || k === 'arrowright') this.solids.stepView('up', k === 'arrowleft' ? -15 : 15);
+          else this.solids.stepView('tip', k === 'arrowup' ? -15 : 15);
+        }
         return;
       }
       const map = { 1: 'paint', 2: 'crease', 3: 'cut', 4: 'fold', 5: 'move', p: 'paint', c: 'crease', x: 'cut', f: 'fold', m: 'move' };
