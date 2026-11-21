@@ -360,9 +360,10 @@
       <label class="dim"><span style="color:#2fa35a">Y</span> height <input id="shapeH" type="number" min="10" max="900" step="1" inputmode="decimal" aria-label="Height in millimetres"></label>
       <label class="dim"><span style="color:#3a78e0">Z</span> depth <input id="shapeD" type="number" min="10" max="900" step="1" inputmode="decimal" aria-label="Depth in millimetres"></label>
       <span class="dim">mm</span>
-      <button id="shapeApplyBtn" class="primary">Apply</button>
+      <button id="shapeApplyBtn">Set sizes</button>
+      <button id="shapeUnpinBtn">Unpin</button>
       <button id="shapeResetBtn">Reset shape</button>
-      <span class="hint">Stretches the whole composition along its own axes; joined faces stay joined and the fold angles and net are recomputed. Single edges can't be edited yet.</span>
+      <span class="hint">Resize mode: panel sizes change. Drag a side or corner of the net (cubes); tap one first to pin it. Release keeps the change; Undo takes it back. Typing sizes is optional. Single edges can't be edited on their own yet.</span>
     </div>
 
     <div class="context" data-sfor="edges" hidden>

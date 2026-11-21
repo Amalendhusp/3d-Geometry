@@ -27,6 +27,7 @@ const CDN_CONTROLLERS = 'https://cdn.jsdelivr.net/npm/@webxr-input-profiles/asse
 const DEBOUNCE = 0.15; // s: a pinch release must last this long
 const LOST_CANCEL = 0.45; // s: hand lost this long during a gesture -> cancel
 const PINCH_OPEN = 0.035; // m: thumb-index gap of a pinch that is letting go
+const PINCH_SETTLE = 0.15; // s: after a pinch closes, before its motion counts
 const NEAR_WORK = 0.035; // m: pinch this close to the work grabs it directly
 const COLORS = { idle: '#ffffff', hover: '#ffc54d', active: '#36d98a' };
 
@@ -320,7 +321,13 @@ export class XRInput {
       slot.gesture = { kind: 'consumed' };
       this.pulse(slot, 0.4, 40);
     } else if (f.kind === 'work') {
-      if (app.activeTools.down(slot.rayPtr)) { slot.gesture = { kind: 'work' }; this.pulse(slot, 0.3, 25); }
+      if (app.activeTools.down(slot.rayPtr)) {
+        slot.gesture = { kind: 'work' };
+        // A closing pinch still moves the fingertips: hold the target now,
+        // but take the gesture's starting point once the fingers settle.
+        if (slot.isHand) slot.gesture.settleAt = this.now() + PINCH_SETTLE;
+        this.pulse(slot, 0.3, 25);
+      }
     }
   }
 
@@ -436,7 +443,9 @@ export class XRInput {
       // While a pinch is opening or its release is pending, hold still: the
       // fingers opening would otherwise nudge whatever the pinch holds.
       const opening = slot.isHand && slot.gap > PINCH_OPEN;
-      if (g && g.kind === 'work' && slot.pressed && !slot.pendingEnd && !opening) app.activeTools.move(slot.rayPtr);
+      if (g && g.kind === 'work' && g.settleAt) {
+        if (now >= g.settleAt) { g.settleAt = 0; app.activeTools.rebase?.(slot.rayPtr); }
+      } else if (g && g.kind === 'work' && slot.pressed && !slot.pendingEnd && !opening) app.activeTools.move(slot.rayPtr);
       if (g && g.kind === 'handle') app.placement.move(slot.rayPtr);
       if (slot.squeeze === 'work') app.activeTools.move(slot.gripPtr);
       if (slot.squeeze === 'handle') app.placement.move(slot.gripPtr);

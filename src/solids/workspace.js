@@ -5,6 +5,8 @@ import { template, TEMPLATES, SOLID_TYPES, restHeight } from './polyhedra.js';
 import { makeFrame, angleFromPoint, angleFromRay } from './hinge.js';
 import { flatTargets, pieceCentre, planarMove, edgeSnap } from './layout.js';
 import { LabelLayer } from './labels.js';
+import { ShapeEditor } from './shapeedit.js';
+import { captureLayout, applyLayout, anchorTo, elPos } from './resize.js';
 
 // "Solid → Unfold" workspace: build a composition of solids, then open its
 // exterior shell panel by panel along hinges.
@@ -142,6 +144,11 @@ export class SolidsWorkspace {
     this.comp = new Composition();
     this.shell = new Shell();
     this.labels = new LabelLayer(this);
+    this.shapeEdit = new ShapeEditor(this);
+    this.hoverFlap = new Set();
+    this.initLift();
+    this.initTag();
+    this.initHingeLine();
     this.state = { tool: 'open', openMode: 'group', showLabels: true, showIds: false };
     this.sel = { panel: null, hinge: null, solidId: null, fi: null, piece: null };
     this.inspectHover = false;
@@ -204,6 +211,7 @@ export class SolidsWorkspace {
     this.buildMeshes();
     this.applyView();
     this.checkOverlaps();
+    this.syncShapeEdit();
     if (this.ready) { this.app.layoutTable(); this.app.notify(); }
   }
 
@@ -266,7 +274,38 @@ export class SolidsWorkspace {
     this.buildMeshes();
     this.applyView();
     this.checkOverlaps();
+    this.syncShapeEdit();
     if (this.ready) { this.app.layoutTable(); this.app.notify(); }
+  }
+
+  // After the composition changes under the Shape tool: keep the net and
+  // ghost in step, or leave direct editing if the solids are not boxes.
+  syncShapeEdit() {
+    if (!this.shapeEdit || !this.shapeEdit.active) return;
+    if (!this.shapeEdit.supported()) { this.shapeEdit.exit(); return; }
+    // In Shape the net always lies flat (an undo may bring back a closed form).
+    if (!this.anim && !this.shell.flatReport().ok) {
+      const t = flatTargets(this.shell, { keepFlat: true });
+      this.shell.applyForest(t.F, t.angles, t.roots);
+      this.updateMatrices();
+      this.checkOverlaps();
+    }
+    this.shapeEdit.refresh();
+  }
+
+  // Rebuild the shell for the current shape, keep the net's cuts, hinges
+  // and root poses, lie flat, and keep `anchor` where it was.
+  reshapeNet(layout, anchor, A0) {
+    this.shell.build(this.comp);
+    applyLayout(this.shell, layout);
+    if (anchor) anchorTo(this.shell, anchor, A0);
+    this.shell.classify();
+    this.updatePivot();
+    this.buildMeshes();
+    this.applyView();
+    this.checkOverlaps();
+    this.shapeEdit.refresh();
+    this.app.notify?.();
   }
 
   pushHistory() {
@@ -404,7 +443,7 @@ export class SolidsWorkspace {
     }
     if (this.sel.panel === p) return 'selected';
     if (this.moving.has(p)) return 'moving';
-    if (this.hoverPanel === p) return 'hover';
+    if (this.hoverPanel === p || this.hoverFlap.has(p)) return 'hover';
     return 'none';
   }
 
@@ -505,6 +544,12 @@ export class SolidsWorkspace {
     this.raycaster.set(ray.origin, ray.direction);
     this.raycaster.far = 20;
     const hits = this.raycaster.intersectObjects(this.pickables || [], false);
+    const lift = this.liftHit(ray);
+    if (lift && (!hits.length || lift.distance < hits[0].distance)) return lift;
+    if (this.shapeEdit.active) {
+      const g = this.shapeEdit.pickGhost(ray);
+      if (g && (!hits.length || g.distance < hits[0].distance)) return g;
+    }
     if (!hits.length) {
       if (this.state.tool !== 'inspect') return null;
       const f = this.formSphere();
@@ -526,6 +571,10 @@ export class SolidsWorkspace {
   // Preview what a press would do: the panel (and the hinge it would swing
   // on) in Open, the edge in Edges, the face in Build.
   setHover(hit, ptr) {
+    const lh = !!(hit && hit.lift);
+    if (lh !== this.liftHover) { this.liftHover = lh; this.styleLift(); }
+    if (lh) hit = null;
+    if (this.state.tool === 'shape' && this.shapeEdit.active) { this.shapeEdit.setHover(hit, ptr); return; }
     if (this.state.tool === 'inspect') {
       const h = !!hit;
       if (h !== this.inspectHover) { this.inspectHover = h; this.refreshMaterials(); }
@@ -539,21 +588,54 @@ export class SolidsWorkspace {
         panel = null;
       } else if (this.state.tool === 'layout') {
         edge = this.edgeNear(panel, hit.local, ptr && ptr.kind === 'ray' && !hit.near ? 0.2 : 0.14);
-      } else if (this.state.tool === 'open' && this.sel.panel !== panel) {
-        hinge = this.defaultHinge(panel);
+      } else if (this.state.tool === 'open') {
+        hinge = this.touchHinge(panel, hit.local);
       }
     }
     if (panel === this.hoverPanel && edge === this.hoverEdge && hinge === this.hoverHinge) return;
     this.hoverPanel = panel;
     this.hoverEdge = edge;
     this.hoverHinge = hinge;
+    // Fold preview: the flap that would swing, and its hinge line.
+    this.hoverFlap = new Set();
+    if (this.state.tool === 'open' && panel && hinge && !this.tools.isBusy()) {
+      const plan = this.shell.plan(panel, hinge, this.state.openMode);
+      if (!plan.error) this.hoverFlap = new Set(plan.moving);
+    }
+    this.showHingeLine(this.state.tool === 'open' && panel && hinge && !this.tools.isBusy() ? { P: panel, e: hinge, color: '#4f8fff' } : null);
     this.refreshStyles();
+  }
+
+  // The hinge a touch near panel P would fold about. Touching a usable
+  // hinge picks it; touching a free edge picks the usable hinge farthest
+  // from it (you lift a flap by its free edge); otherwise the default.
+  touchHinge(P, local) {
+    const opts = this.shell.hingeOptions(P, this.state.openMode).filter((o) => o.ok);
+    if (!opts.length) return null;
+    if (!local) return this.defaultHinge(P);
+    const near = this.edgeNear(P, local, 0.3);
+    if (near && opts.some((o) => o.e === near)) return near;
+    if (near) {
+      let best = null, bd = -1;
+      for (const o of opts) {
+        const d = segDist3(local, o.e.a, o.e.b);
+        if (d > bd) { bd = d; best = o.e; }
+      }
+      return best;
+    }
+    return this.defaultHinge(P);
   }
 
   // Nearest panel surface to a world point (fingertips, pinches).
   nearest(point, maxDist) {
     if (!this.root.visible) return null;
     this.root.updateMatrixWorld(true);
+    const lift = this.liftNear(point, maxDist);
+    if (lift) return lift;
+    if (this.shapeEdit.active) {
+      const g = this.shapeEdit.nearGhost(point, maxDist);
+      if (g) return g;
+    }
     if (this.state.tool === 'inspect') {
       const f = this.formSphere();
       const d = point.distanceTo(f.centre);
@@ -599,6 +681,166 @@ export class SolidsWorkspace {
   toLocal(world) {
     this.shellGroup.updateWorldMatrix(true, false);
     return this.shellGroup.worldToLocal(world.clone());
+  }
+
+  // ------------------------------------------------- move puck, tag, hinge
+  // Moving the whole form has its own grab target, a blue puck beside it,
+  // so it is never confused with holding a flap to fold it.
+
+  initLift() {
+    const g = new THREE.Group();
+    g.name = 'solids-move-puck';
+    const body = new THREE.Mesh(new THREE.CylinderGeometry(0.02, 0.022, 0.012, 32), new THREE.MeshStandardMaterial({ color: '#2f7bff', roughness: 0.45, emissive: new THREE.Color('#2f7bff'), emissiveIntensity: 0.15 }));
+    body.position.y = 0.006;
+    g.add(body);
+    if (typeof document !== 'undefined') {
+      const c = document.createElement('canvas');
+      c.width = c.height = 128;
+      const x = c.getContext('2d');
+      x.fillStyle = '#ffffff';
+      x.beginPath(); x.arc(64, 64, 62, 0, Math.PI * 2); x.fill();
+      x.strokeStyle = '#2f7bff'; x.lineWidth = 9; x.lineCap = 'round'; x.lineJoin = 'round';
+      for (const a of [0, Math.PI / 2, Math.PI, Math.PI * 1.5]) {
+        const dx = Math.cos(a), dy = Math.sin(a);
+        x.beginPath(); x.moveTo(64 + dx * 12, 64 + dy * 12); x.lineTo(64 + dx * 46, 64 + dy * 46); x.stroke();
+        x.beginPath(); x.moveTo(64 + dx * 46 - dy * 12 - dx * 12, 64 + dy * 46 + dx * 12 - dy * 12); x.lineTo(64 + dx * 46, 64 + dy * 46); x.lineTo(64 + dx * 46 + dy * 12 - dx * 12, 64 + dy * 46 - dx * 12 - dy * 12); x.stroke();
+      }
+      const tex = new THREE.CanvasTexture(c);
+      tex.colorSpace = THREE.SRGBColorSpace;
+      const top = new THREE.Mesh(new THREE.CircleGeometry(0.018, 32), new THREE.MeshBasicMaterial({ map: tex }));
+      top.rotation.x = -Math.PI / 2;
+      top.position.y = 0.0122;
+      g.add(top);
+    }
+    // Generous invisible target.
+    const target = new THREE.Mesh(new THREE.SphereGeometry(0.032, 12, 8), new THREE.MeshBasicMaterial({ visible: false }));
+    target.position.y = 0.01;
+    g.add(target);
+    g.userData = { body, target, ui: true };
+    this.lift = g;
+    this.liftHover = false;
+    this.liftTick = 0;
+    this.root.add(g);
+  }
+
+  liftWanted() { return ['inspect', 'build', 'open', 'edges'].includes(this.state.tool) && this.root.visible; }
+
+  updateLift() {
+    if (!this.lift) return;
+    this.lift.visible = this.liftWanted();
+    if (!this.lift.visible) return;
+    const b = this.bounds();
+    if (b.isEmpty()) return;
+    // Beside the form on the right, halfway back: clear of the panels, and
+    // on a screen clear of the tool dock.
+    this.lift.position.set(b.max.x + 0.05, 0, (b.min.z + b.max.z) / 2);
+  }
+
+  styleLift() {
+    const body = this.lift.userData.body;
+    const on = this.liftHover || this.tools.carrying;
+    body.material.emissiveIntensity = on ? 0.75 : 0.15;
+    this.lift.scale.setScalar(on ? 1.18 : 1);
+    if (this.liftHover && !this.tools.carrying) {
+      const w = this.lift.getWorldPosition(new THREE.Vector3()).add(new THREE.Vector3(0, 0.05, 0));
+      this.setTag('Move the whole form', w);
+    } else if (!this.tools.carrying && this.tag.userData.text === 'Move the whole form') this.hideTag();
+  }
+
+  liftHit(ray) {
+    if (!this.lift || !this.lift.visible) return null;
+    this.lift.updateMatrixWorld(true);
+    const c = this.lift.userData.target.getWorldPosition(new THREE.Vector3());
+    const pt = ray.intersectSphere(new THREE.Sphere(c, 0.032), new THREE.Vector3());
+    if (!pt) return null;
+    return { panel: null, lift: true, point: pt, distance: pt.distanceTo(ray.origin), normal: pt.clone().sub(c).normalize() };
+  }
+
+  liftNear(point, maxDist) {
+    if (!this.lift || !this.lift.visible) return null;
+    this.lift.updateMatrixWorld(true);
+    const c = this.lift.userData.target.getWorldPosition(new THREE.Vector3());
+    const d = point.distanceTo(c);
+    if (d > 0.032 + maxDist) return null;
+    return { panel: null, lift: true, point: point.clone(), distance: Math.max(0, d - 0.032), normal: point.clone().sub(c).normalize(), near: true };
+  }
+
+  // Floating tag naming the action in progress (resize, fold, move).
+  initTag() {
+    const m = new THREE.SpriteMaterial({ depthTest: false, transparent: true });
+    this.tag = new THREE.Sprite(m);
+    this.tag.visible = false;
+    this.tag.renderOrder = 10;
+    this.tag.userData = { text: '', ui: true };
+    this.root.add(this.tag);
+  }
+
+  setTag(text, world) {
+    if (typeof document === 'undefined' || !this.tag) return;
+    const t = this.tag;
+    if (t.userData.text !== text) {
+      const c = t.userData.canvas || document.createElement('canvas');
+      t.userData.canvas = c;
+      const ctx = c.getContext('2d');
+      const font = '700 34px "Zen Kaku Gothic New", system-ui, sans-serif';
+      ctx.font = font;
+      const w = Math.ceil(ctx.measureText(text).width + 36);
+      c.width = w; c.height = 56;
+      ctx.font = font;
+      ctx.fillStyle = /^Resize/.test(text) ? '#ff8a1f' : /^Fold/.test(text) ? '#1e9a5f' : '#2f7bff';
+      ctx.beginPath(); ctx.roundRect(0, 0, w, 56, 16); ctx.fill();
+      ctx.fillStyle = '#ffffff'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText(text, w / 2, 30);
+      if (t.material.map) t.material.map.dispose();
+      t.material.map = new THREE.CanvasTexture(c);
+      t.material.map.colorSpace = THREE.SRGBColorSpace;
+      t.material.needsUpdate = true;
+      t.userData.text = text;
+      t.userData.aspect = w / 56;
+    }
+    this.root.updateMatrixWorld(true);
+    t.position.copy(this.root.worldToLocal(world.clone().add(new THREE.Vector3(0, 0.045, 0))));
+    const h = 0.03;
+    t.scale.set(h * t.userData.aspect, h, 1);
+    t.visible = true;
+  }
+
+  hideTag() { if (this.tag) { this.tag.visible = false; this.tag.userData.text = ''; } }
+
+  // Line along a hinge, a little longer than the edge: the axis a flap
+  // turns about (blue preview, amber while held).
+  initHingeLine() {
+    this.hingeLine = new THREE.Mesh(new THREE.CylinderGeometry(1, 1, 1, 10), new THREE.MeshBasicMaterial({ color: '#4f8fff', depthTest: false, transparent: true, opacity: 0.9 }));
+    this.hingeLine.visible = false;
+    this.hingeLine.renderOrder = 5;
+    this.hingeLine.userData.ui = true;
+    this.shellGroup.add(this.hingeLine);
+  }
+
+  showHingeLine(h) {
+    const m = this.hingeLine;
+    if (!m) return;
+    if (!h) { m.visible = false; return; }
+    const a = h.e.a.clone().applyMatrix4(h.P.M), b = h.e.b.clone().applyMatrix4(h.P.M);
+    const d = b.clone().sub(a);
+    const len = d.length();
+    m.position.copy(a).add(b).multiplyScalar(0.5);
+    m.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), d.divideScalar(len));
+    const r = this.edgeLen * 0.014;
+    m.scale.set(r, len * 1.5, r);
+    m.material.color.set(h.color);
+    m.visible = true;
+  }
+
+  // Hold a panel to fold it about a given hinge (quietly; the hover
+  // preview already showed it).
+  holdPanel(P, hinge) {
+    const opts = this.shell.hingeOptions(P, this.state.openMode);
+    this.sel.panel = P;
+    this.sel.hinge = hinge && opts.some((o) => o.e === hinge && o.ok) ? hinge : this.defaultHinge(P);
+    this.loopEdges.clear();
+    this.refreshStyles();
+    this.app.notify?.();
   }
 
   // ---------------------------------------------------------- inspection
@@ -775,7 +1017,7 @@ export class SolidsWorkspace {
     const hints = {
       inspect: 'Drag the form to turn it and look at it from any side (on a screen, dragging empty space still moves the camera). In VR, grab it with one hand and turn your wrist, or with both hands. Nothing about the shape changes.',
       build: 'Tap a face to pick it, then Add. Drag a solid to move it; it snaps to a matching face.',
-      open: 'Tap a panel to select it and see its hinges. Drag it, or use the slider, to swing it open.',
+      open: 'Fold mode (panels stay rigid): touch or point near an edge to see the flap and its hinge, then pinch, pull the trigger or grip to hold it and lift. To move the whole form, grab the blue Move puck.',
       edges: 'Tap an edge to switch it between hinge (green) and cut (red, dashed).',
       layout: 'Flat layout: drag a piece to move it, turn it with ⟲ ⟳, tap a hinge to cut it apart, tap a cut whose sides meet to join it. Matching numbers mark edges that join.',
       shape: 'Shape: stretch the whole composition along its X (red), Y (green) and Z (blue) axes, or type its width, height and depth. Joined faces stay joined; fold angles and the net are worked out again. Single edges cannot be edited yet.',
@@ -788,7 +1030,18 @@ export class SolidsWorkspace {
     }
     this.app.toast(msg, t === 'inspect' || t === 'layout' ? 6000 : undefined);
     if (t === 'layout' && prev !== 'layout' && !this.shell.flatReport().ok) this.layFlat({ intro: true });
+    if (t === 'shape' && prev !== 'shape') {
+      if (this.shapeEdit.enter()) {
+        msg = 'Resize mode (panel sizes change): the net lies on the surface and the assembled form floats above it. Hover an edge or corner to see it in both. Tap one to pin it, then drag another side or corner. Release to keep the change.';
+        this.app.toast(msg, 8000);
+        this.frameView();
+      } else {
+        this.app.toast(`${hints.shape} Dragging works on box compositions (cubes) for now; for these solids, type sizes or use ±10%.`, 7000);
+      }
+    }
+    if (t !== 'shape') this.shapeEdit.exit();
     this.updateAxes();
+    this.updateLift();
     this.app.notify?.();
   }
 
@@ -990,6 +1243,7 @@ export class SolidsWorkspace {
       this.shell.applyForest(a.F, ang, rootMs);
     }
     this.updateMatrices();
+    if (this.shapeEdit && this.shapeEdit.active) this.shapeEdit.refresh();
   }
 
   finishAnim(a) {
@@ -1024,6 +1278,7 @@ export class SolidsWorkspace {
 
   update(dt) {
     if (this.flash && performance.now() > this.flash.until) { this.flash = null; this.refreshMaterials(); }
+    if (this.lift && ++this.liftTick % 6 === 0) this.updateLift();
     if (this.view.target) {
       this.view.q.slerp(this.view.target, 1 - Math.exp(-dt * 9));
       if (this.view.q.angleTo(this.view.target) < 2e-3) { this.view.q.copy(this.view.target); this.view.target = null; this.app.notify?.(); }
@@ -1337,6 +1592,19 @@ export class SolidsWorkspace {
   setShape(shape, label = 'Shape changed') {
     this.tools.finishAll();
     this.stopAnim();
+    if (this.shapeEdit.active && this.shell.flatReport().ok) {
+      const problem = this.shapeProblem(shape);
+      if (problem) { this.app.toast(`${problem} The shape was not changed.`, 5000); this.app.notify?.(); return false; }
+      this.pushHistory();
+      const layout = captureLayout(this.shell);
+      const base = this.shell.panels.find((p) => this.shell.isBase(p)) || this.shell.panels[0];
+      const anchor = this.shapeEdit.pin || { kind: 'corner', pid: base.id, i: 0 };
+      const A0 = elPos(this.shell, anchor);
+      this.comp.shape.copy(shape);
+      this.reshapeNet(layout, anchor, A0);
+      this.app.toast(`${label}: ${this.sizeText()}. Net and assembled preview updated; ${this.foldText()}. ${this.netSentence()}`, 6000);
+      return true;
+    }
     if (!this.shell.isClosed()) { this.app.toast('Refold all before changing the shape; the new fold angles and net come from the closed form.'); return false; }
     const problem = this.shapeProblem(shape);
     if (problem) { this.app.toast(`${problem} The shape was not changed.`, 5000); this.app.notify?.(); return false; }
@@ -1380,7 +1648,7 @@ export class SolidsWorkspace {
 
   // Arrows for the object axes, shown in the Shape tool.
   updateAxes() {
-    const show = this.state.tool === 'shape';
+    const show = this.state.tool === 'shape' && !this.shapeEdit.active;
     if (!show) { if (this.axes) this.axes.visible = false; return; }
     if (!this.axes) {
       this.axes = new THREE.Group();
@@ -1576,7 +1844,8 @@ export class SolidsWorkspace {
 
   statusLine() {
     const s = this.shell.stats();
-    const parts = [this.solidsText(), `${s.panels} panels`, `${s.removed} internal faces removed`, `${s.hinges} hinges`, `${s.cuts} cuts`];
+    const mode = { shape: 'Resize mode: panel sizes change', open: 'Fold mode: panels stay rigid', layout: 'Layout: pieces move as wholes' }[this.state.tool];
+    const parts = [...(mode ? [mode] : []), this.solidsText(), `${s.panels} panels`, `${s.removed} internal faces removed`, `${s.hinges} hinges`, `${s.cuts} cuts`];
     if (s.pieces > 1) parts.push(`${s.pieces} separate shells`);
     if (this.overlapPairs) parts.push(`${this.overlapPairs} intersecting pair${this.overlapPairs > 1 ? 's' : ''} now`);
     if (this.state.tool === 'build') { const jt = this.jointText(); if (jt) parts.push(`Joints: ${jt}`); }
@@ -1620,7 +1889,8 @@ export class SolidsWorkspace {
       ], 6);
       row(y2, 78, [
         { label: 'Reset shape', action: () => a.resetShape() },
-        { label: a.sizeText().replace(' (width × height × depth)', ''), w: 2.6, kind: 'label' },
+        { label: 'Unpin', action: () => (a.shapeEdit.pin ? a.shapeEdit.togglePin(a.shapeEdit.pin) : a.app.toast('Nothing is pinned. Tap a side or corner of the net to pin it.')) },
+        { label: a.sizeText().replace(' (width × height × depth)', ''), w: 2.2, kind: 'label' },
       ], 8);
     } else if (s.tool === 'layout') {
       row(y1, 78, [
@@ -1699,6 +1969,10 @@ export class SolidsWorkspace {
     const V = this.inspect.matrix.clone().multiply(this.shellGroup.matrix);
     if (this.shell && this.shell.panels.length) {
       for (const p of this.shell.panels) for (const v of this.shell.worldPoly(p)) box.expandByPoint(v.applyMatrix4(V));
+      if (this.shapeEdit && this.shapeEdit.active) {
+        const g = this.shapeEdit.ghostBox();
+        box.expandByPoint(g.min.clone().applyMatrix4(V)).expandByPoint(g.max.clone().applyMatrix4(V));
+      }
     } else {
       for (const s of this.comp.solids) for (const v of s.worldVerts()) box.expandByPoint(v.applyMatrix4(V));
     }
@@ -1746,22 +2020,35 @@ class SolidsTools {
 
   down(ptr, override) {
     if (this.active.has(ptr.id)) return false;
-    if (override === 'move') return this.beginCarry(ptr);
     const hit = ptr.pick();
-    if (!hit) return false;
+    // The Move puck is the only grab target for moving the whole form.
+    if (hit && hit.lift) return this.startCarry(ptr, hit);
     const tool = this.ws.state.tool;
-    if (!hit.panel && tool !== 'inspect') return false;
+    if (override === 'move') {
+      // Grip: hold a flap to fold it, just like a pinch or the trigger.
+      if (tool === 'open' && hit && hit.panel) {
+        const g = this.beginOpen(ptr, hit, true);
+        if (g) { this.active.set(ptr.id, g); return true; }
+      }
+      return false;
+    }
+    if (!hit) return false;
+    if (!hit.panel && tool !== 'inspect' && !(tool === 'shape' && hit.ghost)) return false;
     const g = tool === 'inspect' ? this.beginInspect(ptr, hit)
       : tool === 'build' ? this.beginBuild(ptr, hit)
         : tool === 'edges' ? this.beginEdge(ptr, hit)
           : tool === 'layout' ? this.beginLayout(ptr, hit)
-            : this.beginOpen(ptr, hit);
+            : tool === 'shape' ? this.beginShape(ptr, hit)
+              : this.beginOpen(ptr, hit);
     if (!g) return false;
     this.active.set(ptr.id, g);
     return true;
   }
 
   move(ptr) { const g = this.active.get(ptr.id); if (g) g.move(ptr); }
+
+  // A hand's pinch has settled: gestures take their starting point again.
+  rebase(ptr) { const g = this.active.get(ptr.id); if (g && g.rebase) g.rebase(ptr); }
 
   up(ptr) {
     const g = this.active.get(ptr.id);
@@ -1789,41 +2076,160 @@ class SolidsTools {
   // A press counts as a drag once the point under it moves a few mm.
   dragDetector(ptr, hit) {
     const ws = this.ws;
-    const n = hit.normal.clone();
-    const plane = new THREE.Plane().setFromNormalAndCoplanarPoint(n, hit.point);
+    const limit = Math.max(0.004, ws.edgeLen * 0.06);
+    if (ptr.kind !== 'screen' && ptr.grabPoint) {
+      // A hand or controller may lift straight off the surface: count any
+      // movement of the grab point in space.
+      const g0 = ptr.grabPoint(hit);
+      const dist = hit.distance;
+      const fn = (p) => p.grabPoint(null, dist, g0.stick).point.distanceTo(g0.point) > limit;
+      fn.rebase = (p) => { g0.point = p.grabPoint(null, dist, g0.stick).point; };
+      return fn;
+    }
+    const plane = new THREE.Plane().setFromNormalAndCoplanarPoint(hit.normal.clone(), hit.point);
     const start = hit.point.clone();
     return (p) => {
       const w = p.onPlane ? p.onPlane(plane) : null;
-      return !!w && w.distanceTo(start) > ws.edgeLen * 0.06;
+      return !!w && w.distanceTo(start) > limit;
     };
   }
 
-  beginOpen(ptr, hit) {
+  // Where a pointer is on the work surface plane (shell frame).
+  surfacePoint(p, ref) {
     const ws = this.ws;
-    const P = hit.panel;
+    if (p.kind === 'screen') {
+      const o = ws.toLocal(p.ray.origin);
+      const dir = ws.toLocal(p.ray.origin.clone().add(p.ray.direction)).sub(o).normalize();
+      return new THREE.Ray(o, dir).intersectPlane(new THREE.Plane(new THREE.Vector3(0, 1, 0), 0), new THREE.Vector3());
+    }
+    if (ref.stick && p.ray) {
+      // A ray held from afar: where it meets the surface.
+      const o = ws.toLocal(p.ray.origin);
+      const dir = ws.toLocal(p.ray.origin.clone().add(p.ray.direction)).sub(o).normalize();
+      const hitPt = new THREE.Ray(o, dir).intersectPlane(new THREE.Plane(new THREE.Vector3(0, 1, 0), 0), new THREE.Vector3());
+      if (hitPt) return hitPt;
+    }
+    const g = ws.toLocal(p.grabPoint(null, ref.dist, ref.stick).point);
+    g.y = 0;
+    return g;
+  }
+
+  // ------------------------------------------------------------- shape
+
+  beginShape(ptr, hit) {
+    const ws = this.ws;
+    const ed = ws.shapeEdit;
+    if (!ed.active) return null;
+    if (hit.ghost) {
+      const gh = hit.ghost;
+      return {
+        move: () => {},
+        end: () => ws.app.toast(gh.kind === 'edge'
+          ? `Edge ${gh.edge.no} (${(gh.edge.a.distanceTo(gh.edge.b) * 1000).toFixed(0)} mm) is lit in the net${gh.edge.type === 'cut' ? ' on both sides of its seam' : ''}. Pin or drag it there.`
+          : 'This corner is lit wherever it appears in the net. Pin or drag one of them there.'),
+      };
+    }
+    const el = ed.netElement(hit.panel, hit.local, ptr.kind === 'ray' && !hit.near);
+    if (!el) return { move: () => {}, end: () => ws.app.toast('Tap a side or corner of the net to pin it; drag one to resize.') };
     const moved = this.dragDetector(ptr, hit);
-    const tapEdge = ws.sel.panel === P ? ws.edgeNear(P, hit.local, 0.2) : null;
-    let swing = null, started = false;
+    const ref = { dist: hit.distance, stick: ptr.kind !== 'screen' && ptr.grabPoint ? ptr.grabPoint(hit).stick : false };
+    let P0 = this.surfacePoint(ptr, ref);
+    let d = null, started = false;
     return {
+      rebase: (p) => { if (!started) { moved.rebase?.(p); P0 = this.surfacePoint(p, ref); } },
       move: (p) => {
         if (!started) {
           if (!moved(p)) return;
           started = true;
-          if (ws.sel.panel !== P) ws.select(P);
+          d = ed.startResize(el);
+        }
+        if (d && P0) {
+          const P = this.surfacePoint(p, ref);
+          if (P) ed.dragTo(d, P0, P);
+        }
+      },
+      end: () => {
+        if (!started) { ed.togglePin(el); return; }
+        if (d) ed.endResize(d);
+      },
+      cancel: () => { if (d) ed.cancelResize(d); },
+    };
+  }
+
+  // ------------------------------------------------------------- carry
+
+  startCarry(ptr, hit) {
+    const ws = this.ws;
+    this.carrying = true;
+    ws.styleLift();
+    const tagAt = () => ws.setTag('Move the whole form', ws.lift.getWorldPosition(new THREE.Vector3()).add(new THREE.Vector3(0, 0.05, 0)));
+    if (ptr.kind !== 'screen') {
+      this.beginCarry(ptr);
+      const g = this.active.get(ptr.id);
+      const move = g.move;
+      g.move = (p) => { move(p); tagAt(); };
+      g.end = () => { this.carrying = false; ws.hideTag(); ws.styleLift(); };
+      tagAt();
+      return true;
+    }
+    // Screen: slide the form across the table.
+    const root = ws.root;
+    root.parent.updateMatrixWorld(true);
+    const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), -hit.point.y);
+    const start = ptr.ray.intersectPlane(plane, new THREE.Vector3()) || hit.point.clone();
+    const startLocal = root.position.clone();
+    const inv = root.parent.matrixWorld.clone().invert();
+    ws.carried = true;
+    this.active.set(ptr.id, {
+      move: (p) => {
+        const w = p.ray.intersectPlane(plane, new THREE.Vector3());
+        if (!w) return;
+        const a = start.clone().applyMatrix4(inv), b = w.applyMatrix4(inv);
+        root.position.copy(startLocal).add(b.sub(a));
+        tagAt();
+      },
+      end: () => { this.carrying = false; ws.hideTag(); ws.styleLift(); ws.app.toast('Moved. Recenter (or Reset view) puts it back on the table centre.'); },
+    });
+    tagAt();
+    return true;
+  }
+
+  beginOpen(ptr, hit, grip = false) {
+    const ws = this.ws;
+    const P = hit.panel;
+    const moved = this.dragDetector(ptr, hit);
+    // The hinge is decided where you touch, and kept for the whole grab.
+    const hinge = ws.touchHinge(P, hit.local);
+    const tapEdge = ws.sel.panel === P ? ws.edgeNear(P, hit.local, 0.2) : null;
+    let swing = null, started = false;
+    if (ptr.kind !== 'screen' && hinge) ws.showHingeLine({ P, e: hinge, color: '#f0b44c' });
+    return {
+      rebase: (p) => { if (!started) moved.rebase?.(p); },
+      move: (p) => {
+        if (!started) {
+          if (!moved(p)) return;
+          started = true;
+          if (ws.sel.panel !== P || (hinge && ws.sel.hinge !== hinge)) ws.holdPanel(P, hinge);
           swing = this.startSwing(ptr, hit);
         }
         if (swing) this.swingTo(swing, p);
       },
       end: () => {
+        ws.hideTag();
         if (!started) {
+          ws.showHingeLine(null);
+          if (grip) return;
           if (tapEdge && tapEdge !== ws.sel.hinge) ws.chooseHinge(tapEdge);
-          else if (ws.sel.panel !== P) ws.select(P);
+          else if (ws.sel.panel !== P) { ws.select(P); if (hinge && hinge !== ws.sel.hinge) ws.holdPanel(P, hinge); }
           return;
         }
+        ws.showHingeLine(null);
         if (swing) ws.endTurn(swing.plan, true);
       },
       cancel: () => {
         // Tracking lost mid-swing: back to how it was before the grab.
+        ws.hideTag();
+        ws.showHingeLine(null);
         if (!swing) return;
         const snap = ws.history.pop();
         ws.moving.clear();
@@ -1842,14 +2248,24 @@ class SolidsTools {
     const G = ws.toLocal(hit.point);
     const frame = makeFrame(A, U, G);
     if (!frame) { ws.endTurn(plan, false); return null; }
-    const s = { plan, frame, theta0: ws.shell.angle(plan.e, plan.P, plan.Q), delta: 0, kind: ptr.kind };
+    const s = { plan, frame, theta0: ws.shell.angle(plan.e, plan.P, plan.Q), delta: 0, pos: 0, rot: 0, kind: ptr.kind };
     if (ptr.kind !== 'screen') {
       const gp = ptr.grabPoint(hit);
       s.stick = gp.stick;
       s.dist = hit.distance;
       s.offset = hit.point.clone().sub(gp.point);
+      s.q0 = this.localQuat(ptr);
     }
+    ws.showHingeLine({ P: plan.Q, e: plan.e, color: '#f0b44c' });
     return s;
+  }
+
+  // Orientation of a hand or controller in the shell frame.
+  localQuat(p) {
+    const ws = this.ws;
+    ws.shellGroup.updateWorldMatrix(true, false);
+    const qs = ws.shellGroup.getWorldQuaternion(new THREE.Quaternion()).invert();
+    return qs.multiply(quatOf(p.grabMatrix()));
   }
 
   swingTo(s, p) {
@@ -1860,8 +2276,18 @@ class SolidsTools {
       const dir = ws.toLocal(p.ray.origin.clone().add(p.ray.direction)).sub(o).normalize();
       d = angleFromRay(s.frame, o, dir, s.delta);
     } else {
+      // Hand position leads; the palm's turn about the hinge helps, most of
+      // all close to the hinge, where position alone says little.
       const gp = p.grabPoint(null, s.dist, s.stick);
-      d = angleFromPoint(s.frame, ws.toLocal(gp.point.clone().add(s.offset)), s.delta);
+      const X = ws.toLocal(gp.point.clone().add(s.offset));
+      s.pos = angleFromPoint(s.frame, X, s.pos);
+      const rel = this.localQuat(p).multiply(s.q0.clone().invert());
+      const tw = 2 * Math.atan2(rel.x * s.frame.U.x + rel.y * s.frame.U.y + rel.z * s.frame.U.z, rel.w);
+      s.rot += Math.atan2(Math.sin(tw - s.rot), Math.cos(tw - s.rot));
+      const off = X.clone().sub(s.frame.C);
+      const r = off.addScaledVector(s.frame.U, -off.dot(s.frame.U)).length();
+      const w = THREE.MathUtils.clamp(0.2 + 0.7 * (1 - r / (0.5 * ws.edgeLen)), 0.2, 0.9);
+      d = (1 - w) * s.pos + w * s.rot;
     }
     const target = THREE.MathUtils.clamp(s.theta0 + d, -Math.PI, Math.PI);
     s.delta = target - s.theta0;
@@ -1870,6 +2296,9 @@ class SolidsTools {
     ws.checkOverlaps();
     ws.refreshMaterials();
     ws.app.solidsUI?.syncSolidAngle();
+    const ang = Math.round(deg(ws.shell.angle(s.plan.e, s.plan.P, s.plan.Q)));
+    const at = s.plan.P.centroid.clone().applyMatrix4(s.plan.P.M);
+    ws.setTag(`Fold · panels rigid · hinge ${ang}°`, ws.shellGroup.localToWorld(at));
   }
 
   beginEdge(ptr, hit) {
@@ -1890,6 +2319,7 @@ class SolidsTools {
     const moved = this.dragDetector(ptr, hit);
     let drag = null, started = false;
     return {
+      rebase: (p) => { if (!started) moved.rebase?.(p); },
       move: (p) => {
         if (!started) {
           if (!moved(p)) return;
@@ -2105,6 +2535,7 @@ class SolidsTools {
     const tapEdge = ws.edgeNear(P, hit.local, ptr.kind === 'ray' && !hit.near ? 0.2 : 0.14);
     let drag = null, started = false;
     return {
+      rebase: (p) => { if (!started) moved.rebase?.(p); },
       move: (p) => {
         if (!started) {
           if (!moved(p)) return;

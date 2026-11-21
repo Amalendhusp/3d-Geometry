@@ -46,6 +46,7 @@ export class SolidsUI {
     on('#labelsBtn', () => ws.toggleLabels());
     on('#shapeApplyBtn', () => ws.setSizeMM({ x: $('#shapeW').value, y: $('#shapeH').value, z: $('#shapeD').value }));
     on('#shapeResetBtn', () => ws.resetShape());
+    on('#shapeUnpinBtn', () => (ws.shapeEdit.pin ? ws.shapeEdit.togglePin(ws.shapeEdit.pin) : app.toast('Nothing is pinned. Tap a side or corner of the net to pin it.')));
     on('#idsBtn', () => ws.toggleIds());
     on('#importShellBtn', () => $('#importShellFile').click());
     $('#importShellFile').addEventListener('change', async (e) => {
