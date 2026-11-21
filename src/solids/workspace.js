@@ -2447,6 +2447,8 @@ class SolidsTools {
     this.ws.refreshMaterials();
     this.ws.app.haptic?.();
     return {
+      // The pinch has settled: take this hand's pose again and re-anchor.
+      rebase: (p) => { g.ptr = p; if (p.kind !== 'screen') g.m = p.grabMatrix().clone(); this.anchorInspect(); },
       move: (p) => { g.ptr = p; if (p.kind !== 'screen') g.m = p.grabMatrix().clone(); this.dragInspect(); },
       end: () => {
         // Fingers start opening just before a pinch release registers; drop
@@ -2637,8 +2639,9 @@ class SolidsTools {
     const root = this.ws.root;
     this.ws.carried = true;
     root.updateMatrixWorld(true);
-    const offset = ptr.grabMatrix().clone().invert().multiply(root.matrixWorld);
+    let offset = ptr.grabMatrix().clone().invert().multiply(root.matrixWorld);
     this.active.set(ptr.id, {
+      rebase: (p) => { root.updateMatrixWorld(true); offset = p.grabMatrix().clone().invert().multiply(root.matrixWorld); },
       move: (p) => {
         const m = p.grabMatrix().clone().multiply(offset);
         root.parent.updateMatrixWorld(true);

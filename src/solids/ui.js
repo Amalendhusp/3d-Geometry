@@ -163,12 +163,18 @@ export class SolidsUI {
     if ($('#addTypeSel').value !== ws.addType) $('#addTypeSel').value = ws.addType;
     $('#labelsBtn').setAttribute('aria-pressed', String(!!ws.state.showLabels));
     if (ws.state.tool === 'shape') {
+      // Refill the size boxes only when the size itself changed, so numbers
+      // being typed are never overwritten by an unrelated refresh.
       const size = ws.shapeSize();
-      for (const [id, v] of [['#shapeW', size.x], ['#shapeH', size.y], ['#shapeD', size.z]]) {
-        const el = $(id);
-        if (document.activeElement !== el) el.value = (Math.round(v * 10000) / 10).toString();
+      const key = size.toArray().map((v) => v.toFixed(6)).join();
+      if (key !== this.sizeKey) {
+        this.sizeKey = key;
+        for (const [id, v] of [['#shapeW', size.x], ['#shapeH', size.y], ['#shapeD', size.z]]) {
+          const el = $(id);
+          if (document.activeElement !== el) el.value = (Math.round(v * 10000) / 10).toString();
+        }
       }
-    }
+    } else this.sizeKey = null;
     $('#idsBtn').setAttribute('aria-pressed', String(!!ws.state.showIds));
     this.syncSolidAngle();
   }
