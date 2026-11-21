@@ -101,7 +101,18 @@ export function applyLayout(shell, layout) {
     for (const comp of shell.pieces()) if (!comp.some((p) => shell.bases.has(p.id))) shell.chooseBasesFor(comp);
   }
   const F = shell.forest();
-  const roots = new Map(F.roots.map((r) => [r, (layout.rootMs.get(r.id) || new THREE.Matrix4()).clone()]));
+  const roots = new Map(F.roots.map((r) => {
+    const M = (layout.rootMs.get(r.id) || new THREE.Matrix4()).clone();
+    // If the root face turned (a stretch tilts slanted faces), turn it back
+    // to lie face down; boxes need no correction.
+    const n = r.normal.clone().transformDirection(M);
+    if (n.y > -1 + 1e-9) {
+      const fix = new THREE.Matrix4().makeRotationFromQuaternion(new THREE.Quaternion().setFromUnitVectors(n, new THREE.Vector3(0, -1, 0)));
+      const p = r.verts[0].clone().applyMatrix4(M);
+      M.premultiply(new THREE.Matrix4().makeTranslation(-p.x, -p.y, -p.z)).premultiply(fix).premultiply(new THREE.Matrix4().makeTranslation(p.x, p.y, p.z));
+    }
+    return [r, M];
+  }));
   shell.applyForest(F, shell.flatAngles(F), roots);
   // Back into the surface plane (a root face may have moved with the stretch).
   let y = 0, n = 0;

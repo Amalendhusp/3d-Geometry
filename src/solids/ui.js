@@ -46,6 +46,11 @@ export class SolidsUI {
     on('#labelsBtn', () => ws.toggleLabels());
     on('#shapeApplyBtn', () => ws.setSizeMM({ x: $('#shapeW').value, y: $('#shapeH').value, z: $('#shapeD').value }));
     on('#shapeResetBtn', () => ws.resetShape());
+    $$('[data-smode]').forEach((b) => b.addEventListener('click', () => ws.shapeEdit.setMode(b.dataset.smode)));
+    on('#pinBaseBtn', () => ws.shapeEdit.pinBase());
+    on('#clearPinsBtn', () => ws.shapeEdit.clearPins());
+    on('#triBtn', () => ws.shapeEdit.triangulateAt());
+    on('#resetEditsBtn', () => ws.shapeEdit.resetEdits());
     on('#shapeUnpinBtn', () => (ws.shapeEdit.pin ? ws.shapeEdit.togglePin(ws.shapeEdit.pin) : app.toast('Nothing is pinned. Tap a side or corner of the net to pin it.')));
     on('#idsBtn', () => ws.toggleIds());
     on('#importShellBtn', () => $('#importShellFile').click());
@@ -162,6 +167,9 @@ export class SolidsUI {
     $('#sheetLabel').textContent = `${ws.solidsText()} · ${ws.shell.panels.length} panels`;
     if ($('#addTypeSel').value !== ws.addType) $('#addTypeSel').value = ws.addType;
     $('#labelsBtn').setAttribute('aria-pressed', String(!!ws.state.showLabels));
+    const smode = ws.shapeEdit.mode;
+    $$('[data-smode]').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.smode === smode)));
+    $$('[data-smode-for]').forEach((g) => { g.hidden = g.dataset.smodeFor !== smode; });
     if (ws.state.tool === 'shape') {
       // Refill the size boxes only when the size itself changed, so numbers
       // being typed are never overwritten by an unrelated refresh.

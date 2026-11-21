@@ -71,7 +71,11 @@ export class Shell {
     for (const f of faces) for (let i = 0; i < f.verts.length; i++) minEdge = Math.min(minEdge, f.verts[i].distanceTo(f.verts[(i + 1) % f.verts.length]));
     this.edgeLen = Number.isFinite(minEdge) ? minEdge : 0.12;
     const vix = new VertexIndex(this.edgeLen * 2e-5);
-    for (const f of faces) f.vid = f.verts.map((v) => vix.id(v));
+    // Vertices are named by their unedited positions, so edits never split
+    // or merge them and edge keys (cuts and hinges) survive edits.
+    for (const f of faces) f.vid = (f.base || f.verts).map((v) => vix.id(v));
+    this.vkeys = vix.keys;
+    this.vbase = vix.pts;
     const byKey = new Map();
     for (const f of faces) {
       const k = f.vid.slice().sort((a, b) => a - b).join(';');
@@ -93,7 +97,8 @@ export class Shell {
       }
     }
     this.panels = faces.filter((f) => !removed.has(f)).map((f) => ({
-      id: `${f.solid.id}:${f.fi}`,
+      id: f.pid || `${f.solid.id}:${f.fi}`,
+      sub: f.sub ?? null,
       solidId: f.solid.id,
       type: f.solid.type,
       fi: f.fi,
@@ -125,6 +130,9 @@ export class Shell {
       e.locked = e.uses.length > 2;
       e.type = 'cut';
       e.no = e.uses.length >= 2 ? no++ : 0;
+      // A diagonal added by triangulating a face: a fold line inside it.
+      const [u, w] = e.uses;
+      e.diagonal = !!(u && w && u.panel.sub != null && w.panel.sub != null && u.panel.id.split('.')[0] === w.panel.id.split('.')[0]);
     }
     this.panels.forEach((p, i) => { p.no = i + 1; });
     this.panelById = new Map(this.panels.map((p) => [p.id, p]));

@@ -1,5 +1,6 @@
 import * as THREE from 'three';
-import { flatTargets } from './layout.js';
+import { flatTargets, netPoses } from './layout.js';
+import { editModel, editTo, changes, editsFrom } from './vertexedit.js';
 import {
   resizable, handleAxes, autoAnchor, lockedAxes, resizePlan, solveShape, captureLayout,
   elPos, elEdge, elVid, edgeAxis, sameEl, AXIS_NAME, AXIS_LETTER,
@@ -17,7 +18,7 @@ import {
 
 const COL = {
   hover: '#ffe08a', pin: '#2f7bff', change: '#ff8a1f', handle: '#f0b44c',
-  ghostEdge: '#2b3150', ghostVert: '#2b3150', dot: '#ffffff', anchor: '#7fb2ff',
+  ghostEdge: '#2b3150', ghostVert: '#2b3150', dot: '#ffffff', anchor: '#7fb2ff', fold: '#17a45f',
 };
 
 const CYL = new THREE.CylinderGeometry(1, 1, 1, 10, 1);
@@ -43,6 +44,16 @@ export class ShapeEditor {
     this.marks.userData.ui = true;
     this.ghostOrigin = new THREE.Vector3();
     ws.shellGroup.add(this.ghost, this.marks);
+    // Two modes. Resize: stretch a box on its net (sizes change, angles stay).
+    // Edit: move vertices and edges of the assembled form freely; the net
+    // is regenerated from it.
+    this.mode = 'resize';
+    this.pins = new Set(); // vertex keys pinned in Edit
+    this.hoverE = null;
+    this.editDrag = null;
+    this.focusKey = null;
+    this.frozen = null;
+    this.lastChange = null;
   }
 
   get shell() { return this.ws.shell; }
@@ -53,10 +64,14 @@ export class ShapeEditor {
 
   enter() {
     const ws = this.ws;
-    if (!this.supported()) { this.exit(); return false; }
     this.active = true;
     this.pin = null;
     this.hover = null;
+    this.hoverE = null;
+    this.pins = new Set();
+    this.lastChange = null;
+    this.frozen = null;
+    this.mode = this.supported() && !ws.comp.isEdited() ? 'resize' : 'edit';
     const sh = this.shell;
     let box;
     if (!sh.flatReport().ok) {
@@ -70,6 +85,9 @@ export class ShapeEditor {
       ws.layFlat({ record: false, prefix: 'Shape: the net is laid on the surface; the assembled form floats above it.' });
     } else box = this.netBox();
     this.placeGhost(box);
+    // Drawing scale for Edit: steady while edges get shorter or longer.
+    this.L0 = Math.max(sh.edgeLen, 0.05);
+    if (this.mode === 'edit') this.frozen = this.ghostOffset();
     this.refresh();
     return true;
   }
@@ -78,7 +96,10 @@ export class ShapeEditor {
     this.active = false;
     this.pin = null;
     this.hover = null;
+    this.hoverE = null;
     this.drag = null;
+    this.editDrag = null;
+    this.frozen = null;
     this.ghost.visible = false;
     this.clear(this.marks);
   }
@@ -100,11 +121,13 @@ export class ShapeEditor {
   placeGhost(netBox) {
     const c = netBox.getCenter(new THREE.Vector3());
     const depth = netBox.max.z - netBox.min.z;
-    this.ghostOrigin.set(c.x, 0.09, netBox.min.z + depth * 0.2);
+    this.ghostOrigin.set(c.x, 0.12, netBox.min.z + depth * 0.2);
   }
 
-  // Ghost content sits with its bottom centre on ghostOrigin.
+  // Ghost content sits with its bottom centre on ghostOrigin. While editing
+  // vertices the offset is frozen, so pinned vertices stay put in space.
   ghostOffset() {
+    if (this.frozen) return this.frozen.clone();
     const b = this.closedBox();
     const c = b.getCenter(new THREE.Vector3());
     return new THREE.Vector3(this.ghostOrigin.x - c.x, this.ghostOrigin.y - b.min.y, this.ghostOrigin.z - c.z);
@@ -180,6 +203,7 @@ export class ShapeEditor {
 
   refresh() {
     if (!this.active) { this.ghost.visible = false; this.clear(this.marks); return; }
+    if (this.mode === 'edit') { this.refreshEdit(); return; }
     const sh = this.shell;
     const L = sh.edgeLen;
     const f = this.focus();
@@ -203,6 +227,7 @@ export class ShapeEditor {
     const faces = new THREE.Mesh(g, this.faceMat);
     faces.renderOrder = 1;
     this.ghost.add(faces);
+    this.faceMesh = null;
     const vpos = new Map();
     for (const p of sh.panels) p.vid.forEach((id, i) => { if (!vpos.has(id)) vpos.set(id, p.verts[i]); });
     for (const e of sh.edges) {
@@ -349,12 +374,18 @@ export class ShapeEditor {
       const d = ray.distanceToPoint(v);
       if (d < tolAt(t) * 1.3 && (!best || d / tolAt(t) < best.score)) best = { score: d / tolAt(t) * 0.8, ghost: { kind: 'vertex', vid }, point: v.clone(), distance: t };
     }
-    for (const { e, a, b } of edges) {
+    // A corner within reach always wins over the edges that meet there.
+    for (const { e, a, b } of best ? [] : edges) {
       const pOnRay = new THREE.Vector3(), pOnSeg = new THREE.Vector3();
       const d2 = ray.distanceSqToSegment(a, b, pOnRay, pOnSeg);
       const t = pOnRay.clone().sub(ray.origin).length();
       const d = Math.sqrt(d2);
       if (d < tolAt(t) && (!best || d / tolAt(t) < best.score)) best = { score: d / tolAt(t), ghost: { kind: 'edge', edge: e }, point: pOnSeg.clone(), distance: t };
+    }
+    if (!best && this.mode === 'edit' && this.faceMesh) {
+      const rc = new THREE.Raycaster(ray.origin, ray.direction, 0, 20);
+      const hit = rc.intersectObject(this.faceMesh, false)[0];
+      if (hit) return { panel: null, ghost: { kind: 'face', panel: this.faceTriPanel[hit.faceIndex] }, point: hit.point.clone(), distance: hit.distance, normal: ray.direction.clone().negate() };
     }
     if (!best) return null;
     return { panel: null, ghost: best.ghost, point: best.point, distance: best.distance, normal: ray.direction.clone().negate() };
@@ -371,7 +402,7 @@ export class ShapeEditor {
       const d = v.distanceTo(point);
       if (d < tol * 1.2 && (!best || d * 0.8 < best.d)) best = { d: d * 0.8, ghost: { kind: 'vertex', vid }, point: v.clone() };
     }
-    for (const { e, a, b } of edges) {
+    for (const { e, a, b } of best ? [] : edges) {
       const ab = b.clone().sub(a);
       const t = THREE.MathUtils.clamp(point.clone().sub(a).dot(ab) / ab.lengthSq(), 0, 1);
       const q = a.clone().addScaledVector(ab, t);
@@ -385,6 +416,16 @@ export class ShapeEditor {
   // --------------------------------------------------------------- hover
 
   setHover(hit, ptr) {
+    if (this.mode === 'edit') {
+      const sel = this.selection(hit, ptr);
+      const k = (x) => (x ? `${x.kind}:${x.keys.join(';')}` : '');
+      if (k(sel) === k(this.hoverE)) return;
+      this.hoverE = sel;
+      // The corner you last pointed at is the one Triangulate acts on.
+      if (sel && sel.kind === 'vertex') this.focusKey = sel.keys[0];
+      this.refresh();
+      return;
+    }
     let h = null;
     if (hit && hit.ghost) h = { ghost: hit.ghost };
     else if (hit && hit.panel) {
@@ -437,6 +478,8 @@ export class ShapeEditor {
   startResize(el) {
     const ws = this.ws;
     const sh = this.shell;
+    if (ws.comp.isEdited()) { ws.app.toast('This form has free-form edits. Resize works on the unedited box: Reset edits first, or switch to Edit.', 5000); return null; }
+    if (!this.supported()) { ws.app.toast('Resize drags work on boxes (cubes). For these solids use Edit vertices, or type sizes.', 5000); return null; }
     if (!sh.flatReport().ok) { ws.app.toast('Wait for the net to lie flat, then drag a side or corner.'); return null; }
     if (sameEl(el, this.pin)) { ws.app.toast('That one is pinned. Drag a different side or corner, or tap it to unpin.'); return null; }
     const anchor = this.pin || autoAnchor(sh, el);
@@ -515,5 +558,312 @@ export class ShapeEditor {
     ws.hideTag();
     ws.history.pop();
     ws.restoreSnapshot(d.before);
+  }
+
+  // =============================================================== Edit
+  // Free-form editing of the assembled form (the ghost). Pinned vertices
+  // never move; dragged ones follow the pointer; faces with four or more
+  // corners stay planar, and neighbours that must move for that are shown
+  // in orange in both views. The net is regenerated on every move.
+
+  setMode(m) {
+    const ws = this.ws;
+    if (!this.active || m === this.mode) return;
+    if (m === 'resize' && ws.comp.isEdited()) {
+      ws.app.toast('This form has free-form edits. Resize works on the unedited box: Reset edits first, or keep editing.', 5000);
+      return;
+    }
+    this.mode = m;
+    this.hover = this.hoverE = null;
+    this.pin = null;
+    this.frozen = null;
+    if (m === 'edit') this.frozen = this.ghostOffset();
+    this.refresh();
+    ws.app.toast(m === 'edit'
+      ? 'Edit vertices: drag a corner or edge of the floating form (left/right and up/down; hold Shift to slide it level). Tap one to pin it; Pin base pins the bottom. Faces stay flat: corners that must follow turn orange. The net below is redrawn as you go.'
+      : 'Resize: drag a side or corner of the net to change the box sizes; angles stay square.', 7000);
+    ws.app.notify?.();
+  }
+
+  keyOf(vid) { return this.shell.vkeys[vid]; }
+
+  edgeKeys(e) {
+    const u = e.uses[0];
+    const p = u.panel, n = p.vid.length;
+    return [this.keyOf(p.vid[u.i]), this.keyOf(p.vid[(u.i + 1) % n])];
+  }
+
+  pairKey(a, b) { return a < b ? `${a}|${b}` : `${b}|${a}`; }
+
+  // Vertex keys picked by a hit on the ghost (corner, edge, face) or the net (corner, side).
+  selection(hit, ptr) {
+    if (!hit) return null;
+    if (hit.ghost) {
+      const g = hit.ghost;
+      if (g.kind === 'vertex') return { kind: 'vertex', keys: [this.keyOf(g.vid)], onGhost: true };
+      if (g.kind === 'edge') return { kind: 'edge', keys: this.edgeKeys(g.edge), onGhost: true };
+      if (g.kind === 'face' && g.panel) return { kind: 'face', keys: g.panel.vid.map((v) => this.keyOf(v)), onGhost: true };
+      return null;
+    }
+    if (hit.panel) {
+      const el = this.netElement(hit.panel, hit.local, ptr && ptr.kind === 'ray' && !hit.near);
+      if (!el) return null;
+      const p = this.shell.panelById.get(el.pid);
+      if (el.kind === 'corner') return { kind: 'vertex', keys: [this.keyOf(p.vid[el.i])], onGhost: false };
+      return { kind: 'edge', keys: [this.keyOf(p.vid[el.i]), this.keyOf(p.vid[(el.i + 1) % p.vid.length])], onGhost: false };
+    }
+    return null;
+  }
+
+  // Lengths (mm) of the edges at a vertex, from closed-form positions.
+  edgesAt(key) {
+    const sh = this.shell;
+    const out = [];
+    for (const e of sh.edges) {
+      const [a, b] = this.edgeKeys(e);
+      if (a === key || b === key) out.push({ e, len: e.a.distanceTo(e.b) });
+    }
+    return out;
+  }
+
+  refreshEdit() {
+    const sh = this.shell;
+    const L = this.L0 || 0.12;
+    this.clear(this.ghost);
+    this.ghost.visible = true;
+    const off = this.ghostOffset();
+    // Faces (kept for picking), translucent.
+    const pos = [];
+    this.faceTriPanel = [];
+    for (const p of sh.panels) {
+      for (let i = 1; i < p.verts.length - 1; i++) {
+        for (const v of [p.verts[0], p.verts[i], p.verts[i + 1]]) pos.push(v.x + off.x, v.y + off.y, v.z + off.z);
+        this.faceTriPanel.push(p);
+      }
+    }
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+    g.computeVertexNormals();
+    if (!this.faceMat) this.faceMat = new THREE.MeshStandardMaterial({ color: '#c9d6ea', transparent: true, opacity: 0.32, depthWrite: false, side: THREE.DoubleSide, roughness: 0.7 });
+    const faces = new THREE.Mesh(g, this.faceMat);
+    faces.renderOrder = 1;
+    this.ghost.add(faces);
+    this.faceMesh = faces;
+
+    const hov = this.hoverE;
+    const hovKeys = new Set(hov ? hov.keys : []);
+    const hovEdge = hov && hov.kind === 'edge' ? this.pairKey(...hov.keys) : null;
+    const drag = new Set(this.editDrag ? this.editDrag.keys : []);
+    const ch = this.lastChange || { moved: [], edges: [] };
+    const moved = new Set(ch.moved);
+    const chEdges = new Set(ch.edges.map(([a, b]) => this.pairKey(a, b)));
+    const colourOfEdge = (e) => {
+      const [a, b] = this.edgeKeys(e);
+      const pk = this.pairKey(a, b);
+      if (pk === hovEdge) return [COL.hover, 2.6];
+      if (drag.has(a) && drag.has(b)) return [COL.handle, 2.2];
+      if (this.pins.has(a) && this.pins.has(b)) return [COL.pin, 1.8];
+      if (chEdges.has(pk)) return [COL.change, 1.6];
+      if (e.diagonal) return [COL.fold, 1.5];
+      return null;
+    };
+    const colourOfVert = (k) => {
+      if (drag.has(k)) return [COL.handle, 4.5];
+      if (hovKeys.has(k) && hov.kind === 'vertex') return [COL.hover, 5];
+      if (this.pins.has(k)) return [COL.pin, 3.6];
+      if (moved.has(k)) return [COL.change, 3.6];
+      if (hovKeys.has(k)) return [COL.hover, 3.2];
+      return null;
+    };
+
+    // Ghost edges and corners.
+    for (const e of sh.edges) {
+      const c = colourOfEdge(e);
+      this.rod(this.ghost, e.a.clone().add(off), e.b.clone().add(off), L * 0.011 * (c ? c[1] : 1), c ? c[0] : COL.ghostEdge);
+    }
+    const vpos = new Map();
+    for (const p of sh.panels) p.vid.forEach((id, i) => { const k = this.keyOf(id); if (!vpos.has(k)) vpos.set(k, p.verts[i]); });
+    for (const [k, v] of vpos) {
+      const c = colourOfVert(k);
+      this.dot(this.ghost, v.clone().add(off), L * 0.022 * (c ? c[1] / 2 : 1), c ? c[0] : COL.ghostVert);
+      if (this.pins.has(k)) this.pinGlyph(this.ghost, v.clone().add(off), L * 0.028);
+    }
+    // Lengths of the edges at the vertex in focus.
+    const fk = (this.editDrag && this.editDrag.keys.length === 1 ? this.editDrag.keys[0] : null)
+      || (hov && hov.kind === 'vertex' ? hov.keys[0] : null) || this.focusKey;
+    if (fk && typeof document !== 'undefined') {
+      for (const { e, len } of this.edgesAt(fk)) {
+        const s = new THREE.Sprite(this.labelMat(`${(len * 1000).toFixed(0)} mm`, chEdges.has(this.pairKey(...this.edgeKeys(e)))));
+        s.position.copy(e.a).add(e.b).multiplyScalar(0.5).add(off);
+        const h = L * 0.17;
+        s.scale.set(h * s.material.userData.aspect, h, 1);
+        s.renderOrder = 4;
+        this.ghost.add(s);
+      }
+    }
+
+    // The same things in the net, in every copy.
+    this.clear(this.marks);
+    const lift = new THREE.Vector3(0, L * 0.012, 0);
+    for (const p of sh.panels) {
+      const w = sh.worldPoly(p).map((v) => v.add(lift));
+      const n = w.length;
+      for (let i = 0; i < n; i++) {
+        const c = colourOfEdge(p.edges[i]);
+        if (c) this.rod(this.marks, w[i], w[(i + 1) % n], L * 0.012 * c[1], c[0]);
+        const cv = colourOfVert(this.keyOf(p.vid[i]));
+        this.dot(this.marks, w[i], L * (cv ? 0.022 * cv[1] / 2 : 0.018), cv ? cv[0] : COL.dot, cv ? 1 : 0.7);
+      }
+    }
+  }
+
+  // Cuts, hinges, bases and piece poses of the net, to carry across a rebuild.
+  netState() {
+    const sh = this.shell;
+    return {
+      types: Object.fromEntries(sh.edges.filter((e) => e.shared).map((e) => [e.key, e.type])),
+      bases: [...sh.bases],
+      poses: netPoses(sh),
+    };
+  }
+
+  startEdit(sel) {
+    const ws = this.ws;
+    if (!sel.onGhost) { ws.app.toast('Drag corners and edges on the floating form above; the net below follows. Tapping here pins.'); return null; }
+    if (sel.kind === 'face') { ws.app.toast('Drag a corner or an edge. Tap a face to pin all its corners.'); return null; }
+    const free = sel.keys.filter((k) => !this.pins.has(k));
+    if (!free.length) { ws.app.toast('That is pinned. Tap it to unpin, or drag another corner or edge.'); return null; }
+    ws.stopAnim();
+    const model = editModel(ws.shell);
+    ws.pushHistory();
+    const d = { keys: free, model, start: model.pos, pins: new Set(this.pins), prev: this.netState(), before: ws.history[ws.history.length - 1], t: 1, reason: null, P: null };
+    this.editDrag = d;
+    this.focusKey = free[0];
+    this.lastChange = null;
+    this.refresh();
+    return d;
+  }
+
+  // Move the dragged vertices by `delta` (shell frame) from where they started.
+  moveEdit(d, delta) {
+    const ws = this.ws;
+    const r = editTo(d.model, d.start, d.pins, d.keys, delta);
+    d.t = r.t; d.reason = r.reason; d.P = r.P;
+    ws.comp.edits = editsFrom(d.model, r.P);
+    this.lastChange = changes(d.model, d.start, r.P, d.keys);
+    ws.reshapeEdit(d.prev);
+    const k = d.keys[0];
+    const lens = [...d.model.nbr.get(k)].map((j) => (r.P.get(k).distanceTo(r.P.get(j)) * 1000).toFixed(0));
+    const at = r.P.get(k).clone().add(this.ghostOffset());
+    ws.setTag(r.t < 1 ? `Edit · stopped: ${r.reason}` : `Edit · edges ${lens.join(' / ')} mm`, ws.shellGroup.localToWorld(at));
+  }
+
+  endEdit(d) {
+    const ws = this.ws;
+    this.editDrag = null;
+    ws.hideTag();
+    const ch = d.P ? changes(d.model, d.start, d.P, []) : { moved: [] };
+    if (!d.P || !ch.moved.length) {
+      ws.history.pop();
+      this.refresh();
+      ws.app.toast(d.reason ? `Nothing moved: ${d.reason}.` : 'Nothing moved.', 5000);
+      return;
+    }
+    const sh = ws.shell;
+    // Keep the net valid: if it now overlaps itself, choose its cuts again.
+    let netMsg = '';
+    if (sh.overlapReport().within) {
+      const prev = this.netState();
+      const r = sh.defaultNet(700);
+      ws.relayNet(prev.poses);
+      netMsg = r.ok ? ' The net overlapped itself after this change, so its cuts were chosen again (verified).' : ' The net now overlaps itself and the search found no overlap-free net; see Layout → Other nets.';
+    }
+    const others = this.lastChange ? this.lastChange.moved.length : 0;
+    const edges = this.lastChange ? this.lastChange.edges.length : 0;
+    const closed = sh.edges.every((e) => e.uses.length === 2);
+    const planar = sh.planarity() < 1e-6;
+    const seams = sh.edges.every((e) => {
+      if (e.uses.length < 2) return false;
+      const len = e.uses.map((u) => { const w = sh.worldPoly(u.panel); return w[u.i].distanceTo(w[(u.i + 1) % w.length]); });
+      return Math.abs(len[0] - len[1]) < 1e-9;
+    });
+    const stop = d.t < 1 ? `Stopped at the valid limit (${Math.round(d.t * 100)}% of the drag): ${d.reason}. ` : '';
+    ws.app.toast(`${stop}${edges} edge${edges === 1 ? '' : 's'} changed length; ${others ? `${others} other corner${others === 1 ? '' : 's'} moved to keep faces flat (orange)` : 'no other corner had to move'}. Closed ${closed ? '✓' : '✗'} · faces planar ${planar ? '✓' : '✗'} · seams match ${seams ? '✓' : '✗'} · no self-intersection ✓.${netMsg} One step: Undo puts it back.`, 8000);
+    this.refresh();
+    ws.app.notify?.();
+  }
+
+  cancelEdit(d) {
+    const ws = this.ws;
+    this.editDrag = null;
+    ws.hideTag();
+    ws.history.pop();
+    ws.restoreSnapshot(d.before);
+  }
+
+  togglePins(sel) {
+    const ws = this.ws;
+    const all = sel.keys.every((k) => this.pins.has(k));
+    for (const k of sel.keys) { if (all) this.pins.delete(k); else this.pins.add(k); }
+    if (sel.kind === 'vertex') this.focusKey = sel.keys[0];
+    const what = { vertex: 'corner', edge: 'edge (both ends)', face: `face (${sel.keys.length} corners)` }[sel.kind];
+    ws.app.toast(all ? `Unpinned that ${what}.` : `Pinned that ${what}: it will not move. ${this.pins.size} corner${this.pins.size === 1 ? '' : 's'} pinned.`);
+    ws.app.haptic?.();
+    this.refresh();
+    ws.app.notify?.();
+  }
+
+  pinBase() {
+    const m = editModel(this.shell);
+    let minY = Infinity;
+    for (const v of m.pos.values()) minY = Math.min(minY, v.y);
+    let n = 0;
+    for (const [k, v] of m.pos) if (v.y < minY + 0.001) { this.pins.add(k); n++; }
+    this.ws.app.toast(`Pinned the ${n} corners of the base. Drag another corner or edge of the floating form.`);
+    this.refresh();
+    this.ws.app.notify?.();
+  }
+
+  clearPins() {
+    this.pins.clear();
+    this.ws.app.toast('No corners pinned.');
+    this.refresh();
+    this.ws.app.notify?.();
+  }
+
+  // Split the four-or-more-sided faces at a corner into triangles, along
+  // the diagonal that avoids that corner: new panel divisions and fold
+  // edges, so the corner can move without bending those faces.
+  triangulateAt(key = this.focusKey) {
+    const ws = this.ws;
+    if (!key) { ws.app.toast('Touch or drag a corner first, then Triangulate at corner.'); return; }
+    const sh = this.shell;
+    const add = [];
+    for (const p of sh.panels) {
+      if (p.sub != null || p.vid.length < 4) continue;
+      const i = p.vid.findIndex((id) => this.keyOf(id) === key);
+      if (i < 0) continue;
+      const n = p.vid.length;
+      add.push([p.id, [(i + 1) % n, (i + n - 1) % n]]);
+    }
+    if (!add.length) { ws.app.toast('No four-sided faces meet at that corner: its faces are already triangles.'); return; }
+    ws.pushHistory();
+    const prev = this.netState();
+    for (const [id, d] of add) ws.comp.tri.set(id, d);
+    ws.reshapeEdit(prev);
+    this.focusKey = key;
+    ws.app.toast(`Triangulated ${add.length} face${add.length > 1 ? 's' : ''} at that corner: ${add.length} new fold line${add.length > 1 ? 's' : ''} (green) divide them, in the form and in the net. That corner can now move without bending them. Undo removes the triangulation.`, 7000);
+  }
+
+  resetEdits() {
+    const ws = this.ws;
+    if (!ws.comp.isEdited()) { ws.app.toast('No free-form edits to reset.'); return; }
+    ws.pushHistory();
+    const prev = this.netState();
+    ws.comp.edits = new Map();
+    ws.comp.tri = new Map();
+    this.lastChange = null;
+    ws.reshapeEdit(prev);
+    ws.app.toast('Edits reset: back to the regular solids. Undo brings the edits back.');
   }
 }

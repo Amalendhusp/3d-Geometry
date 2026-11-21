@@ -682,6 +682,7 @@ class App {
       ndc.set(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1);
       rc.setFromCamera(ndc, this.camera);
       ptr.ray.copy(rc.ray);
+      ptr.shift = !!e.shiftKey;
     };
     el.addEventListener('pointerdown', (e) => {
       if (this.renderer.xr.isPresenting) return;

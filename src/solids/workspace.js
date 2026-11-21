@@ -3,7 +3,7 @@ import { Composition, alignFace } from './composition.js';
 import { Shell } from './shell.js';
 import { template, TEMPLATES, SOLID_TYPES, restHeight } from './polyhedra.js';
 import { makeFrame, angleFromPoint, angleFromRay } from './hinge.js';
-import { flatTargets, pieceCentre, planarMove, edgeSnap } from './layout.js';
+import { flatTargets, pieceCentre, planarMove, edgeSnap, layFlatStable } from './layout.js';
 import { LabelLayer } from './labels.js';
 import { ShapeEditor } from './shapeedit.js';
 import { captureLayout, applyLayout, anchorTo, elPos } from './resize.js';
@@ -282,7 +282,7 @@ export class SolidsWorkspace {
   // ghost in step, or leave direct editing if the solids are not boxes.
   syncShapeEdit() {
     if (!this.shapeEdit || !this.shapeEdit.active) return;
-    if (!this.shapeEdit.supported()) { this.shapeEdit.exit(); return; }
+    if (this.shapeEdit.mode === 'resize' && this.comp.isEdited()) this.shapeEdit.mode = 'edit';
     // In Shape the net always lies flat (an undo may bring back a closed form).
     if (!this.anim && !this.shell.flatReport().ok) {
       const t = flatTargets(this.shell, { keepFlat: true });
@@ -306,6 +306,38 @@ export class SolidsWorkspace {
     this.checkOverlaps();
     this.shapeEdit.refresh();
     this.app.notify?.();
+  }
+
+  // Rebuild after a free-form edit: same cuts and hinges (edge keys name
+  // the unedited vertices), new fold lines are hinges, the net laid flat
+  // again with each piece's root where it was.
+  reshapeEdit(prev) {
+    this.shell.build(this.comp);
+    for (const e of this.shell.edges) {
+      if (!e.shared || e.locked) continue;
+      e.type = prev.types[e.key] || (e.diagonal ? 'hinge' : 'cut');
+    }
+    const ids = prev.bases.filter((id) => this.shell.panelById.has(id));
+    if (ids.length) this.shell.bases = new Set(ids);
+    for (const comp of this.shell.pieces()) if (!comp.some((p) => this.shell.bases.has(p.id))) this.shell.chooseBasesFor(comp);
+    layFlatStable(this.shell, prev.poses);
+    this.shell.classify();
+    this.updatePivot();
+    this.buildMeshes();
+    this.applyView();
+    this.checkOverlaps();
+    this.shapeEdit.refresh();
+    this.app.notify?.();
+  }
+
+  // Lay the net flat again after its cuts changed.
+  relayNet(poses) {
+    layFlatStable(this.shell, poses);
+    this.shell.classify();
+    this.updateMatrices();
+    this.checkOverlaps();
+    this.refreshStyles();
+    this.shapeEdit.refresh();
   }
 
   pushHistory() {
@@ -1031,13 +1063,12 @@ export class SolidsWorkspace {
     this.app.toast(msg, t === 'inspect' || t === 'layout' ? 6000 : undefined);
     if (t === 'layout' && prev !== 'layout' && !this.shell.flatReport().ok) this.layFlat({ intro: true });
     if (t === 'shape' && prev !== 'shape') {
-      if (this.shapeEdit.enter()) {
-        msg = 'Resize mode (panel sizes change): the net lies on the surface and the assembled form floats above it. Hover an edge or corner to see it in both. Tap one to pin it, then drag another side or corner. Release to keep the change.';
-        this.app.toast(msg, 8000);
-        this.frameView();
-      } else {
-        this.app.toast(`${hints.shape} Dragging works on box compositions (cubes) for now; for these solids, type sizes or use ±10%.`, 7000);
-      }
+      this.shapeEdit.enter();
+      msg = this.shapeEdit.mode === 'resize'
+        ? 'Shape: the net lies on the surface and the assembled form floats above it. Resize (panel sizes change, angles stay): tap a side or corner of the net to pin it, drag another. Edit vertices: move corners and edges of the floating form freely.'
+        : 'Shape → Edit vertices: drag a corner or edge of the floating form; the net below is redrawn as you go. Tap to pin; Pin base pins the bottom. Faces stay flat unless you triangulate.';
+      this.app.toast(msg, 8000);
+      this.frameView();
     }
     if (t !== 'shape') this.shapeEdit.exit();
     this.updateAxes();
@@ -1516,6 +1547,10 @@ export class SolidsWorkspace {
   // ------------------------------------------------------------- build
 
   requireClosed() {
+    if (this.comp.isEdited()) {
+      this.app.toast('This form has free-form edits. Building works on the regular solids: press Reset edits (Shape → Edit) to add, move, turn or remove solids.', 5000);
+      return false;
+    }
     if (this.comp.isShaped()) {
       this.app.toast('This composition has a changed shape. Building works on the regular solids: press Reset shape (Shape tool) to add, move, turn or remove solids.', 5000);
       return false;
@@ -1592,6 +1627,7 @@ export class SolidsWorkspace {
   setShape(shape, label = 'Shape changed') {
     this.tools.finishAll();
     this.stopAnim();
+    if (this.comp.isEdited()) { this.app.toast('This form has free-form edits. Sizes apply to the unedited form: Reset edits first (Shape → Edit).', 5000); return false; }
     if (this.shapeEdit.active && this.shell.flatReport().ok) {
       const problem = this.shapeProblem(shape);
       if (problem) { this.app.toast(`${problem} The shape was not changed.`, 5000); this.app.notify?.(); return false; }
@@ -1844,7 +1880,8 @@ export class SolidsWorkspace {
 
   statusLine() {
     const s = this.shell.stats();
-    const mode = { shape: 'Resize mode: panel sizes change', open: 'Fold mode: panels stay rigid', layout: 'Layout: pieces move as wholes' }[this.state.tool];
+    const mode = this.state.tool === 'shape' && this.shapeEdit.mode === 'edit' ? 'Edit vertices: lengths and angles change'
+      : { shape: 'Resize mode: panel sizes change', open: 'Fold mode: panels stay rigid', layout: 'Layout: pieces move as wholes' }[this.state.tool];
     const parts = [...(mode ? [mode] : []), this.solidsText(), `${s.panels} panels`, `${s.removed} internal faces removed`, `${s.hinges} hinges`, `${s.cuts} cuts`];
     if (s.pieces > 1) parts.push(`${s.pieces} separate shells`);
     if (this.overlapPairs) parts.push(`${this.overlapPairs} intersecting pair${this.overlapPairs > 1 ? 's' : ''} now`);
@@ -1878,15 +1915,28 @@ export class SolidsWorkspace {
         { label: 'Tip 90°', action: () => a.stepView('tip', 90) },
       ], 8);
       B.push({ kind: 'text', x: M, y: y2, w: W, h: 78, label: 'Pinch or pull the trigger on the form and turn your wrist; with both hands, move them around each other. Only the view turns.' });
+    } else if (s.tool === 'shape' && a.shapeEdit.mode === 'edit') {
+      row(y1, 78, [
+        { label: 'Resize', action: () => a.shapeEdit.setMode('resize'), active: false },
+        { label: 'Edit vertices', w: 1.3, action: () => a.shapeEdit.setMode('edit'), active: true },
+        { label: 'Pin base', action: () => a.shapeEdit.pinBase() },
+        { label: 'Clear pins', action: () => a.shapeEdit.clearPins() },
+      ], 8);
+      row(y2, 78, [
+        { label: 'Triangulate at corner', w: 1.6, action: () => a.shapeEdit.triangulateAt() },
+        { label: 'Reset edits', action: () => a.shapeEdit.resetEdits() },
+      ], 8);
     } else if (s.tool === 'shape') {
       row(y1, 78, [
+        { label: 'Resize', action: () => a.shapeEdit.setMode('resize'), active: true },
+        { label: 'Edit', action: () => a.shapeEdit.setMode('edit'), active: false },
         { label: 'X −10%', action: () => a.stretchBy('x', 1 / 1.1) },
         { label: 'X +10%', action: () => a.stretchBy('x', 1.1) },
         { label: 'Y −10%', action: () => a.stretchBy('y', 1 / 1.1) },
         { label: 'Y +10%', action: () => a.stretchBy('y', 1.1) },
         { label: 'Z −10%', action: () => a.stretchBy('z', 1 / 1.1) },
         { label: 'Z +10%', action: () => a.stretchBy('z', 1.1) },
-      ], 6);
+      ], 4);
       row(y2, 78, [
         { label: 'Reset shape', action: () => a.resetShape() },
         { label: 'Unpin', action: () => (a.shapeEdit.pin ? a.shapeEdit.togglePin(a.shapeEdit.pin) : a.app.toast('Nothing is pinned. Tap a side or corner of the net to pin it.')) },
@@ -2116,10 +2166,59 @@ class SolidsTools {
 
   // ------------------------------------------------------------- shape
 
+  // Where a pointer is in space for a 3D drag (world). On a screen: on a
+  // plane through the start point that faces you and stands upright (left/
+  // right and up/down), or a level plane with Shift. Hands and controllers:
+  // where the hand is.
+  spacePoint(p, ref) {
+    if (p.kind === 'screen') return p.ray.intersectPlane(ref.plane, new THREE.Vector3());
+    return p.grabPoint(null, ref.dist, ref.stick).point.clone();
+  }
+
+  beginVertexEdit(ptr, hit) {
+    const ws = this.ws;
+    const ed = ws.shapeEdit;
+    const sel = ed.selection(hit, ptr);
+    if (!sel) return { move: () => {}, end: () => ws.app.toast('Tap a corner, edge or face of the floating form to pin it; drag a corner or edge to move it.') };
+    const moved = this.dragDetector(ptr, hit);
+    const ref = { dist: hit.distance, stick: ptr.kind !== 'screen' && ptr.grabPoint ? ptr.grabPoint(hit).stick : false };
+    if (ptr.kind === 'screen') {
+      const cam = ws.app.camera;
+      const fwd = new THREE.Vector3(0, 0, -1).applyQuaternion(cam.getWorldQuaternion(new THREE.Quaternion()));
+      const n = ptr.shift ? new THREE.Vector3(0, 1, 0) : new THREE.Vector3(fwd.x, 0, fwd.z).normalize();
+      if (n.lengthSq() < 1e-6) n.set(0, 0, 1);
+      ref.plane = new THREE.Plane().setFromNormalAndCoplanarPoint(n, hit.point);
+    }
+    let W0 = this.spacePoint(ptr, ref) || hit.point.clone();
+    let d = null, started = false;
+    return {
+      rebase: (p) => { if (!started) { moved.rebase?.(p); W0 = this.spacePoint(p, ref) || W0; } },
+      move: (p) => {
+        if (!started) {
+          if (!moved(p)) return;
+          started = true;
+          d = ed.startEdit(sel);
+        }
+        if (!d) return;
+        const W = this.spacePoint(p, ref);
+        if (!W) return;
+        ws.shellGroup.updateWorldMatrix(true, false);
+        const delta = ws.shellGroup.worldToLocal(W.clone()).sub(ws.shellGroup.worldToLocal(W0.clone()));
+        ed.moveEdit(d, delta);
+      },
+      end: () => {
+        if (!started) { ed.togglePins(sel); return; }
+        if (d) ed.endEdit(d);
+      },
+      cancel: () => { if (d) ed.cancelEdit(d); },
+    };
+  }
+
   beginShape(ptr, hit) {
     const ws = this.ws;
     const ed = ws.shapeEdit;
     if (!ed.active) return null;
+    if (ed.mode === 'edit') return this.beginVertexEdit(ptr, hit);
     if (hit.ghost) {
       const gh = hit.ghost;
       return {

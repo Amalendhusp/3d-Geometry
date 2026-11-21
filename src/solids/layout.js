@@ -173,3 +173,32 @@ export function edgeSnap(shell, piece, maxDist = shell.edgeLen * 0.2, maxTurn = 
   best.move = planarMove(best.to.x - best.from.x, best.to.z - best.from.z, -best.turn, best.from);
   return best;
 }
+
+// Where each piece's root panel lies on the surface now: the centre of
+// its outline and the direction of its first side.
+export function netPoses(shell) {
+  const out = new Map();
+  for (const r of shell.forest().roots) {
+    const w = shell.worldPoly(r);
+    const c = w.reduce((a, v) => a.add(v), new THREE.Vector3()).divideScalar(w.length);
+    out.set(r.id, { c, ang: Math.atan2(w[1].z - w[0].z, w[1].x - w[0].x) });
+  }
+  return out;
+}
+
+// Lay every piece flat after the geometry changed, keeping each root
+// panel where it was (same centre, same heading) so the net does not jump.
+export function layFlatStable(shell, poses) {
+  const F = shell.forest();
+  const roots = new Map();
+  for (const r of F.roots) {
+    let M = new THREE.Matrix4().makeRotationFromQuaternion(new THREE.Quaternion().setFromUnitVectors(r.normal.clone().normalize(), DOWN));
+    const a = r.verts[0].clone().applyMatrix4(M), b = r.verts[1].clone().applyMatrix4(M);
+    const p = poses && poses.get(r.id);
+    if (p) M = new THREE.Matrix4().makeRotationY(Math.atan2(b.z - a.z, b.x - a.x) - p.ang).multiply(M);
+    const c = r.verts.reduce((s, v) => s.add(v.clone().applyMatrix4(M)), new THREE.Vector3()).divideScalar(r.verts.length);
+    const t = p ? p.c : new THREE.Vector3(c.x, 0, c.z);
+    roots.set(r, new THREE.Matrix4().makeTranslation(t.x - c.x, -c.y, t.z - c.z).multiply(M));
+  }
+  shell.applyForest(F, shell.flatAngles(F), roots);
+}

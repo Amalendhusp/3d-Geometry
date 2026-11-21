@@ -8,6 +8,22 @@ import { template } from './polyhedra.js';
 const _m = new THREE.Matrix4();
 const _s = new THREE.Vector3();
 
+// Text key of a point (10 µm), naming a vertex of the unedited form.
+const QK = 1e5;
+export const vkey = (v) => `${Math.round(v.x * QK)},${Math.round(v.y * QK)},${Math.round(v.z * QK)}`;
+
+// Outward normal of a polygon from its corner order (Newell's method).
+export function polyNormal(verts) {
+  const n = new THREE.Vector3();
+  for (let i = 0; i < verts.length; i++) {
+    const a = verts[i], b = verts[(i + 1) % verts.length];
+    n.x += (a.y - b.y) * (a.z + b.z);
+    n.y += (a.z - b.z) * (a.x + b.x);
+    n.z += (a.x - b.x) * (a.y + b.y);
+  }
+  return n.normalize();
+}
+
 export class Solid {
   constructor(id, type, edge, position, quaternion) {
     this.id = id;
@@ -52,7 +68,15 @@ export class Composition {
     // them); the stretch is applied to every vertex when the shell is made,
     // so shared vertices stay shared and joined faces stay joined.
     this.shape = new THREE.Vector3(1, 1, 1);
+    // Free-form edits: new positions for vertices of the (stretched) form,
+    // keyed by where each vertex was before editing, so a vertex shared by
+    // several faces or solids moves as one. And faces split into triangles
+    // on purpose: face id -> the two corners of the dividing diagonal.
+    this.edits = new Map();
+    this.tri = new Map();
   }
+
+  isEdited() { return this.edits.size > 0 || this.tri.size > 0; }
 
   isShaped() { return Math.abs(this.shape.x - 1) > 1e-9 || Math.abs(this.shape.y - 1) > 1e-9 || Math.abs(this.shape.z - 1) > 1e-9; }
 
@@ -60,17 +84,38 @@ export class Composition {
 
   // Faces of all solids after the shape change. A linear stretch keeps
   // every face planar and maps equal vertices to equal vertices.
-  shapedFaces(shape = this.shape) {
+  shapedFaces(shape = this.shape, edits = this.edits, tri = this.tri) {
     const faces = this.solids.flatMap((s) => s.worldFaces());
-    if (Math.abs(shape.x - 1) < 1e-12 && Math.abs(shape.y - 1) < 1e-12 && Math.abs(shape.z - 1) < 1e-12) return faces;
-    const S = this.shapeMatrix(shape);
-    const N = new THREE.Matrix3().getNormalMatrix(S);
-    for (const f of faces) {
-      f.verts = f.verts.map((v) => v.applyMatrix4(S));
-      f.centroid.applyMatrix4(S);
-      f.normal.applyMatrix3(N).normalize();
+    if (!(Math.abs(shape.x - 1) < 1e-12 && Math.abs(shape.y - 1) < 1e-12 && Math.abs(shape.z - 1) < 1e-12)) {
+      const S = this.shapeMatrix(shape);
+      const N = new THREE.Matrix3().getNormalMatrix(S);
+      for (const f of faces) {
+        f.verts = f.verts.map((v) => v.applyMatrix4(S));
+        f.centroid.applyMatrix4(S);
+        f.normal.applyMatrix3(N).normalize();
+      }
     }
-    return faces;
+    // `base` keeps each corner's unedited position: it names the vertex.
+    for (const f of faces) f.base = f.verts.map((v) => v.clone());
+    if (!edits.size && !tri.size) return faces;
+    const out = [];
+    for (const f of faces) {
+      if (edits.size) f.verts = f.base.map((b) => { const e = edits.get(vkey(b)); return e ? e.clone() : b.clone(); });
+      const d = tri.get(`${f.solid.id}:${f.fi}`);
+      if (d && f.verts.length > 3) {
+        const n = f.verts.length;
+        const [i, j] = d;
+        const loops = [[], []];
+        for (let k = i; ; k = (k + 1) % n) { loops[0].push(k); if (k === j) break; }
+        for (let k = j; ; k = (k + 1) % n) { loops[1].push(k); if (k === i) break; }
+        loops.forEach((loop, sub) => out.push({ ...f, sub, pid: `${f.solid.id}:${f.fi}.${sub}`, verts: loop.map((k) => f.verts[k].clone()), base: loop.map((k) => f.base[k].clone()), sides: loop.length }));
+      } else out.push(f);
+    }
+    for (const f of out) {
+      f.normal = polyNormal(f.verts);
+      f.centroid = f.verts.reduce((a, v) => a.add(v), new THREE.Vector3()).divideScalar(f.verts.length);
+    }
+    return out;
   }
 
   add(type, edge, position, quaternion = template(type).rest) {
@@ -85,6 +130,8 @@ export class Composition {
   serialize() {
     const out = { nextId: this.nextId, solids: this.solids.map((s) => s.toJSON()) };
     if (this.isShaped()) out.shape = this.shape.toArray();
+    if (this.edits.size) out.edits = [...this.edits].map(([k, v]) => [k, ...v.toArray().map((x) => Math.round(x * 1e9) / 1e9)]);
+    if (this.tri.size) out.tri = [...this.tri].map(([k, d]) => [k, d[0], d[1]]);
     return out;
   }
 
@@ -93,6 +140,10 @@ export class Composition {
     this.solids = data.solids.map((d) => new Solid(d.id, d.type, d.edge, new THREE.Vector3().fromArray(d.p), new THREE.Quaternion().fromArray(d.q)));
     this.shape.set(1, 1, 1);
     if (Array.isArray(data.shape) && data.shape.length === 3 && data.shape.every((v) => Number.isFinite(v) && v > 0)) this.shape.fromArray(data.shape);
+    this.edits = new Map();
+    if (Array.isArray(data.edits)) for (const [k, x, y, z] of data.edits) if (typeof k === 'string' && [x, y, z].every(Number.isFinite)) this.edits.set(k, new THREE.Vector3(x, y, z));
+    this.tri = new Map();
+    if (Array.isArray(data.tri)) for (const [k, i, j] of data.tri) if (typeof k === 'string' && Number.isInteger(i) && Number.isInteger(j)) this.tri.set(k, [i, j]);
   }
 
   // Lowest point of all solids (y).
