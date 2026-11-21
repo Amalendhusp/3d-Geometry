@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { BUILD_TEXT } from './version.js';
 
 // A floating control panel for VR, drawn on a canvas. Use it with a
 // controller or hand ray (trigger / pinch) or by poking it with a fingertip.
@@ -204,11 +205,15 @@ export class VRPanel {
     ctx.textBaseline = 'middle';
     ctx.textAlign = 'left';
     ctx.fillText('Paper Fold Studio', 28, 46);
+    const titleW = ctx.measureText('Paper Fold Studio').width;
+    ctx.font = `500 20px ${this.font}`;
+    ctx.fillStyle = C.muted;
+    ctx.fillText(BUILD_TEXT, 28 + titleW + 16, 49);
     ctx.font = `500 26px ${this.font}`;
     ctx.fillStyle = C.muted;
     ctx.textAlign = 'right';
     ctx.fillText(this.app.space === 'solids'
-      ? `${this.app.solids.comp.solids.length} cube${this.app.solids.comp.solids.length === 1 ? '' : 's'} · ${this.app.solids.shell.panels.length} panels`
+      ? `${this.app.solids.solidsText()} · ${this.app.solids.shell.panels.length} panels`
       : `Sheet ${fmt(this.app.paper.W * 100)} × ${fmt(this.app.paper.H * 100)} cm`, PX_W - 28, 46);
     const hovered = new Set(this.hover.values());
     for (const b of this.buttons) {

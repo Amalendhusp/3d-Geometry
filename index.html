@@ -162,6 +162,7 @@
   .actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 6px; }
   .actions.start { justify-content: flex-start; margin: 0 0 14px; }
   .context .group { display: contents; }
+  .sheet p.build { margin: 14px 0 0; font-size: 12.5px; color: var(--muted); font-variant-numeric: tabular-nums; letter-spacing: 0.02em; }
   .sheet h3.sub { margin: 14px 0 4px; font-size: 14px; }
   .sheet p.note { margin: 0 0 8px; font-size: 12.5px; }
   .checks { display: flex; flex-wrap: wrap; gap: 6px 16px; margin: 0 0 10px; }
@@ -501,6 +502,7 @@
       <dt>Layers</dt>
       <dd>“All” folds every layer on the side you grab. “Top flap” folds only the piece you grab.</dd>
     </dl>
+    <p class="build" id="buildInfo" aria-label="Version">Version …</p>
     <div class="actions"><button type="button" class="primary" id="helpClose">Got it</button></div>
   </div>
 </div>

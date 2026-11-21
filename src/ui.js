@@ -1,4 +1,5 @@
 // Screen UI for phones and desktop. The VR panel mirrors the same actions.
+import { BUILD, BUILD_TEXT } from './version.js';
 
 const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
@@ -114,6 +115,8 @@ export class UI {
     $('#sceneClose').addEventListener('click', () => { scene.hidden = true; });
     scene.addEventListener('click', (e) => { if (e.target === scene) scene.hidden = true; });
     const help = $('#helpDialog');
+    const build = $('#buildInfo');
+    if (build) { build.textContent = `Version ${BUILD.version} · code commit ${BUILD.commit} · ${BUILD.date}`; build.title = BUILD_TEXT; }
     $('#helpBtn').addEventListener('click', () => { help.hidden = false; $('#helpClose').focus(); });
     $('#helpClose').addEventListener('click', () => { help.hidden = true; });
     help.addEventListener('click', (e) => { if (e.target === help) help.hidden = true; });
