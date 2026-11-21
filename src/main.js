@@ -9,6 +9,7 @@ import { UI } from './ui.js';
 import { SolidsWorkspace } from './solids/workspace.js';
 import { SolidsUI } from './solids/ui.js';
 import { Placement, SURFACES, SURFACE_LABELS } from './placement.js';
+import { HandTools } from './handtools.js';
 
 const PALETTE = ['#1d1f2b', '#d8452f', '#f0a325', '#f2d64b', '#3f9b5a', '#2f74c0', '#7a4bb3', '#ffffff'];
 const BRUSH_SIZES = [1, 2, 3, 5, 8, 12, 18, 25, 35];
@@ -57,6 +58,7 @@ class App {
     this.solids = new SolidsWorkspace(this);
     this.surface.add(this.solids.root);
     this.placement = new Placement(this);
+    this.handTools = new HandTools(this);
     this.actions = this.makeActions();
     this.xrInput = new XRInput(this);
     this.haptic = () => this.xrInput.hapticAll();
@@ -410,6 +412,7 @@ class App {
     this.tools.clearSelection();
     this.space = space;
     this.applySpace();
+    this.handTools.updateVisibility();
     try { history.replaceState(null, '', space === 'solids' ? '#solids' : '#paper'); } catch { /* ignore */ }
     this.layoutTable();
     if (!this.renderer.xr.isPresenting) this.fitCamera();
@@ -744,6 +747,7 @@ class App {
     r.xr.addEventListener('sessionstart', () => {
       this.needRecenter = true;
       this.placement.updateVisibility();
+      this.handTools.updateVisibility();
       this.panel.mesh.visible = true;
       this.hoverCursor.visible = false;
       this.savedView = { pos: this.camera.position.clone(), target: this.controls.target.clone() };
@@ -765,6 +769,7 @@ class App {
       this.placement.panelCustom = false;
       this.placement.used = 'standing';
       this.placement.updateVisibility();
+      this.handTools.updateVisibility();
       this.layoutTable();
       if (this.state.onTable) this.resetPosition();
       this.onResize();
