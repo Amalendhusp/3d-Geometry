@@ -12,9 +12,42 @@ import * as THREE from 'three';
 //    more than two panels are always cut (locked).
 //  - Each connected group of panels has a base panel that never moves.
 
-const Q = 1e5; // 10 µm vertex quantisation
+const Q = 1e5; // 10 µm, for the text form of keys
 const vkey = (v) => `${Math.round(v.x * Q)},${Math.round(v.y * Q)},${Math.round(v.z * Q)}`;
-const ekey = (a, b) => { const ka = vkey(a), kb = vkey(b); return ka < kb ? `${ka}|${kb}` : `${kb}|${ka}`; };
+
+// Points within a small tolerance are the same vertex. Rotated solids do
+// not land on round coordinates, so plain rounding could split one vertex
+// in two; this merges by distance and names each vertex by its first copy.
+class VertexIndex {
+  constructor(tol = 2e-6) {
+    this.tol = tol;
+    this.cell = tol * 8;
+    this.grid = new Map();
+    this.pts = [];
+    this.keys = [];
+  }
+
+  id(v) {
+    const c = this.cell;
+    const ix = Math.floor(v.x / c), iy = Math.floor(v.y / c), iz = Math.floor(v.z / c);
+    for (let dx = -1; dx <= 1; dx++) {
+      for (let dy = -1; dy <= 1; dy++) {
+        for (let dz = -1; dz <= 1; dz++) {
+          const list = this.grid.get(`${ix + dx},${iy + dy},${iz + dz}`);
+          if (!list) continue;
+          for (const i of list) if (this.pts[i].distanceTo(v) <= this.tol) return i;
+        }
+      }
+    }
+    const i = this.pts.length;
+    this.pts.push(v.clone());
+    this.keys.push(vkey(v));
+    const k = `${ix},${iy},${iz}`;
+    if (!this.grid.has(k)) this.grid.set(k, []);
+    this.grid.get(k).push(i);
+    return i;
+  }
+}
 
 const _v = new THREE.Vector3();
 const _w = new THREE.Vector3();
@@ -34,9 +67,11 @@ export class Shell {
   build(composition) {
     const faces = composition.solids.flatMap((s) => s.worldFaces());
     this.edgeLen = composition.solids.length ? Math.min(...composition.solids.map((s) => s.edge)) : 0.12;
+    const vix = new VertexIndex(this.edgeLen * 2e-5);
+    for (const f of faces) f.vid = f.verts.map((v) => vix.id(v));
     const byKey = new Map();
     for (const f of faces) {
-      const k = f.verts.map(vkey).sort().join(';');
+      const k = f.vid.slice().sort((a, b) => a - b).join(';');
       if (!byKey.has(k)) byKey.set(k, []);
       byKey.get(k).push(f);
     }
@@ -57,7 +92,9 @@ export class Shell {
     this.panels = faces.filter((f) => !removed.has(f)).map((f) => ({
       id: `${f.solid.id}:${f.fi}`,
       solidId: f.solid.id,
+      type: f.solid.type,
       fi: f.fi,
+      vid: f.vid,
       verts: f.verts,
       normal: f.normal,
       centroid: f.centroid,
@@ -69,7 +106,8 @@ export class Shell {
       const n = p.verts.length;
       for (let i = 0; i < n; i++) {
         const a = p.verts[i], b = p.verts[(i + 1) % n];
-        const k = ekey(a, b);
+        const ka = vix.keys[p.vid[i]], kb = vix.keys[p.vid[(i + 1) % n]];
+        const k = ka < kb ? `${ka}|${kb}` : `${kb}|${ka}`;
         if (!map.has(k)) map.set(k, { key: k, a: a.clone(), b: b.clone(), uses: [], type: 'cut', locked: false });
         const e = map.get(k);
         e.uses.push({ panel: p, i });
@@ -83,6 +121,7 @@ export class Shell {
       e.type = 'cut';
     }
     this.panelById = new Map(this.panels.map((p) => [p.id, p]));
+    this.net = { status: 'unchecked' };
     this.chooseBases();
   }
 
@@ -352,50 +391,73 @@ export class Shell {
     for (const p of this.panels) p.M.identity();
     const F = this.forest();
     this.applyForest(F, this.flatAngles(F));
-    const res = this.overlaps();
+    // Only panels of the same unfolding piece can make a net overlap.
+    const rootOf = new Map();
+    for (const p of F.order) { const l = F.parent.get(p); rootOf.set(p, l ? rootOf.get(l.parent) : p); }
+    const res = this.overlaps((a, b) => rootOf.get(a) === rootOf.get(b));
     this.panels.forEach((p, i) => p.M.copy(saved[i]));
     return { pairs: res.pairs.length, loops: F.loops.length, pieces: F.roots.length };
   }
 
-  // Default cut-and-hinge layout: a spanning tree of each piece whose flat
-  // unfolding has no overlapping panels. Tries breadth-first trees first,
-  // then random trees that prefer keeping coplanar panels joined.
-  defaultNet(maxTries = 400) {
+  // Honest status of the current cut-and-hinge layout:
+  //   verified   - a spanning tree on each shell piece; unfolds flat, no overlaps
+  //   split      - no overlaps, but the hinges leave more pieces than the shell has
+  //   overlap    - unfolds flat but panels overlap: not a valid net
+  //   loops      - hinges form closed loops: cannot unfold
+  //   unresolved - the search gave up; the layout shown is its best attempt
+  classify(searchFailed = false) {
+    const r = this.flatOverlaps();
+    const shellPieces = this.pieces().length;
+    let status;
+    if (r.loops) status = 'loops';
+    else if (r.pairs) status = searchFailed ? 'unresolved' : 'overlap';
+    else if (r.pieces > shellPieces) status = 'split';
+    else status = 'verified';
+    this.net = { status, overlaps: r.pairs, loops: r.loops, pieces: r.pieces, shellPieces, searched: searchFailed };
+    return this.net;
+  }
+
+  // Default cut-and-hinge layout: a spanning tree of each shell piece whose
+  // flat unfolding has no overlapping panels. Tries breadth- and depth-first
+  // trees, then random trees that prefer keeping coplanar panels joined,
+  // then repairs the best attempt by swapping hinges (a cut edge becomes a
+  // hinge, an edge on the loop it closes becomes a cut) within a time limit.
+  // Never reports success unless a layout was checked overlap-free.
+  defaultNet(budgetMs = 700) {
+    const now = () => (typeof performance !== 'undefined' ? performance.now() : Date.now());
+    const t0 = now();
     const edges = this.sharedEdges();
     const pieces = this.pieces();
-    const savedTypes = this.edges.map((e) => e.type);
-    let best = null;
     const rng = mulberry32(7);
-    const tryTree = (hinges) => {
-      this.setLayout(hinges);
-      const r = this.flatOverlaps();
-      const score = r.pairs;
-      if (!best || score < best.score) best = { score, hinges: new Set(hinges) };
-      return score === 0;
+    let best = null, tries = 0;
+    const score = (hinges) => { this.setLayout(hinges); tries++; return this.flatOverlaps().pairs; };
+    const consider = (hinges) => {
+      const sc = score(hinges);
+      if (!best || sc < best.score) best = { score: sc, hinges: new Set(hinges) };
+      return sc === 0;
     };
-    const bfsTree = (prefer) => {
+    const coplanarFirst = (a, b) => (this.isCoplanar(b) ? 1 : 0) - (this.isCoplanar(a) ? 1 : 0);
+    const treeFrom = (prefer, depthFirst) => {
       const hinges = new Set();
       for (const comp of pieces) {
         const root = comp.find((p) => this.isBase(p)) || comp[0];
         const seen = new Set([root]);
-        const queue = [root];
-        while (queue.length) {
-          const p = queue.shift();
+        const list = [root];
+        while (list.length) {
+          const p = depthFirst ? list.pop() : list.shift();
           const es = p.edges.filter((e) => e.shared && !e.locked).sort(prefer);
           for (const e of es) {
             const q = this.other(e, p);
             if (seen.has(q)) continue;
             seen.add(q);
             hinges.add(e);
-            queue.push(q);
+            list.push(q);
           }
         }
       }
       return hinges;
     };
-    const coplanarFirst = (a, b) => (this.isCoplanar(b) ? 1 : 0) - (this.isCoplanar(a) ? 1 : 0);
-    let found = tryTree(bfsTree(coplanarFirst)) || tryTree(bfsTree(() => 0));
-    for (let k = 0; !found && k < maxTries; k++) {
+    const randomTree = () => {
       const w = new Map(edges.map((e) => [e, rng() - (this.isCoplanar(e) ? 0.6 : 0)]));
       const sorted = edges.slice().sort((a, b) => w.get(a) - w.get(b));
       const uf = new Map(this.panels.map((p) => [p, p]));
@@ -407,18 +469,46 @@ export class Shell {
         uf.set(a, b);
         hinges.add(e);
       }
-      found = tryTree(hinges);
-    }
+      return hinges;
+    };
+    let found = consider(treeFrom(coplanarFirst, false)) || consider(treeFrom(() => 0, false)) || consider(treeFrom(coplanarFirst, true));
+    while (!found && now() - t0 < budgetMs * 0.4) found = consider(randomTree());
+    if (!found && best) found = this.repairNet(best, edges, score, rng, t0 + budgetMs, now);
     if (best) this.setLayout(best.hinges);
-    else this.edges.forEach((e, i) => { e.type = savedTypes[i]; });
-    return { ok: !!best && best.score === 0, overlaps: best ? best.score : 0 };
+    const net = this.classify(!found);
+    net.tries = tries;
+    net.ms = Math.round(now() - t0);
+    return { ok: net.status === 'verified', status: net.status, overlaps: net.overlaps, tries };
+  }
+
+  // Local search: swap one hinge for one cut while it does not get worse.
+  repairNet(best, edges, score, rng, deadline, now) {
+    let cur = new Set(best.hinges);
+    let curScore = best.score;
+    while (now() < deadline && curScore > 0) {
+      const off = edges.filter((e) => !cur.has(e));
+      if (!off.length) break;
+      const e = off[Math.floor(rng() * off.length)];
+      const path = treePath(cur, e.uses[0].panel, e.uses[1].panel, this);
+      if (!path || !path.length) continue;
+      const f = path[Math.floor(rng() * path.length)];
+      cur.delete(f); cur.add(e);
+      const sc = score(cur);
+      if (sc <= curScore || rng() < 0.04) {
+        curScore = sc;
+        if (sc < best.score) { best.score = sc; best.hinges = new Set(cur); }
+      } else {
+        cur.delete(e); cur.add(f);
+      }
+    }
+    return best.score === 0;
   }
 
   // -------------------------------------------------------- intersections
 
   // Pairs of panels that pass through each other or overlap in a plane.
   // Contact along shared edges and at corners does not count.
-  overlaps() {
+  overlaps(filter = null) {
     const inset = this.edgeLen * 0.02;
     const polys = this.panels.map((p) => {
       const w = this.worldPoly(p);
@@ -437,6 +527,7 @@ export class Shell {
     for (let i = 0; i < polys.length; i++) {
       for (let j = i + 1; j < polys.length; j++) {
         const A = polys[i], B = polys[j];
+        if (filter && !filter(this.panels[i], this.panels[j])) continue;
         if (A.c.distanceTo(B.c) > A.r + B.r + 1e-6) continue;
         if (polysIntersect(A, B, this.edgeLen * 2e-3)) {
           pairs.push([this.panels[i], this.panels[j]]);
@@ -474,6 +565,7 @@ export class Shell {
       types: Object.fromEntries(this.edges.filter((e) => e.shared).map((e) => [e.key, e.type])),
       M: Object.fromEntries(this.panels.map((p) => [p.id, p.M.toArray()])),
       bases: [...this.bases],
+      net: this.net ? { status: this.net.status, searched: !!this.net.searched } : null,
     };
   }
 
@@ -488,6 +580,8 @@ export class Shell {
         for (const comp of this.pieces()) if (!comp.some((p) => this.bases.has(p.id))) this.chooseBasesFor(comp);
       }
     }
+    // Re-check what was saved rather than trusting a stored label.
+    this.classify(!!(data.net && data.net.searched && data.net.status === 'unresolved'));
   }
 
   chooseBasesFor(comp) {
@@ -514,6 +608,25 @@ function components(nodes, nbrs) {
     }
     out.push(comp);
   }
+  return out;
+}
+
+// Hinge edges on the tree path between two panels (or null).
+function treePath(hinges, a, b, shell) {
+  const prev = new Map([[a, null]]);
+  const queue = [a];
+  while (queue.length) {
+    const p = queue.shift();
+    if (p === b) break;
+    for (const e of p.edges) {
+      if (!hinges.has(e)) continue;
+      const q = shell.other(e, p);
+      if (!prev.has(q)) { prev.set(q, { p, e }); queue.push(q); }
+    }
+  }
+  if (!prev.has(b)) return null;
+  const out = [];
+  for (let cur = b; prev.get(cur); cur = prev.get(cur).p) out.push(prev.get(cur).e);
   return out;
 }
 

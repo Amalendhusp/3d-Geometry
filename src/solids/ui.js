@@ -26,7 +26,16 @@ export class SolidsUI {
     on('#resetShellBtn', () => ws.resetLayout());
     on('#saveShellBtn', () => ws.save());
     on('#loadShellBtn', () => ws.load());
-    on('#addCubeBtn', () => ws.addCube());
+    on('#addCubeBtn', () => ws.addSolid($('#addTypeSel').value));
+    $('#addTypeSel').addEventListener('change', (e) => ws.setAddType(e.target.value));
+    on('#exportShellBtn', () => this.exportFile());
+    on('#importShellBtn', () => $('#importShellFile').click());
+    $('#importShellFile').addEventListener('change', async (e) => {
+      const f = e.target.files && e.target.files[0];
+      e.target.value = '';
+      if (!f) return;
+      try { ws.loadData(JSON.parse(await f.text()), 'Imported'); } catch { app.toast('That file could not be read as a composition.'); }
+    });
     on('#dupCubeBtn', () => ws.duplicate());
     on('#rotCubeBtn', () => ws.rotateSolid());
     on('#delCubeBtn', () => ws.removeSolid());
@@ -46,6 +55,23 @@ export class SolidsUI {
     const ang = $('#hingeAngle');
     ang.addEventListener('input', () => { ws.setAngle(Number(ang.value), false); this.label(Number(ang.value)); });
     ang.addEventListener('change', () => ws.setAngle(Number(ang.value), true));
+  }
+
+  // Download the composition (works on a normal web page; embedded
+  // previews may block downloads).
+  exportFile() {
+    try {
+      const blob = new Blob([this.ws.exportText()], { type: 'application/json' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = `composition-${new Date().toISOString().slice(0, 10)}.json`;
+      document.body.appendChild(a);
+      a.click();
+      setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+      this.app.toast('Composition exported as a file.');
+    } catch {
+      this.app.toast('This browser view blocks downloads.');
+    }
   }
 
   label(v) { $('#hingeAngleLabel').textContent = v === null ? '—' : `${Math.round(v)}°`; }
@@ -72,8 +98,8 @@ export class SolidsUI {
     $$('[data-omode]').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.omode === ws.state.openMode)));
     $('#solidsStats').textContent = ws.statusLine();
     $('#undoBtn').disabled = ws.history.length === 0;
-    const n = ws.comp.solids.length;
-    $('#sheetLabel').textContent = `${n} cube${n === 1 ? '' : 's'} · ${ws.shell.panels.length} panels`;
+    $('#sheetLabel').textContent = `${ws.solidsText()} · ${ws.shell.panels.length} panels`;
+    if ($('#addTypeSel').value !== ws.addType) $('#addTypeSel').value = ws.addType;
     this.syncSolidAngle();
   }
 }

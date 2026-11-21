@@ -1,25 +1,87 @@
 import * as THREE from 'three';
 import { Composition, alignFace } from './composition.js';
 import { Shell } from './shell.js';
-import { template } from './polyhedra.js';
+import { template, TEMPLATES, SOLID_TYPES, restHeight } from './polyhedra.js';
 import { makeFrame, angleFromPoint, angleFromRay } from './hinge.js';
 
 // "Solid → Unfold" workspace: build a composition of solids, then open its
 // exterior shell panel by panel along hinges.
 
-const EDGE = 0.12; // cube edge length in metres
+const EDGE = 0.12; // edge length of every solid, in metres
 const STORE_KEY = 'paper-fold-studio.solids.v1';
 
+// Starting compositions. Cube ones use lattice cells; the others attach
+// solids face to face from a first solid resting on the table.
 export const PRESETS = {
   one: { label: '1 cube', cells: [[0, 0, 0]] },
   two: { label: '2 cubes', cells: [[0, 0, 0], [1, 0, 0]] },
-  row: { label: '3 in a row', cells: [[0, 0, 0], [1, 0, 0], [2, 0, 0]] },
-  ell: { label: 'L shape', cells: [[0, 0, 0], [1, 0, 0], [0, 0, 1]] },
-  stack: { label: 'Stack of 2', cells: [[0, 0, 0], [0, 1, 0]] },
+  row: { label: '3 cubes in a row', cells: [[0, 0, 0], [1, 0, 0], [2, 0, 0]] },
+  ell: { label: 'L of 3 cubes', cells: [[0, 0, 0], [1, 0, 0], [0, 0, 1]] },
+  stack: { label: 'Stack of 2 cubes', cells: [[0, 0, 0], [0, 1, 0]] },
+  tetra: { label: '1 tetrahedron', build: (c) => first(c, 'tetra') },
+  tetra2: { label: '2 tetrahedra', build: (c) => { const t = first(c, 'tetra'); attachToward(c, t, UP, 'tetra'); } },
+  tetra3: { label: '3 tetrahedra', build: (c) => { const t = first(c, 'tetra'); const u = attachToward(c, t, UP, 'tetra'); attachToward(c, u, new THREE.Vector3(1, 0.4, 0.2), 'tetra'); } },
+  octa: { label: '1 octahedron', build: (c) => first(c, 'octa') },
+  tetraOcta: { label: 'Octahedron + tetrahedron', build: (c) => { const o = first(c, 'octa'); attachToward(c, o, UP, 'tetra'); } },
+  bigTetra: { label: 'Big tetrahedron (octa + 4 tetra)', build: (c) => bigTetra(c) },
+  cubocta: { label: '1 cuboctahedron', build: (c) => first(c, 'cubocta') },
+  cuboOcta: { label: 'Cuboctahedron + octahedron', build: (c) => { const k = first(c, 'cubocta'); attachToward(c, k, new THREE.Vector3(0.6, 0.6, 0.6), 'octa', 3); } },
+  cuboOcta2: { label: 'Cuboctahedron + 2 octahedra', build: (c) => { const k = first(c, 'cubocta'); attachToward(c, k, new THREE.Vector3(0.6, 0.6, 0.6), 'octa', 3); attachToward(c, k, new THREE.Vector3(-0.6, 0.6, -0.6), 'octa', 3); } },
+  cuboCube: { label: 'Cuboctahedron + cube', build: (c) => { const k = first(c, 'cubocta'); attachToward(c, k, UP, 'cube', 4); } },
+};
+
+const UP = new THREE.Vector3(0, 1, 0);
+
+function first(c, type) {
+  return c.add(type, EDGE, new THREE.Vector3(0, restHeight(type, EDGE), 0));
+}
+
+// Attach a solid to the face of `target` whose normal is closest to `dir`.
+function attachToward(c, target, dir, type, sides) {
+  const want = sides || template(type).faces[0].sides;
+  let best = -1, bd = -Infinity;
+  target.worldFaces().forEach((f, i) => {
+    if (f.sides !== want) return;
+    const d = f.normal.dot(dir.clone().normalize());
+    if (d > bd && !c.placementProblem(type, EDGE, ...poseFor(c, target, i, type))) { bd = d; best = i; }
+  });
+  if (best < 0) return null;
+  return c.attachTo(target.id, best, type, EDGE).solid || null;
+}
+
+function poseFor(c, target, fi, type) {
+  const tf = target.worldFaces()[fi];
+  const tm = template(type);
+  for (let f = 0; f < tm.faces.length; f++) {
+    if (tm.faces[f].sides !== tf.sides) continue;
+    const pose = alignFace(tm, f, EDGE, tf, 0);
+    if (pose) return [pose.position, pose.quaternion];
+  }
+  return [new THREE.Vector3(1e3, 1e3, 1e3), new THREE.Quaternion()];
+}
+
+// Octahedron with tetrahedra on four alternate faces: a tetrahedron of
+// twice the edge length. The face it rests on stays an octahedron face.
+function bigTetra(c) {
+  const o = first(c, 'octa');
+  const T = template('octa');
+  const sign = (n) => Math.sign(n.x) * Math.sign(n.y) * Math.sign(n.z);
+  const wf = o.worldFaces();
+  const bottom = wf.reduce((b, f, i) => (f.normal.y < wf[b].normal.y ? i : b), 0);
+  const want = -sign(T.faces[bottom].normal);
+  T.faces.forEach((f, i) => { if (sign(f.normal) === want) c.attachTo(o.id, i, 'tetra', EDGE); });
+}
+
+const NET_TEXT = {
+  verified: 'Net: verified, unfolds flat without overlaps',
+  split: 'Flat layout in separate pieces (no overlaps, not one net)',
+  overlap: 'Flat layout with overlapping panels: not a valid net',
+  unresolved: 'Unresolved: the search found no overlap-free net',
+  loops: 'Hinges form a closed loop: cannot unfold',
+  unchecked: 'Net not checked',
 };
 
 const COLORS = {
-  outside: ['#f1e6cf', '#e3d3b2'],
   inside: '#8ea4c2',
   hinge: '#1e9a5f',
   cut: '#d4462a',
@@ -68,10 +130,11 @@ export class SolidsWorkspace {
     if (record) this.pushHistory();
     const p = PRESETS[name];
     this.comp = new Composition();
-    for (const [x, y, z] of p.cells) this.comp.add('cube', EDGE, new THREE.Vector3(x * EDGE, y * EDGE + EDGE / 2, z * EDGE));
+    if (p.cells) for (const [x, y, z] of p.cells) this.comp.add('cube', EDGE, new THREE.Vector3(x * EDGE, y * EDGE + EDGE / 2, z * EDGE));
+    else p.build(this.comp);
     this.centre();
     this.rebuild();
-    if (record) this.app.toast(`${p.label}: ${this.describe()}`);
+    if (record) this.app.toast(`${p.label}: ${this.describe()}. ${this.netSentence()}`);
   }
 
   // Centre the composition on the table and rest it on the surface.
@@ -97,10 +160,28 @@ export class SolidsWorkspace {
     if (this.ready) { this.app.layoutTable(); this.app.notify(); }
   }
 
+  // "2 cubes · 1 octahedron"
+  solidsText() {
+    const counts = new Map();
+    for (const s of this.comp.solids) counts.set(s.type, (counts.get(s.type) || 0) + 1);
+    return [...counts].map(([t, n]) => `${n} ${n === 1 ? TEMPLATES[t].name.toLowerCase() : TEMPLATES[t].plural}`).join(' · ') || 'no solids';
+  }
+
   describe() {
     const s = this.shell.stats();
-    const n = this.comp.solids.length;
-    return `${n} cube${n === 1 ? '' : 's'} · ${s.panels} panels · ${s.removed} internal faces removed`;
+    return `${this.solidsText()} · ${s.panels} panels · ${s.removed} internal faces removed`;
+  }
+
+  netText() { return NET_TEXT[this.shell.net?.status || 'unchecked']; }
+
+  netSentence() {
+    const n = this.shell.net || { status: 'unchecked' };
+    if (n.status === 'verified') return 'Default net verified: unfolds flat with no overlaps.';
+    if (n.status === 'unresolved') return `No overlap-free net found; the layout shown overlaps in ${n.overlaps} place${n.overlaps === 1 ? '' : 's'} when flat. It is not a valid net.`;
+    if (n.status === 'overlap') return `This layout overlaps in ${n.overlaps} place${n.overlaps === 1 ? '' : 's'} when flat: not a valid net.`;
+    if (n.status === 'split') return `This layout unfolds into ${n.pieces} separate pieces without overlaps.`;
+    if (n.status === 'loops') return 'The hinges form a closed loop, so it cannot unfold.';
+    return '';
   }
 
   // ------------------------------------------------------------ history
@@ -138,7 +219,7 @@ export class SolidsWorkspace {
 
   save() {
     try {
-      localStorage.setItem(STORE_KEY, JSON.stringify(this.snapshot()));
+      localStorage.setItem(STORE_KEY, JSON.stringify({ v: 2, ...this.snapshot() }));
       this.app.toast(`Saved: ${this.describe()}.`);
     } catch {
       this.app.toast('Saving is blocked in this browser view.');
@@ -149,20 +230,30 @@ export class SolidsWorkspace {
     let data = null;
     try { data = JSON.parse(localStorage.getItem(STORE_KEY) || 'null'); } catch { data = null; }
     if (!data) { this.app.toast('Nothing saved yet.'); return; }
+    this.loadData(data, 'Loaded');
+  }
+
+  // Works for saves from earlier versions too (cube-only, no net status).
+  loadData(data, verb = 'Loaded') {
+    if (!data || !data.comp || !Array.isArray(data.comp.solids)) { this.app.toast('That file is not a saved composition.'); return false; }
     this.pushHistory();
     this.restoreSnapshot(data);
-    this.app.toast(`Loaded: ${this.describe()}.`);
+    this.app.toast(`${verb}: ${this.describe()}. ${this.netSentence()}`, 5000);
+    return true;
   }
+
+  // A file you can keep or share (download), and read back with Import.
+  exportText() { return JSON.stringify({ v: 2, app: 'paper-fold-studio', ...this.snapshot() }, null, 1); }
 
   // ---------------------------------------------------------- rendering
 
-  material(side, parity, state) {
-    const key = `${side}|${parity}|${state}`;
+  material(side, parity, state, type = 'cube') {
+    const key = `${side}|${type}|${parity}|${state}`;
     if (this.matCache.has(key)) return this.matCache.get(key);
     const tint = { none: null, selected: '#f0b44c', moving: '#ffd27a', overlap: '#ff2a12', solid: '#4a8cff', face: '#f0b44c', hover: '#5aa0ff' }[state];
     const strength = { none: 0, selected: 0.38, moving: 0.18, overlap: 0.55, solid: 0.25, face: 0.45, hover: 0.22 }[state];
     const m = new THREE.MeshStandardMaterial({
-      color: side === 'out' ? COLORS.outside[parity] : COLORS.inside,
+      color: side === 'out' ? TEMPLATES[type].colors[parity] : COLORS.inside,
       roughness: 0.85,
       metalness: 0,
       side: side === 'out' ? THREE.FrontSide : THREE.BackSide,
@@ -196,11 +287,11 @@ export class SolidsWorkspace {
       const group = new THREE.Group();
       group.matrixAutoUpdate = false;
       const parity = (order.get(p.solidId) ?? 0) % 2;
-      const out = new THREE.Mesh(g, this.material('out', parity, 'none'));
-      const inn = new THREE.Mesh(g, this.material('in', parity, 'none'));
+      const out = new THREE.Mesh(g, this.material('out', parity, 'none', p.type));
+      const inn = new THREE.Mesh(g, this.material('in', parity, 'none', p.type));
       for (const m of [out, inn]) { m.castShadow = true; m.userData.panel = p; group.add(m); }
       this.shellGroup.add(group);
-      this.meshes.set(p, { group, out, inn, geometry: g, parity, ribbon: null, ribbonBack: null });
+      this.meshes.set(p, { group, out, inn, geometry: g, parity, type: p.type, ribbon: null, ribbonBack: null });
       this.pickables.push(out, inn);
     }
     this.updateMatrices();
@@ -232,8 +323,8 @@ export class SolidsWorkspace {
     const okEdges = new Set(options.filter((o) => o.ok).map((o) => o.e));
     for (const [p, m] of this.meshes) {
       const st = this.panelState(p);
-      m.out.material = this.material('out', m.parity, st);
-      m.inn.material = this.material('in', m.parity, st);
+      m.out.material = this.material('out', m.parity, st, m.type);
+      m.inn.material = this.material('in', m.parity, st, m.type);
       this.buildRibbon(p, m, okEdges);
     }
   }
@@ -242,8 +333,8 @@ export class SolidsWorkspace {
   refreshMaterials() {
     for (const [p, m] of this.meshes) {
       const st = this.panelState(p);
-      m.out.material = this.material('out', m.parity, st);
-      m.inn.material = this.material('in', m.parity, st);
+      m.out.material = this.material('out', m.parity, st, m.type);
+      m.inn.material = this.material('in', m.parity, st, m.type);
     }
   }
 
@@ -355,7 +446,12 @@ export class SolidsWorkspace {
   nearest(point, maxDist) {
     if (!this.root.visible) return null;
     this.root.updateMatrixWorld(true);
-    let best = null;
+    // Prefer a panel the point is outside of (the side you can see); only
+    // when it is behind every nearby panel (a hand inside an opened shell)
+    // take the nearest from behind. Near sharp corners a point just outside
+    // one face can be closer to a neighbouring face's plane from inside.
+    let out = null, back = null;
+    const slack = this.edgeLen * 0.01;
     for (const [p, m] of this.meshes) {
       const inv = m.group.matrixWorld.clone().invert();
       const q = point.clone().applyMatrix4(inv);
@@ -363,8 +459,10 @@ export class SolidsWorkspace {
       if (Math.abs(d) > maxDist) continue;
       const onPlane = q.clone().addScaledVector(p.normal, -d);
       if (!insidePoly(p.verts, p.normal, onPlane)) continue;
-      if (!best || Math.abs(d) < best.d) best = { p, d, onPlane };
+      if (d >= -slack) { if (!out || d < out.d) out = { p, d, onPlane }; }
+      else if (!back || -d < -back.d) back = { p, d, onPlane };
     }
+    const best = out || back;
     if (!best) return null;
     const m = this.meshes.get(best.p);
     const world = best.onPlane.clone().applyMatrix4(m.group.matrixWorld);
@@ -628,7 +726,7 @@ export class SolidsWorkspace {
     this.updateMatrices();
     this.checkOverlaps();
     this.refreshStyles();
-    this.app.toast(r.ok ? 'Closed, with the default cuts and hinges.' : `Closed. No overlap-free net found; best layout overlaps ${r.overlaps} times.`);
+    this.app.toast(`Closed, with the default cuts and hinges. ${this.netSentence()}`, 5000);
     this.app.notify?.();
   }
 
@@ -663,9 +761,22 @@ export class SolidsWorkspace {
     this.updateMatrices();
     this.afterMotion(false);
     if (a.label === 'unfold') {
-      this.app.toast(this.overlapPairs
-        ? `Unfolded flat, but ${this.overlapPairs} panel pair${this.overlapPairs > 1 ? 's' : ''} overlap (red). Change cuts and hinges with the Edges tool.`
-        : `Unfolded into a flat net: ${this.shell.panels.length} panels, no overlaps.`);
+      // Report what actually happened, and never call an overlapping layout a net.
+      const net = this.shell.classify(this.shell.net && this.shell.net.searched);
+      const n = this.overlapPairs;
+      let msg;
+      if (n) {
+        msg = `Unfolded flat, but ${n} panel pair${n > 1 ? 's' : ''} overlap (red): this is not a valid net.`;
+        msg += net.status === 'unresolved'
+          ? ' The net search did not find an overlap-free layout for this composition. Try Find net again, or change cuts and hinges with the Edges tool.'
+          : ' Find net searches for an overlap-free layout; the Edges tool lets you change cuts and hinges.';
+      } else if (net.status === 'split') {
+        msg = `Unfolded flat into ${net.pieces} separate pieces without overlaps (not a single net).`;
+      } else {
+        msg = `Unfolded into a verified net: ${this.shell.panels.length} panels, flat, no overlaps.`;
+      }
+      this.app.toast(msg, 6000);
+      this.app.notify?.();
     } else {
       this.app.toast(`Refolded: ${this.describe()}.`);
     }
@@ -693,32 +804,31 @@ export class SolidsWorkspace {
     this.pushHistory();
     e.type = e.type === 'hinge' ? 'cut' : 'hinge';
     this.loopEdges.clear();
-    const st = this.shell.stats();
-    let msg = e.type === 'hinge' ? 'Edge is now a hinge.' : 'Edge is now a cut.';
-    if (st.loops) msg += ` The hinges now form ${st.loops} closed loop${st.loops > 1 ? 's' : ''}; the net cannot unfold until you cut one.`;
-    else if (st.groups > st.pieces) msg += ` The shell now opens into ${st.groups} separate pieces.`;
+    // Re-check the layout straight away so its status is always current.
+    this.shell.classify();
+    const msg = `${e.type === 'hinge' ? 'Edge is now a hinge.' : 'Edge is now a cut.'} ${this.netSentence()}`;
     this.refreshStyles();
-    this.app.toast(msg);
+    this.app.toast(msg, 4500);
     this.app.notify?.();
   }
 
   checkNet() {
-    const r = this.shell.flatOverlaps();
-    if (r.loops) this.app.toast(`Hinges form ${r.loops} closed loop${r.loops > 1 ? 's' : ''}: cut one edge in each loop.`);
-    else if (r.pairs) this.app.toast(`This layout unfolds into ${r.pieces} piece${r.pieces > 1 ? 's' : ''}, but ${r.pairs} panel pair${r.pairs > 1 ? 's' : ''} would overlap.`);
-    else this.app.toast(`This layout unfolds flat into ${r.pieces} piece${r.pieces > 1 ? 's' : ''} with no overlaps.`);
+    this.shell.classify(this.shell.net && this.shell.net.searched);
+    this.app.toast(this.netSentence(), 5000);
+    this.app.notify?.();
   }
 
+  // Search for an overlap-free net (closes the shell first).
   defaultNet() {
     this.tools.finishAll();
     this.stopAnim();
     this.pushHistory();
     for (const p of this.shell.panels) p.M.identity();
-    const r = this.shell.defaultNet();
+    const r = this.shell.defaultNet(1500);
     this.updateMatrices();
     this.checkOverlaps();
     this.refreshStyles();
-    this.app.toast(r.ok ? 'Default cuts and hinges restored (shell closed).' : `No overlap-free net found; best layout overlaps ${r.overlaps} times.`);
+    this.app.toast(r.ok ? `Found a verified net (shell closed). ${this.netSentence()}` : this.netSentence(), 5000);
     this.app.notify?.();
   }
 
@@ -734,42 +844,61 @@ export class SolidsWorkspace {
     this.sel.solidId = p ? p.solidId : null;
     this.sel.fi = p ? p.fi : null;
     this.refreshStyles();
-    if (p) this.app.toast('Face picked. Add cube puts a new cube against it.');
+    if (p) {
+      const shape = p.verts.length === 3 ? 'triangle' : 'square';
+      const fits = SOLID_TYPES.filter((t) => template(t).faces.some((f) => f.sides === p.verts.length)).map((t) => TEMPLATES[t].name.toLowerCase());
+      this.app.toast(`${shape[0].toUpperCase() + shape.slice(1)} face picked. It fits a ${fits.join(' or ')}; pick the type and press Add.`);
+    }
     this.app.notify?.();
   }
 
-  addCube() {
+  setAddType(t) {
+    this.state.addType = t;
+    this.app.toast(`Add puts a ${TEMPLATES[t].name.toLowerCase()} on the picked face.`);
+    this.app.notify?.();
+  }
+
+  get addType() { return this.state.addType || 'cube'; }
+
+  // Add a solid of the chosen type against the picked face.
+  addSolid(type = this.addType) {
     if (!this.requireClosed()) return;
+    const name = TEMPLATES[type].name.toLowerCase();
     let target = this.comp.get(this.sel.solidId);
     let fi = this.sel.fi;
     if (!target) {
-      // No face picked: try the free faces of the last cube, +x first.
+      // No face picked: the first free face of the newest solid that fits.
       target = this.comp.solids[this.comp.solids.length - 1];
-      const order = [3, 2, 1, 0, 5];
-      fi = order.find((f) => {
-        const probe = this.probeAttach(target, f);
-        return probe && !probe.blocker;
-      });
-      if (fi === undefined) { this.app.toast('Pick a free face first.'); return; }
+      const faces = target.worldFaces().map((f, i) => [f, i]).sort((a, b) => Math.abs(a[0].normal.y) - Math.abs(b[0].normal.y));
+      const hit = faces.find(([, i]) => { const pr = this.probeAttach(target, i, type); return pr && !pr.problem; });
+      if (!hit) { this.app.toast(`No free face here fits a ${name}. Pick a face first.`); return; }
+      fi = hit[1];
     }
-    const probe = this.probeAttach(target, fi);
-    if (!probe) { this.app.toast('These faces do not match.'); return; }
-    if (probe.blocker) { this.app.toast('Another cube already fills that space.'); return; }
+    const probe = this.probeAttach(target, fi, type);
+    if (!probe) {
+      const sides = target.worldFaces()[fi].sides;
+      this.app.toast(`A ${name} has no ${sides === 3 ? 'triangle' : 'square'} face to match this one. Choose a solid that does.`);
+      return;
+    }
+    if (probe.problem) { this.app.toast(probe.problem.kind === 'overlap' ? 'Another solid already fills that space.' : probe.problem.message); return; }
     this.pushHistory();
-    const s = this.comp.add('cube', EDGE, probe.pose.position, probe.pose.quaternion);
+    const s = this.comp.add(type, EDGE, probe.pose.position, probe.pose.quaternion);
     this.rebuild();
-    const p = this.shell.panels.find((q) => q.solidId === s.id && q.fi === fi);
+    const p = this.shell.panels.find((q) => q.solidId === s.id);
     if (p) this.selectFace(p);
-    this.app.toast(`Cube added. ${this.describe()}.`);
+    this.app.toast(`${TEMPLATES[type].name} added. ${this.describe()}. ${this.netSentence()}`, 5000);
   }
 
-  // Pose for a cube placed on face fi of a target, and what blocks it.
-  probeAttach(target, fi) {
+  addCube() { this.addSolid('cube'); }
+
+  // Pose for a solid placed on face fi of a target, and whether it is valid.
+  probeAttach(target, fi, type = 'cube') {
     const tf = target.worldFaces()[fi];
-    const tm = template('cube');
-    // Keep the neighbour's orientation so face numbering stays consistent.
+    const tm = template(type);
+    // Prefer the neighbour's orientation, so face numbering stays consistent.
     let best = null;
     for (let f = 0; f < tm.faces.length; f++) {
+      if (tm.faces[f].sides !== tf.sides) continue;
       for (let j = 0; j < tf.verts.length; j++) {
         const pose = alignFace(tm, f, EDGE, tf, j);
         if (!pose) continue;
@@ -778,24 +907,24 @@ export class SolidsWorkspace {
       }
     }
     if (!best) return null;
-    return { pose: best.pose, blocker: this.comp.overlapping('cube', EDGE, best.pose.position, best.pose.quaternion) };
+    return { pose: best.pose, problem: this.comp.placementProblem(type, EDGE, best.pose.position, best.pose.quaternion) };
   }
 
   duplicate() {
     const s = this.comp.get(this.sel.solidId);
-    if (!s) { this.app.toast('Tap a cube face to pick the cube to duplicate.'); return; }
-    this.addCube();
+    if (!s) { this.app.toast('Tap a face of the solid to duplicate; the copy goes against that face.'); return; }
+    this.addSolid(s.type);
   }
 
   removeSolid() {
     if (!this.requireClosed()) return;
     const s = this.comp.get(this.sel.solidId);
-    if (!s) { this.app.toast('Tap a face of the cube you want to remove.'); return; }
-    if (this.comp.solids.length === 1) { this.app.toast('Keep at least one cube.'); return; }
+    if (!s) { this.app.toast('Tap a face of the solid you want to remove.'); return; }
+    if (this.comp.solids.length === 1) { this.app.toast('Keep at least one solid.'); return; }
     this.pushHistory();
     this.comp.remove(s.id);
     this.rebuild();
-    this.app.toast(`Cube removed. ${this.describe()}.`);
+    this.app.toast(`${TEMPLATES[s.type].name} removed. ${this.describe()}. ${this.netSentence()}`, 5000);
   }
 
   // Turn the whole composition 90° about the vertical axis or tip it over.
@@ -816,16 +945,28 @@ export class SolidsWorkspace {
     this.app.toast(axis === 'y' ? 'Turned a quarter turn.' : 'Tipped over: a different panel now rests on the table.');
   }
 
-  // Rotate the picked cube in place (changes which of its faces is where).
+  // Rotate the picked solid in place about the vertical axis, by its own
+  // symmetry step (90° for a square base, 120° for a triangle), if the new
+  // pose is still valid.
   rotateSolid() {
     if (!this.requireClosed()) return;
     const s = this.comp.get(this.sel.solidId);
-    if (!s) { this.app.toast('Tap a face of the cube you want to rotate.'); return; }
+    if (!s) { this.app.toast('Tap a face of the solid you want to rotate.'); return; }
+    const faces = s.worldFaces();
+    const bottom = faces.reduce((b, f) => (f.normal.y < b.normal.y ? f : b), faces[0]);
+    const step = (2 * Math.PI) / bottom.sides;
+    const q = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), step);
+    const c = s.worldVerts().reduce((a, v) => a.add(v), new THREE.Vector3()).divideScalar(s.template.verts.length);
+    const pos = s.position.clone().sub(c).applyQuaternion(q).add(c);
+    const quat = s.quaternion.clone().premultiply(q);
+    const problem = this.comp.placementProblem(s.type, s.edge, pos, quat, s.id);
+    if (problem) { this.app.toast(`Rotating it would collide: ${problem.message}`); return; }
     this.pushHistory();
-    s.quaternion.premultiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), Math.PI / 2));
+    s.position.copy(pos);
+    s.quaternion.copy(quat);
     roundPose(s);
     this.rebuild();
-    this.app.toast('Cube rotated a quarter turn in place. Its faces still match its neighbours, so the shell is unchanged in shape.');
+    this.app.toast(`${TEMPLATES[s.type].name} turned ${Math.round(deg(step))}° in place. ${this.netSentence()}`);
   }
 
   // Ghost preview for moving a solid.
@@ -858,9 +999,10 @@ export class SolidsWorkspace {
 
   statusLine() {
     const s = this.shell.stats();
-    const parts = [`${this.comp.solids.length} cube${this.comp.solids.length === 1 ? '' : 's'}`, `${s.panels} panels`, `${s.removed} internal faces removed`, `${s.hinges} hinges`, `${s.cuts} cuts`];
-    if (s.loops) parts.push(`${s.loops} hinge loop${s.loops > 1 ? 's' : ''}`);
-    if (this.overlapPairs) parts.push(`${this.overlapPairs} intersecting pair${this.overlapPairs > 1 ? 's' : ''}`);
+    const parts = [this.solidsText(), `${s.panels} panels`, `${s.removed} internal faces removed`, `${s.hinges} hinges`, `${s.cuts} cuts`];
+    if (s.pieces > 1) parts.push(`${s.pieces} separate shells`);
+    if (this.overlapPairs) parts.push(`${this.overlapPairs} intersecting pair${this.overlapPairs > 1 ? 's' : ''} now`);
+    parts.push(this.netText());
     return parts.join(' · ');
   }
 
@@ -875,16 +1017,14 @@ export class SolidsWorkspace {
     ]);
     const y1 = y0 + 100, y2 = y0 + 190;
     if (s.tool === 'build') {
-      row(y1, 78, [
-        { label: 'Add cube', action: () => a.addCube() },
+      const short = { cube: 'Cube', tetra: 'Tetra', octa: 'Octa', cubocta: 'Cubocta' };
+      row(y1, 78, SOLID_TYPES.map((t) => ({ label: short[t], action: () => a.setAddType(t), active: a.addType === t })), 10);
+      row(y2, 78, [
+        { label: `Add ${short[a.addType].toLowerCase()}`, action: () => a.addSolid() },
         { label: 'Duplicate', action: () => a.duplicate() },
         { label: 'Rotate', action: () => a.rotateSolid() },
         { label: 'Remove', action: () => a.removeSolid() },
       ]);
-      row(y2, 78, [
-        ...Object.entries(PRESETS).map(([k, p]) => ({ label: p.label, action: () => a.preset(k) })),
-        { label: 'Tip over', action: () => a.turnAll('x') },
-      ], 8);
     } else if (s.tool === 'open') {
       row(y1, 78, [
         { label: 'Group', action: () => a.setOpenMode('group'), active: s.openMode === 'group' },
@@ -901,7 +1041,7 @@ export class SolidsWorkspace {
       ]);
     } else {
       row(y1, 78, [
-        { label: 'Default net', action: () => a.defaultNet() },
+        { label: 'Find net', action: () => a.defaultNet() },
         { label: 'Check net', action: () => a.checkNet() },
       ]);
       B.push({ kind: 'text', x: M, y: y2, w: W, h: 78, label: 'Point at an edge and pull the trigger (or pinch / touch it) to switch hinge ↔ cut. Green = hinge, red dashed = cut.' });
@@ -912,11 +1052,23 @@ export class SolidsWorkspace {
       { label: 'Refold all', action: () => a.refoldAll() },
       { label: 'Reset', action: () => a.resetLayout() },
     ]);
-    row(y0 + 370, 78, [
-      { label: 'Save', action: () => a.save() },
-      { label: 'Load', action: () => a.load() },
-      { label: 'Recenter', action: () => a.app.actions.recenter() },
-    ]);
+    if (s.tool === 'build') {
+      const keys = Object.keys(PRESETS);
+      const k = a.state.presetPick || 'tetra';
+      row(y0 + 370, 78, [
+        { label: '◀', w: 0.5, action: () => { a.state.presetPick = keys[(keys.indexOf(k) + keys.length - 1) % keys.length]; a.app.notify(); } },
+        { label: PRESETS[k].label, w: 2.6, action: () => a.preset(k) },
+        { label: '▶', w: 0.5, action: () => { a.state.presetPick = keys[(keys.indexOf(k) + 1) % keys.length]; a.app.notify(); } },
+        { label: 'Save', action: () => a.save() },
+        { label: 'Load', action: () => a.load() },
+      ], 8);
+    } else {
+      row(y0 + 370, 78, [
+        { label: 'Save', action: () => a.save() },
+        { label: 'Load', action: () => a.load() },
+        { label: 'Recenter', action: () => a.app.actions.recenter() },
+      ]);
+    }
   }
 
   extent() {
@@ -1113,7 +1265,7 @@ class SolidsTools {
       startPos: solid.position.clone(), startQuat: solid.quaternion.clone(),
     };
     ws.showGhost(solid.type, solid.edge, d.pos, d.quat, 'free');
-    ws.app.toast('Move the cube next to another; it snaps when a face lines up.');
+    ws.app.toast(`Move the ${TEMPLATES[solid.type].name.toLowerCase()} next to another solid; it snaps when a matching face lines up.`);
     return d;
   }
 
@@ -1133,7 +1285,7 @@ class SolidsTools {
       }
       if (best) { pos = best.position; quat = best.quaternion; }
       else {
-        const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), -s.edge / 2);
+        const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), -restHeight(s.type, s.edge));
         pos = new THREE.Ray(o, dir).intersectPlane(plane, new THREE.Vector3());
         if (!pos) return;
       }
@@ -1152,8 +1304,15 @@ class SolidsTools {
       }
       if (best) { pos = best.position; quat = best.quaternion; d.state = 'snap'; } else d.state = 'free';
     }
-    if (ws.comp.overlapping(s.type, s.edge, pos, quat)) d.state = 'blocked';
-    if (d.state === 'free' && pos.y < s.edge / 2 - 1e-4) pos.y = s.edge / 2;
+    const problem = ws.comp.placementProblem(s.type, s.edge, pos, quat);
+    if (problem) { d.state = 'blocked'; d.problem = problem; } else d.problem = null;
+    if (d.state === 'free') {
+      // Keep a free solid on or above the table.
+      let minY = Infinity;
+      const m = new THREE.Matrix4().compose(pos, quat, new THREE.Vector3(s.edge, s.edge, s.edge));
+      for (const v of template(s.type).verts) minY = Math.min(minY, v.clone().applyMatrix4(m).y);
+      if (minY < 0) pos.y -= minY;
+    }
     d.pos = pos.clone();
     d.quat = quat.clone();
     ws.showGhost(s.type, s.edge, d.pos, d.quat, d.state);
@@ -1165,7 +1324,7 @@ class SolidsTools {
     if (d.state === 'blocked') {
       ws.history.pop();
       ws.restoreSnapshot(d.before);
-      ws.app.toast('That spot overlaps another cube. The cube went back.');
+      ws.app.toast(`${d.problem ? d.problem.message : 'That spot is not valid.'} The ${TEMPLATES[d.solid.type].name.toLowerCase()} went back.`);
       return;
     }
     const s = d.solid;
@@ -1176,7 +1335,7 @@ class SolidsTools {
     ws.rebuild();
     const p = ws.shell.panels.find((q) => q.solidId === s.id);
     if (p) ws.selectFace(p);
-    ws.app.toast(d.state === 'snap' ? `Snapped face to face. ${ws.describe()}.` : 'Placed on its own. Snap it to another cube to merge the shells.');
+    ws.app.toast(d.state === 'snap' ? `Snapped face to face. ${ws.describe()}. ${ws.netSentence()}` : 'Placed on its own. Snap it to a matching face of another solid to merge the shells.', 5000);
   }
 
   // Grip / squeeze: carry the whole composition.

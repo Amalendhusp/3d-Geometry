@@ -75,7 +75,7 @@ class App {
     this.applySpace();
     this.environments.set('terrace');
     this.environments.align(new THREE.Vector3(0, 0, 0.5), 0);
-    if (this.space === 'solids') this.statusText = 'Solid → Unfold: tap a panel to see its hinges, then swing it open. Build adds and joins cubes.';
+    if (this.space === 'solids') this.statusText = 'Solid → Unfold: tap a panel to see its hinges, then swing it open. Build adds and joins solids.';
     this.layoutTable();
     this.resetPosition();
     this.fitCamera();
@@ -438,7 +438,7 @@ class App {
     this.layoutTable();
     if (!this.renderer.xr.isPresenting) this.fitCamera();
     this.toast(space === 'solids'
-      ? 'Solid → Unfold: tap a panel to see its hinges, then swing it open. Build adds and joins cubes.'
+      ? 'Solid → Unfold: tap a panel to see its hinges, then swing it open. Build adds and joins solids.'
       : 'Paper folding: paint, crease, cut and fold a sheet.');
     this.notify();
   }

@@ -49,7 +49,7 @@ export class Composition {
     this.nextId = 1;
   }
 
-  add(type, edge, position, quaternion = new THREE.Quaternion()) {
+  add(type, edge, position, quaternion = template(type).rest) {
     const s = new Solid(this.nextId++, type, edge, position, quaternion);
     this.solids.push(s);
     return s;
@@ -85,6 +85,30 @@ export class Composition {
     for (const s of this.solids) {
       if (s.id === ignoreId) continue;
       if (convexOverlap(probe, s)) return s;
+    }
+    return null;
+  }
+
+  // Geometric check for a new pose: it must not overlap any solid, and any
+  // face it presses against another face must match that face completely
+  // (same shape, same vertices). Returns null, or { kind, solid, message }.
+  placementProblem(type, edge, position, quaternion, ignoreId = null) {
+    const over = this.overlapping(type, edge, position, quaternion, ignoreId);
+    if (over) return { kind: 'overlap', solid: over, message: 'That would overlap another solid.' };
+    const probe = new Solid(-1, type, edge, position, quaternion);
+    const tol = edge * 1e-4;
+    const pf = probe.worldFaces();
+    for (const s of this.solids) {
+      if (s.id === ignoreId) continue;
+      for (const a of pf) {
+        for (const b of s.worldFaces()) {
+          if (a.normal.dot(b.normal) > -0.9999) continue;
+          if (Math.abs(b.centroid.clone().sub(a.centroid).dot(a.normal)) > tol) continue;
+          if (!facesOverlap(a, b, tol)) continue;
+          const same = a.verts.length === b.verts.length && a.verts.every((v) => b.verts.some((w) => w.distanceTo(v) < tol));
+          if (!same) return { kind: 'partial', solid: s, message: 'Those faces would only partly touch. Snap to a complete face of the same shape.' };
+        }
+      }
     }
     return null;
   }
@@ -131,8 +155,8 @@ export class Composition {
       }
     }
     if (!best) return { error: 'These faces do not match in shape and size.' };
-    const blocker = this.overlapping(type, edge, best.position, best.quaternion);
-    if (blocker) return { error: 'Another solid already fills that space.', blocker };
+    const problem = this.placementProblem(type, edge, best.position, best.quaternion);
+    if (problem) return { error: problem.kind === 'overlap' ? 'Another solid already fills that space.' : problem.message, blocker: problem.solid, problem };
     return { solid: this.add(type, edge, best.position, best.quaternion) };
   }
 }
@@ -161,6 +185,30 @@ export function alignFace(tm, fi, edge, tf, j) {
     if (!tf.verts.some((v) => v.distanceTo(w) < tol)) return null;
   }
   return { position, quaternion };
+}
+
+// Do two coplanar convex faces share area (not just an edge or corner)?
+function facesOverlap(a, b, tol) {
+  const n = a.normal;
+  const ax = Math.abs(n.x) < 0.9 ? new THREE.Vector3(1, 0, 0) : new THREE.Vector3(0, 1, 0);
+  const e1 = new THREE.Vector3().crossVectors(n, ax).normalize();
+  const e2 = new THREE.Vector3().crossVectors(n, e1);
+  const P = a.verts.map((v) => [v.dot(e1), v.dot(e2)]);
+  const R = b.verts.map((v) => [v.dot(e1), v.dot(e2)]);
+  for (const S of [P, R]) {
+    for (let i = 0; i < S.length; i++) {
+      const p = S[i], q = S[(i + 1) % S.length];
+      let x = -(q[1] - p[1]), y = q[0] - p[0];
+      const len = Math.hypot(x, y);
+      if (len < 1e-12) continue;
+      x /= len; y /= len;
+      let a0 = Infinity, a1 = -Infinity, b0 = Infinity, b1 = -Infinity;
+      for (const r of P) { const d = r[0] * x + r[1] * y; a0 = Math.min(a0, d); a1 = Math.max(a1, d); }
+      for (const r of R) { const d = r[0] * x + r[1] * y; b0 = Math.min(b0, d); b1 = Math.max(b1, d); }
+      if (Math.min(a1, b1) - Math.max(a0, b0) <= tol * 10) return false;
+    }
+  }
+  return true;
 }
 
 // Separating-axis test for two convex solids. Touching is allowed; they
