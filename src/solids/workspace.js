@@ -28,7 +28,32 @@ export const PRESETS = {
   cuboOcta: { label: 'Cuboctahedron + octahedron', build: (c) => { const k = first(c, 'cubocta'); attachToward(c, k, new THREE.Vector3(0.6, 0.6, 0.6), 'octa', 3); } },
   cuboOcta2: { label: 'Cuboctahedron + 2 octahedra', build: (c) => { const k = first(c, 'cubocta'); attachToward(c, k, new THREE.Vector3(0.6, 0.6, 0.6), 'octa', 3); attachToward(c, k, new THREE.Vector3(-0.6, 0.6, -0.6), 'octa', 3); } },
   cuboCube: { label: 'Cuboctahedron + cube', build: (c) => { const k = first(c, 'cubocta'); attachToward(c, k, UP, 'cube', 4); } },
+  honeycomb: { label: 'Octahedron + 2 cuboctahedra (closed joint)', build: (c) => honeycomb(c) },
+  gapDemo: { label: 'Cuboctahedron + cube + octahedron (gap)', build: (c) => gapDemo(c) },
 };
+
+// Two cuboctahedra on edge-sharing faces of an octahedron: around that
+// octahedron edge the three solids close a full turn, and the two
+// cuboctahedra also meet square to square.
+function honeycomb(c) {
+  const o = first(c, 'octa');
+  const wf = o.worldFaces();
+  const a = wf.findIndex((f) => f.normal.y > 0.3);
+  const b = wf.findIndex((f, i) => i !== a && f.normal.y > -0.5 && f.verts.filter((v) => wf[a].verts.some((w) => w.distanceTo(v) < 1e-6)).length === 2);
+  c.attachTo(o.id, a, 'cubocta', EDGE);
+  c.attachTo(o.id, b, 'cubocta', EDGE);
+}
+
+// A cube on a square and an octahedron on the neighbouring triangle of a
+// cuboctahedron leave a 35.3° gap along the edge between them.
+function gapDemo(c) {
+  const k = first(c, 'cubocta');
+  const wf = k.worldFaces();
+  const sq = wf.findIndex((f) => f.sides === 4 && f.normal.y > 0.9);
+  const tri = wf.findIndex((f) => f.sides === 3 && f.verts.filter((v) => wf[sq].verts.some((w) => w.distanceTo(v) < 1e-6)).length === 2);
+  c.attachTo(k.id, sq, 'cube', EDGE);
+  c.attachTo(k.id, tri, 'octa', EDGE);
+}
 
 const UP = new THREE.Vector3(0, 1, 0);
 
@@ -134,7 +159,11 @@ export class SolidsWorkspace {
     else p.build(this.comp);
     this.centre();
     this.rebuild();
-    if (record) this.app.toast(`${p.label}: ${this.describe()}. ${this.netSentence()}`);
+    if (record) {
+      this.frameView();
+      const jt = this.jointText();
+      this.app.toast(`${p.label}: ${this.describe()}.${jt ? ` Joints: ${jt}.` : ''} ${this.netSentence()}`, jt ? 6000 : undefined);
+    }
   }
 
   // Centre the composition on the table and rest it on the surface.
@@ -173,6 +202,23 @@ export class SolidsWorkspace {
   }
 
   netText() { return NET_TEXT[this.shell.net?.status || 'unchecked']; }
+
+  // "2 joints close a full turn; 4 leave a 35.3° gap"
+  jointText() {
+    const j = this.comp.solids.length > 1 ? this.comp.jointReport() : null;
+    if (!j || (!j.closed && !j.gaps.length)) return '';
+    const parts = [];
+    if (j.closed) parts.push(`${j.closed} edge${j.closed > 1 ? 's' : ''} where the solids close a full turn`);
+    for (const g of j.gaps) parts.push(`${g.count} edge${g.count > 1 ? 's' : ''} with a ${g.angle}° gap no solid can fill`);
+    return parts.join('; ');
+  }
+
+  // Briefly show a solid in red (the one in the way of a placement).
+  flashSolid(id) {
+    if (id == null) return;
+    this.flash = { id, until: performance.now() + 1600 };
+    this.refreshMaterials();
+  }
 
   netSentence() {
     const n = this.shell.net || { status: 'unchecked' };
@@ -238,6 +284,7 @@ export class SolidsWorkspace {
     if (!data || !data.comp || !Array.isArray(data.comp.solids)) { this.app.toast('That file is not a saved composition.'); return false; }
     this.pushHistory();
     this.restoreSnapshot(data);
+    this.frameView();
     this.app.toast(`${verb}: ${this.describe()}. ${this.netSentence()}`, 5000);
     return true;
   }
@@ -308,6 +355,7 @@ export class SolidsWorkspace {
   panelState(p) {
     const tool = this.state.tool;
     if (this.overlapSet.has(p)) return 'overlap';
+    if (this.flash && this.flash.id === p.solidId) return 'overlap';
     if (tool === 'build') {
       if (this.sel.solidId === p.solidId) return p.fi === this.sel.fi ? 'face' : 'solid';
       return this.hoverPanel === p ? 'hover' : 'none';
@@ -700,7 +748,22 @@ export class SolidsWorkspace {
       return;
     }
     this.pushHistory();
-    this.anim = { kind: 'forest', F, from: this.shell.forestAngles(F), to: this.shell.flatAngles(F), roots: null, t: 0, dur: 1.2, label: 'unfold' };
+    const to = this.shell.flatAngles(F);
+    this.anim = { kind: 'forest', F, from: this.shell.forestAngles(F), to, roots: this.centredRoots(F, to), t: 0, dur: 1.2, label: 'unfold' };
+  }
+
+  // Root moves that slide the flat layout to the middle of the mat, so a
+  // long net does not hang off the table. Refold slides it back.
+  centredRoots(F, angles) {
+    const saved = this.shell.panels.map((p) => p.M.clone());
+    this.shell.applyForest(F, angles, null);
+    const box = new THREE.Box3();
+    for (const p of this.shell.panels) for (const v of this.shell.worldPoly(p)) box.expandByPoint(v);
+    this.shell.panels.forEach((p, i) => p.M.copy(saved[i]));
+    const c = box.getCenter(new THREE.Vector3());
+    if (box.isEmpty() || Math.hypot(c.x, c.z) < 0.01) return null;
+    const T = new THREE.Matrix4().makeTranslation(-c.x, 0, -c.z);
+    return new Map(F.roots.map((r) => [r, { from: r.M.clone(), to: T.clone().multiply(r.M) }]));
   }
 
   refoldAll() {
@@ -775,6 +838,7 @@ export class SolidsWorkspace {
       } else {
         msg = `Unfolded into a verified net: ${this.shell.panels.length} panels, flat, no overlaps.`;
       }
+      this.frameView(true);
       this.app.toast(msg, 6000);
       this.app.notify?.();
     } else {
@@ -783,6 +847,7 @@ export class SolidsWorkspace {
   }
 
   update(dt) {
+    if (this.flash && performance.now() > this.flash.until) { this.flash = null; this.refreshMaterials(); }
     const a = this.anim;
     if (a) {
       a.t = Math.min(1, a.t + dt / a.dur);
@@ -880,13 +945,18 @@ export class SolidsWorkspace {
       this.app.toast(`A ${name} has no ${sides === 3 ? 'triangle' : 'square'} face to match this one. Choose a solid that does.`);
       return;
     }
-    if (probe.problem) { this.app.toast(probe.problem.kind === 'overlap' ? 'Another solid already fills that space.' : probe.problem.message); return; }
+    if (probe.problem) {
+      this.flashSolid(probe.problem.solid && probe.problem.solid.id);
+      this.app.toast(`${probe.problem.kind === 'overlap' ? `A ${name} there would overlap the solid shown in red.` : probe.problem.message} It was not added.`, 4500);
+      return;
+    }
     this.pushHistory();
     const s = this.comp.add(type, EDGE, probe.pose.position, probe.pose.quaternion);
     this.rebuild();
     const p = this.shell.panels.find((q) => q.solidId === s.id);
     if (p) this.selectFace(p);
-    this.app.toast(`${TEMPLATES[type].name} added. ${this.describe()}. ${this.netSentence()}`, 5000);
+    const jt = this.jointText();
+    this.app.toast(`${TEMPLATES[type].name} added. ${this.describe()}.${jt ? ` Joints: ${jt}.` : ''} ${this.netSentence()}`, 6000);
   }
 
   addCube() { this.addSolid('cube'); }
@@ -1017,6 +1087,7 @@ export class SolidsWorkspace {
     const parts = [this.solidsText(), `${s.panels} panels`, `${s.removed} internal faces removed`, `${s.hinges} hinges`, `${s.cuts} cuts`];
     if (s.pieces > 1) parts.push(`${s.pieces} separate shells`);
     if (this.overlapPairs) parts.push(`${this.overlapPairs} intersecting pair${this.overlapPairs > 1 ? 's' : ''} now`);
+    if (this.state.tool === 'build') { const jt = this.jointText(); if (jt) parts.push(`Joints: ${jt}`); }
     parts.push(this.netText());
     return parts.join(' · ');
   }
@@ -1087,12 +1158,46 @@ export class SolidsWorkspace {
     }
   }
 
-  extent() {
+  // Box around the panels as they are now (folded or flat), in the
+  // workspace's own frame.
+  bounds() {
     const box = new THREE.Box3();
-    for (const s of this.comp.solids) for (const v of s.worldVerts()) box.expandByPoint(v);
+    if (this.shell && this.shell.panels.length) {
+      for (const p of this.shell.panels) for (const v of this.shell.worldPoly(p)) box.expandByPoint(v);
+    } else {
+      for (const s of this.comp.solids) for (const v of s.worldVerts()) box.expandByPoint(v);
+    }
+    return box;
+  }
+
+  extent() {
+    const box = this.bounds();
     if (box.isEmpty()) return 0.3;
     const size = box.getSize(new THREE.Vector3());
     return Math.max(size.x, size.z, size.y) + 2 * EDGE;
+  }
+
+  // On a screen, bring everything on the table into view (never in VR,
+  // where the person moves their head instead). With onlyIfHidden, the
+  // camera moves only when part of the shell is off screen.
+  frameView(onlyIfHidden = false) {
+    const app = this.app;
+    if (!app.fitCamera || !app.camera || app.renderer?.xr?.isPresenting || app.space !== 'solids') return;
+    if (onlyIfHidden) {
+      const box = this.bounds();
+      if (box.isEmpty()) return;
+      this.root.updateMatrixWorld(true);
+      app.camera.updateMatrixWorld(true);
+      let hidden = false;
+      for (let i = 0; i < 8 && !hidden; i++) {
+        const v = new THREE.Vector3(i & 1 ? box.max.x : box.min.x, i & 2 ? box.max.y : box.min.y, i & 4 ? box.max.z : box.min.z);
+        const ndc = this.root.localToWorld(v).project(app.camera);
+        // Bottom quarter of the screen is under the tool dock.
+        hidden = Math.abs(ndc.x) > 0.95 || ndc.y > 0.95 || ndc.y < -0.45 || ndc.z > 1;
+      }
+      if (!hidden) return;
+    }
+    app.fitCamera();
   }
 }
 
@@ -1321,7 +1426,7 @@ class SolidsTools {
       if (best) { pos = best.position; quat = best.quaternion; d.state = 'snap'; } else d.state = 'free';
     }
     const problem = ws.comp.placementProblem(s.type, s.edge, pos, quat);
-    if (problem) { d.state = 'blocked'; d.problem = problem; } else d.problem = null;
+    if (problem) { d.state = 'blocked'; d.problem = problem; ws.flashSolid(problem.solid && problem.solid.id); } else d.problem = null;
     if (d.state === 'free') {
       // Keep a free solid on or above the table.
       let minY = Infinity;
@@ -1351,7 +1456,8 @@ class SolidsTools {
     ws.rebuild();
     const p = ws.shell.panels.find((q) => q.solidId === s.id);
     if (p) ws.selectFace(p);
-    ws.app.toast(d.state === 'snap' ? `Snapped face to face. ${ws.describe()}. ${ws.netSentence()}` : 'Placed on its own. Snap it to a matching face of another solid to merge the shells.', 5000);
+    const jt = ws.jointText();
+    ws.app.toast(d.state === 'snap' ? `Snapped face to face. ${ws.describe()}.${jt ? ` Joints: ${jt}.` : ''} ${ws.netSentence()}` : 'Placed on its own. Snap it to a matching face of another solid to merge the shells.', 6000);
   }
 
   // Grip / squeeze: carry the whole composition.

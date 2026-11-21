@@ -31,14 +31,21 @@ Switch with **Paper | Solids** in the header (or open the page with `#solids`). 
 
 - **Panels and hinges:** the shell is a set of rigid panels (the solids' faces). Each shared edge is a **hinge** (green) or a **cut** (red, dashed). Panels never stretch.
 - **Open:** tap or pinch a panel to select it. Its usable hinges glow bright green and the one in use is yellow; tap another to choose it. Drag the panel, move your hand, or use the angle slider to swing it. **Group** swings the panel with every panel hinged beyond it. **One panel** keeps only the chosen hinge and releases the panel's other edges. **Open flat**, **Close**, **Unfold all** and **Refold all** animate; **Undo** and **Reset** restore.
-- **Default net:** each composition gets a cut-and-hinge layout that unfolds flat without overlaps. It's found by searching spanning trees of the panel graph and checking each flattened layout for overlaps.
-- **Edges:** tap an edge to switch hinge ↔ cut. A closed loop of hinges can't move; it's reported and drawn in orange. **Check net** tests whether the current layout unfolds without overlaps.
-- **Build:** tap a face, then **Add cube** to attach a cube flush to it. Drag a cube to move it; it snaps face to face, and positions that would overlap another cube are refused. **Duplicate**, **Rotate**, **Remove**, **Tip over** and presets are in the toolbar. Changing solids needs the shell closed first.
-- **Merging:** when two cubes share a complete face, both faces are removed from the shell, so the inside is one hollow space. This is a real topology change: the panel and edge graph is rebuilt without them, and they stay absent through opening, unfolding, refolding, undo and save/load. The outside keeps its square panel divisions.
+- **Solids:** cube, regular tetrahedron, regular octahedron and cuboctahedron, all with the same edge length. Triangles match triangles (tetrahedron, octahedron, cuboctahedron) and squares match squares (cube, cuboctahedron).
+- **Default net and its status:** each composition gets a cut-and-hinge layout found by searching spanning trees of the panel graph (coplanar-first, then random trees with a timed repair step that swaps hinges to remove overlaps). Every flattened layout is checked panel against panel. The status is always one of:
+  - **verified net**: unfolds flat into one piece with no overlaps;
+  - **flat layout with overlaps**: the layout you chose (or loaded) unfolds flat but panels overlap; it is not called a net;
+  - **unresolved**: the search ran out of time without finding an overlap-free layout; the overlapping layout shown is not a valid net;
+  - **separate pieces** (cuts split the shell) or **closed hinge loop** (cannot unfold).
+  **Find net** runs the search again with a longer budget; **Check net** tests the current layout.
+- **Edges:** tap an edge to switch hinge ↔ cut. A closed loop of hinges can't move; it's reported and drawn in orange.
+- **Build:** tap a face, pick a solid type and press **Add** to attach it flush to that face. Drag a solid to move it; it snaps face to face onto a matching face. Every placement is checked geometrically: a solid that would overlap another, or touch one with only part of a face, is refused and the solid in the way flashes red. **Duplicate**, **Rotate** (by the bottom face's symmetry), **Remove**, **Tip over** and presets are in the toolbar. Changing solids needs the shell closed first.
+- **Merging:** when two solids share a complete matching face, both faces are removed from the shell, so the inside is one continuous hollow space. The panel and edge graph is rebuilt without them, and they stay absent through opening, unfolding, refolding, undo, save/load and export/import. The outside keeps its panel divisions.
+- **Joints:** around an edge shared by several solids the app adds up their dihedral angles. It reports edges where the solids close a full 360° turn and edges that leave a gap narrower than any solid can fill (for example five tetrahedra leave 7.4°; a cube, a cuboctahedron and an octahedron leave 35.3°). Nothing assumes these solids fill space.
 - **Intersections:** panels that pass through or lie on each other turn red, and the status line counts the pairs.
-- **Save / Load** keep one composition, with its layout and pose, in this browser.
+- **Save / Load** keep one composition, with its layout and pose, in this browser. **Export** downloads it as a JSON file and **Import** reads one back. Saves from earlier versions (cube only) load unchanged and get their net status re-checked.
 
-Stage 4 (tetrahedra, octahedra, cuboctahedra) isn't enabled yet. The templates, face matching and snapping code are written to take any convex polyhedron with a consistent edge length.
+Presets cover cube blocks, 1–3 tetrahedra, octahedron + tetrahedron, the big tetrahedron (four tetrahedra around an octahedron), and cuboctahedron compositions with octahedra and cubes, including one closed joint and one with a gap.
 
 ## Controls
 
@@ -80,7 +87,8 @@ Any static host works too, for example Netlify, Vercel or Cloudflare Pages. Poin
 - `src/vrpanel.js`: in-VR control panel.
 - `src/ui.js`, `index.html`: phone and desktop interface.
 - `src/solids/shell.js`: panel-and-hinge shell. It removes internal faces, sorts edges into hinge, cut or locked, holds rigid panel poses, handles group and single-panel opening, the hinge forest for unfold/refold, the default-net search and intersection tests.
-- `src/solids/composition.js`, `src/solids/polyhedra.js`: solids, face-to-face alignment and convex overlap tests.
+- `src/solids/polyhedra.js`: solid templates (faces from the convex hull, unit edge, resting pose).
+- `src/solids/composition.js`: solids, face-to-face alignment, placement checks (convex overlap and partial face contact) and the joint report.
 - `src/solids/workspace.js`, `src/solids/ui.js`, `src/solids/hinge.js`: rendering, gestures (screen, controller ray, pinch, fingertip), VR panel rows and the toolbar.
 - `src/placement.js`: table and panel placement, handles, seated/standing, lock, surface styles.
 - `src/handtools.js`: the tool tray, crease stylus and cutter.
@@ -90,3 +98,5 @@ Any static host works too, for example Netlify, Vercel or Cloudflare Pages. Poin
 ## Testing notes
 
 The VR paths are tested in an emulated Meta Quest 3 (the IWER WebXR emulator, driving controllers and tracked hands from a script). They haven't been run on a real headset yet.
+
+Automated checks (Node unit tests on the geometry, Playwright on a desktop and phone viewport, and IWER for controllers and hands) live outside the repository. Checkpoints are kept as branches, e.g. `checkpoint/v0.5-placement-tools-terrace`.

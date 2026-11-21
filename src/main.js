@@ -492,6 +492,16 @@ class App {
     const d = s / (0.5 * visible * Math.min(1, aspect)) + 0.05;
     const el = THREE.MathUtils.degToRad(60);
     const target = new THREE.Vector3(0, this.tableTop + (this.space === 'solids' ? 0.04 : 0), 0.16 * s);
+    if (this.space === 'solids') {
+      // Aim at the middle of what is on the table (a tall stack, or a net
+      // spread off to one side).
+      const box = this.solids.bounds();
+      if (!box.isEmpty()) {
+        this.solids.root.updateMatrixWorld(true);
+        const c = this.solids.root.localToWorld(box.getCenter(new THREE.Vector3()));
+        target.set(c.x, Math.max(this.tableTop + 0.04, c.y), c.z + 0.16 * s);
+      }
+    }
     this.camera.position.set(0, target.y + Math.sin(el) * d, target.z + Math.cos(el) * d);
     this.controls.target.copy(target);
     this.controls.update();

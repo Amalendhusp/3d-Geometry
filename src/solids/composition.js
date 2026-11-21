@@ -89,6 +89,53 @@ export class Composition {
     return null;
   }
 
+  // Edges where two or more solids meet, and whether the solids around each
+  // close a full turn (360°) or leave an open angle (a gap). Space need not
+  // be filled: this only reports what the arrangement does.
+  jointReport() {
+    const tol = Math.min(...this.solids.map((s) => s.edge), 1) * 1e-5;
+    const pts = [];
+    const id = (v) => {
+      for (let i = 0; i < pts.length; i++) if (pts[i].distanceTo(v) < tol) return i;
+      pts.push(v.clone());
+      return pts.length - 1;
+    };
+    const joints = new Map();
+    for (const s of this.solids) {
+      const faces = s.worldFaces();
+      const seen = new Set();
+      for (const f of faces) {
+        for (let i = 0; i < f.verts.length; i++) {
+          const a = id(f.verts[i]), b = id(f.verts[(i + 1) % f.verts.length]);
+          const key = a < b ? `${a}-${b}` : `${b}-${a}`;
+          if (seen.has(key)) continue;
+          seen.add(key);
+          // interior dihedral of this solid at the edge
+          const pair = faces.filter((g) => [a, b].every((k) => g.verts.some((v) => v.distanceTo(pts[k]) < tol)));
+          if (pair.length !== 2) continue;
+          const dihedral = Math.PI - Math.acos(Math.max(-1, Math.min(1, pair[0].normal.dot(pair[1].normal))));
+          if (!joints.has(key)) joints.set(key, []);
+          joints.get(key).push({ solid: s.id, angle: dihedral });
+        }
+      }
+    }
+    // A remaining angle narrower than the sharpest dihedral of any solid
+    // (the tetrahedron's 70.53°) is a gap that no solid can ever fill.
+    const narrowest = 70.5288;
+    let closed = 0;
+    const gaps = new Map();
+    let over = 0;
+    for (const list of joints.values()) {
+      if (list.length < 2) continue;
+      const sum = list.reduce((t, j) => t + j.angle, 0) * 180 / Math.PI;
+      const rest = 360 - sum;
+      if (Math.abs(rest) < 0.05) closed++;
+      else if (rest < 0) over++;
+      else if (rest < narrowest - 0.05) { const g = Math.round(rest * 10) / 10; gaps.set(g, (gaps.get(g) || 0) + 1); }
+    }
+    return { closed, gaps: [...gaps].sort((x, y) => x[0] - y[0]).map(([angle, count]) => ({ angle, count })), over };
+  }
+
   // Geometric check for a new pose: it must not overlap any solid, and any
   // face it presses against another face must match that face completely
   // (same shape, same vertices). Returns null, or { kind, solid, message }.
