@@ -47,6 +47,30 @@ export class Composition {
   constructor() {
     this.solids = [];
     this.nextId = 1;
+    // Shape change: a stretch of the whole composition along its own X, Y
+    // and Z axes. The solids themselves stay regular (building works on
+    // them); the stretch is applied to every vertex when the shell is made,
+    // so shared vertices stay shared and joined faces stay joined.
+    this.shape = new THREE.Vector3(1, 1, 1);
+  }
+
+  isShaped() { return Math.abs(this.shape.x - 1) > 1e-9 || Math.abs(this.shape.y - 1) > 1e-9 || Math.abs(this.shape.z - 1) > 1e-9; }
+
+  shapeMatrix(shape = this.shape) { return new THREE.Matrix4().makeScale(shape.x, shape.y, shape.z); }
+
+  // Faces of all solids after the shape change. A linear stretch keeps
+  // every face planar and maps equal vertices to equal vertices.
+  shapedFaces(shape = this.shape) {
+    const faces = this.solids.flatMap((s) => s.worldFaces());
+    if (Math.abs(shape.x - 1) < 1e-12 && Math.abs(shape.y - 1) < 1e-12 && Math.abs(shape.z - 1) < 1e-12) return faces;
+    const S = this.shapeMatrix(shape);
+    const N = new THREE.Matrix3().getNormalMatrix(S);
+    for (const f of faces) {
+      f.verts = f.verts.map((v) => v.applyMatrix4(S));
+      f.centroid.applyMatrix4(S);
+      f.normal.applyMatrix3(N).normalize();
+    }
+    return faces;
   }
 
   add(type, edge, position, quaternion = template(type).rest) {
@@ -58,11 +82,17 @@ export class Composition {
   remove(id) { this.solids = this.solids.filter((s) => s.id !== id); }
   get(id) { return this.solids.find((s) => s.id === id) || null; }
 
-  serialize() { return { nextId: this.nextId, solids: this.solids.map((s) => s.toJSON()) }; }
+  serialize() {
+    const out = { nextId: this.nextId, solids: this.solids.map((s) => s.toJSON()) };
+    if (this.isShaped()) out.shape = this.shape.toArray();
+    return out;
+  }
 
   restore(data) {
     this.nextId = data.nextId;
     this.solids = data.solids.map((d) => new Solid(d.id, d.type, d.edge, new THREE.Vector3().fromArray(d.p), new THREE.Quaternion().fromArray(d.q)));
+    this.shape.set(1, 1, 1);
+    if (Array.isArray(data.shape) && data.shape.length === 3 && data.shape.every((v) => Number.isFinite(v) && v > 0)) this.shape.fromArray(data.shape);
   }
 
   // Lowest point of all solids (y).

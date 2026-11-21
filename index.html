@@ -106,6 +106,10 @@
 
   .tools { display: grid; grid-template-columns: repeat(5, 1fr); gap: 6px; padding: 8px; }
   .tools.tools-3 { grid-template-columns: repeat(3, 1fr); }
+  .tools.tools-6 { grid-template-columns: repeat(6, 1fr); gap: 4px; }
+  .tools.tools-6 button { font-size: 11.5px; padding: 0 2px; }
+  .dim { display: flex; align-items: center; gap: 4px; color: var(--muted); font-size: 12px; white-space: nowrap; }
+  .dim input { width: 74px; min-height: 40px; border-radius: 10px; border: 1px solid var(--line); background: var(--ink-2); color: var(--washi); padding: 0 8px; font: inherit; font-size: 14px; font-variant-numeric: tabular-nums; }
   .spaces { display: flex; gap: 2px; padding: 3px; border-radius: 11px; background: var(--ink-2); flex: none; }
   .spaces button { min-height: 34px; padding: 0 12px; font-size: 13px; font-weight: 700; background: transparent; border-radius: 8px; }
   .spaces button[aria-pressed="true"] { background: var(--saffron); color: var(--ink); }
@@ -351,6 +355,16 @@
       <span class="hint">Drag a piece to move it. Tap a hinge to cut it; tap a cut whose sides meet to join it. Refold all goes back to the 3D form.</span>
     </div>
 
+    <div class="context" data-sfor="shape" hidden>
+      <label class="dim"><span style="color:#e0452b">X</span> width <input id="shapeW" type="number" min="10" max="900" step="1" inputmode="decimal" aria-label="Width in millimetres"></label>
+      <label class="dim"><span style="color:#2fa35a">Y</span> height <input id="shapeH" type="number" min="10" max="900" step="1" inputmode="decimal" aria-label="Height in millimetres"></label>
+      <label class="dim"><span style="color:#3a78e0">Z</span> depth <input id="shapeD" type="number" min="10" max="900" step="1" inputmode="decimal" aria-label="Depth in millimetres"></label>
+      <span class="dim">mm</span>
+      <button id="shapeApplyBtn" class="primary">Apply</button>
+      <button id="shapeResetBtn">Reset shape</button>
+      <span class="hint">Stretches the whole composition along its own axes; joined faces stay joined and the fold angles and net are recomputed. Single edges can't be edited yet.</span>
+    </div>
+
     <div class="context" data-sfor="edges" hidden>
       <button id="defaultNetBtn">Find net</button>
       <button id="checkNetBtn">Check net</button>
@@ -359,12 +373,13 @@
       <span class="hint">Tap an edge to switch it between hinge and cut.</span>
     </div>
 
-    <nav class="tools" aria-label="Solid tools">
+    <nav class="tools tools-6" aria-label="Solid tools">
       <button data-stool="inspect" aria-pressed="false"><svg class="i" viewBox="0 0 24 24"><path d="M12 7 7.5 9.5v5L12 17l4.5-2.5v-5z"/><path d="M4.5 9a8 8 0 0 1 13.6-3.4L20 7.5"/><path d="M20 4v3.5h-3.5"/><path d="M19.5 15a8 8 0 0 1-13.6 3.4L4 16.5"/><path d="M4 20v-3.5h3.5"/></svg>Inspect</button>
       <button data-stool="build" aria-pressed="false"><svg class="i" viewBox="0 0 24 24"><path d="M12 3 4 7.5v9L12 21l8-4.5v-9z"/><path d="M4 7.5 12 12l8-4.5M12 12v9"/></svg>Build</button>
       <button data-stool="open" aria-pressed="true"><svg class="i" viewBox="0 0 24 24"><path d="M4 20h16"/><path d="M4 20V9h9v11"/><path d="m13 9 6-4v11l-6 4"/></svg>Open</button>
       <button data-stool="edges" aria-pressed="false"><svg class="i" viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="1.5"/><path d="M4 12h16" stroke-dasharray="2.4 2.4"/></svg>Edges</button>
       <button data-stool="layout" aria-pressed="false"><svg class="i" viewBox="0 0 24 24"><path d="M3 14h6v6H3zM9 14h6v6H9zM9 8h6v6H9z"/><path d="m17.5 4 3.5 3.5-3.5 3.5-3.5-3.5z"/></svg>Layout</button>
+      <button data-stool="shape" aria-pressed="false"><svg class="i" viewBox="0 0 24 24"><rect x="6" y="8" width="12" height="10" rx="1"/><path d="M2 13h3M19 13h3M3.5 11.5 2 13l1.5 1.5M20.5 11.5 22 13l-1.5 1.5"/><path d="M12 3v3M10.5 4.5 12 3l1.5 1.5"/></svg>Shape</button>
     </nav>
   </div>
 </footer>
@@ -462,7 +477,7 @@
       <dt>Cutting</dt>
       <dd>Cut follows crease lines. Tap a segment between two crossings to cut it, or drag along a crease to cut just part of it. Cuts go through every layer under them. Once a piece is cut free, the Move tool carries that piece on its own.</dd>
       <dt>Solid → Unfold</dt>
-      <dd>Switch to Solids in the header. Open: tap a panel to select it; its usable hinges glow green and the one in use is yellow. Drag the panel (or use the slider) to swing it. Group swings everything hinged beyond it; One panel keeps only the chosen hinge. Unfold all lays the default net flat; Refold all closes it. Build: tap a face, choose cube, tetrahedron, octahedron or cuboctahedron, and Add; only faces of the same shape join, and joined faces disappear so the inside stays hollow. Edges: tap an edge to switch hinge and cut; Find net searches for an overlap-free net and Check net tells you honestly whether the current layout is a verified net, overlaps, or could not be resolved. Panels that pass through each other turn red. Inspect: drag the form (or grab it in VR with one hand and turn your wrist, or with both hands) to look at it from any side; Reset orientation puts it back. Layout: the net lies flat on the surface; drag pieces to move them, ⟲ ⟳ to turn them, tap a hinge to cut it apart and tap a cut whose sides meet to join it. Equal numbers mark edges that join. Other nets tries different overlap-free nets before you split one. Export… saves the composition, the net as a full-size SVG, or a PNG of the view.</dd>
+      <dd>Switch to Solids in the header. Open: tap a panel to select it; its usable hinges glow green and the one in use is yellow. Drag the panel (or use the slider) to swing it. Group swings everything hinged beyond it; One panel keeps only the chosen hinge. Unfold all lays the default net flat; Refold all closes it. Build: tap a face, choose cube, tetrahedron, octahedron or cuboctahedron, and Add; only faces of the same shape join, and joined faces disappear so the inside stays hollow. Edges: tap an edge to switch hinge and cut; Find net searches for an overlap-free net and Check net tells you honestly whether the current layout is a verified net, overlaps, or could not be resolved. Panels that pass through each other turn red. Inspect: drag the form (or grab it in VR with one hand and turn your wrist, or with both hands) to look at it from any side; Reset orientation puts it back. Layout: the net lies flat on the surface; drag pieces to move them, ⟲ ⟳ to turn them, tap a hinge to cut it apart and tap a cut whose sides meet to join it. Equal numbers mark edges that join. Other nets tries different overlap-free nets before you split one. Export… saves the composition, the net as a full-size SVG, or a PNG of the view. Shape: type a width, height and depth (or use ±10% in VR) to stretch the whole composition along its own axes; Reset shape returns to the regular solids.</dd>
       <dt>Layers</dt>
       <dd>“All” folds every layer on the side you grab. “Top flap” folds only the piece you grab.</dd>
     </dl>

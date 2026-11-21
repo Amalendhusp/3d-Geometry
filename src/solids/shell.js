@@ -65,8 +65,11 @@ export class Shell {
   // ------------------------------------------------------------ building
 
   build(composition) {
-    const faces = composition.solids.flatMap((s) => s.worldFaces());
-    this.edgeLen = composition.solids.length ? Math.min(...composition.solids.map((s) => s.edge)) : 0.12;
+    const faces = composition.shapedFaces ? composition.shapedFaces() : composition.solids.flatMap((s) => s.worldFaces());
+    // Shortest edge: the scale for tolerances (edges differ once stretched).
+    let minEdge = Infinity;
+    for (const f of faces) for (let i = 0; i < f.verts.length; i++) minEdge = Math.min(minEdge, f.verts[i].distanceTo(f.verts[(i + 1) % f.verts.length]));
+    this.edgeLen = Number.isFinite(minEdge) ? minEdge : 0.12;
     const vix = new VertexIndex(this.edgeLen * 2e-5);
     for (const f of faces) f.vid = f.verts.map((v) => vix.id(v));
     const byKey = new Map();
@@ -661,6 +664,27 @@ export class Shell {
   }
 
   isClosed() { return this.panels.every((p) => isIdentity(p.M)); }
+
+  // Largest distance of any panel corner from its panel's plane (rest form).
+  planarity() {
+    let worst = 0;
+    for (const p of this.panels) {
+      const d0 = p.normal.dot(p.verts[0]);
+      for (const v of p.verts) worst = Math.max(worst, Math.abs(p.normal.dot(v) - d0));
+    }
+    return worst;
+  }
+
+  // Interior angles at the hinge lines of the closed form, grouped.
+  foldAngles() {
+    const groups = new Map();
+    for (const e of this.edges) {
+      if (!e.shared) continue;
+      const a = Math.round(THREE.MathUtils.radToDeg(this.interior(e, e.uses[0].panel, e.uses[1].panel)) * 10) / 10;
+      groups.set(a, (groups.get(a) || 0) + 1);
+    }
+    return [...groups].sort((x, y) => x[0] - y[0]);
+  }
 
   // ------------------------------------------------------- serialization
 

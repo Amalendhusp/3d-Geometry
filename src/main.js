@@ -736,7 +736,7 @@ class App {
       const k = e.key.toLowerCase();
       if ((e.ctrlKey || e.metaKey) && k === 'z') { e.preventDefault(); this.actions.undo(); return; }
       if (this.space === 'solids') {
-        const sm = { 1: 'build', 2: 'open', 3: 'edges', 4: 'layout', 5: 'inspect', b: 'build', o: 'open', e: 'edges', l: 'layout', i: 'inspect' };
+        const sm = { 1: 'build', 2: 'open', 3: 'edges', 4: 'layout', 5: 'inspect', 6: 'shape', b: 'build', o: 'open', e: 'edges', l: 'layout', i: 'inspect', s: 'shape' };
         if (sm[k]) this.solids.setTool(sm[k]);
         else if (k === 'u') this.solids.unfoldAll();
         else if (k === 'r') this.solids.refoldAll();

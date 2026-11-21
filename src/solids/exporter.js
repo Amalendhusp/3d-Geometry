@@ -127,6 +127,9 @@ export function netSVG(shell, opts = {}) {
   const W = x1 - x0 + 2 * margin, H = y1 - y0 + 2 * margin + legendH;
   const X = (p) => fmt(p[0] - x0 + margin), Y = (p) => fmt(p[1] - y0 + margin);
   const edgeMM = shell.edgeLen * MM;
+  let longMM = 0;
+  for (const p of shell.panels) for (let i = 0; i < p.verts.length; i++) longMM = Math.max(longMM, p.verts[i].distanceTo(p.verts[(i + 1) % p.verts.length]) * MM);
+  const edgeText = Math.abs(longMM - edgeMM) < 0.01 ? `Edge length ${fmt(edgeMM)} mm` : `Edges ${fmt(edgeMM)} to ${fmt(longMM)} mm`;
   const fs = Math.max(2.5, Math.min(7, edgeMM * 0.07));
 
   const texts = [];
@@ -164,7 +167,7 @@ export function netSVG(shell, opts = {}) {
   out.push(`<?xml version="1.0" encoding="UTF-8"?>`);
   out.push(`<svg xmlns="http://www.w3.org/2000/svg" width="${fmt(W)}mm" height="${fmt(H)}mm" viewBox="0 0 ${fmt(W)} ${fmt(H)}">`);
   out.push(`<title>${escapeXml(title)}</title>`);
-  out.push(`<desc>Full size, units mm. Seen from the outside (printed side). Edge length ${fmt(edgeMM)} mm. ${shell.panels.length} panels, ${fr.pieces} piece(s).</desc>`);
+  out.push(`<desc>Full size, units mm. Seen from the outside (printed side). ${edgeText}. ${shell.panels.length} panels, ${fr.pieces} piece(s).</desc>`);
   out.push('<style>.cut{stroke:#000;stroke-width:0.3}.mountain{stroke:#d4462a;stroke-width:0.3;stroke-dasharray:4 1.2 0.8 1.2}.valley{stroke:#1e6ad4;stroke-width:0.3;stroke-dasharray:2.4 1.6}.flat{stroke:#9a9a9a;stroke-width:0.2;stroke-dasharray:0.6 1.2}path{fill:none;stroke-linecap:round}text{font-family:Helvetica,Arial,sans-serif;text-anchor:middle;dominant-baseline:central}.edge{fill:#b3261e;font-weight:700}.id{fill:#555}.legend{fill:#333;text-anchor:start}</style>');
   for (const kind of ['flat', 'valley', 'mountain', 'cut']) {
     if (lines[kind].length) out.push(`<path id="${kind}" class="${kind}" d="${path(lines[kind])}"/>`);

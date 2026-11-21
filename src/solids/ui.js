@@ -44,6 +44,8 @@ export class SolidsUI {
     on('#rotLeftBtn', () => ws.rotatePiece(15));
     on('#rotRightBtn', () => ws.rotatePiece(-15));
     on('#labelsBtn', () => ws.toggleLabels());
+    on('#shapeApplyBtn', () => ws.setSizeMM({ x: $('#shapeW').value, y: $('#shapeH').value, z: $('#shapeD').value }));
+    on('#shapeResetBtn', () => ws.resetShape());
     on('#idsBtn', () => ws.toggleIds());
     on('#importShellBtn', () => $('#importShellFile').click());
     $('#importShellFile').addEventListener('change', async (e) => {
@@ -159,6 +161,13 @@ export class SolidsUI {
     $('#sheetLabel').textContent = `${ws.solidsText()} · ${ws.shell.panels.length} panels`;
     if ($('#addTypeSel').value !== ws.addType) $('#addTypeSel').value = ws.addType;
     $('#labelsBtn').setAttribute('aria-pressed', String(!!ws.state.showLabels));
+    if (ws.state.tool === 'shape') {
+      const size = ws.shapeSize();
+      for (const [id, v] of [['#shapeW', size.x], ['#shapeH', size.y], ['#shapeD', size.z]]) {
+        const el = $(id);
+        if (document.activeElement !== el) el.value = (Math.round(v * 10000) / 10).toString();
+      }
+    }
     $('#idsBtn').setAttribute('aria-pressed', String(!!ws.state.showIds));
     this.syncSolidAngle();
   }

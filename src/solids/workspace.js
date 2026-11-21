@@ -32,7 +32,12 @@ export const PRESETS = {
   cuboCube: { label: 'Cuboctahedron + cube', build: (c) => { const k = first(c, 'cubocta'); attachToward(c, k, UP, 'cube', 4); } },
   honeycomb: { label: 'Octahedron + 2 cuboctahedra (closed joint)', build: (c) => honeycomb(c) },
   gapDemo: { label: 'Cuboctahedron + cube + octahedron (gap)', build: (c) => gapDemo(c) },
+  cuboid: { label: 'Cuboid 180 × 60 × 120 mm (stretched cube)', build: (c) => { first(c, 'cube'); c.shape.set(1.5, 0.5, 1); } },
+  longTwo: { label: '2 cubes stretched to 2:1 tall', build: (c) => { c.add('cube', EDGE, new THREE.Vector3(0, EDGE / 2, 0)); c.add('cube', EDGE, new THREE.Vector3(EDGE, EDGE / 2, 0)); c.shape.set(1, 2, 1); } },
+  tallTetraOcta: { label: 'Octahedron + tetrahedron, 1.4× taller', build: (c) => { const o = first(c, 'octa'); attachToward(c, o, UP, 'tetra'); c.shape.set(1, 1.4, 1); } },
 };
+
+const SHAPE_LIMITS = { factor: [0.2, 5], minEdge: 0.01, maxSize: 0.9, minAngle: 5 };
 
 // Two cuboctahedra on edge-sharing faces of an octahedron: around that
 // octahedron edge the three solids close a full turn, and the two
@@ -308,6 +313,7 @@ export class SolidsWorkspace {
     this.frameView();
     const pieces = this.shell.hingePieces().length;
     const extra = [];
+    if (this.comp.isShaped()) extra.push(`shape changed to ${this.sizeText()}`);
     if (this.isTurned()) extra.push(`turned ${Math.round(this.viewTurnDegrees())}° for viewing`);
     if (!this.shell.isClosed() && this.shell.flatReport().ok) extra.push(`laid flat in ${pieces} piece${pieces > 1 ? 's' : ''}`);
     this.app.toast(`${verb}: ${this.describe()}${extra.length ? ` (${extra.join(', ')})` : ''}. ${this.netSentence()}`, 5000);
@@ -772,15 +778,17 @@ export class SolidsWorkspace {
       open: 'Tap a panel to select it and see its hinges. Drag it, or use the slider, to swing it open.',
       edges: 'Tap an edge to switch it between hinge (green) and cut (red, dashed).',
       layout: 'Flat layout: drag a piece to move it, turn it with ⟲ ⟳, tap a hinge to cut it apart, tap a cut whose sides meet to join it. Matching numbers mark edges that join.',
+      shape: 'Shape: stretch the whole composition along its X (red), Y (green) and Z (blue) axes, or type its width, height and depth. Joined faces stay joined; fold angles and the net are worked out again. Single edges cannot be edited yet.',
     };
     let msg = hints[t];
     // Building and the flat layout work on the form resting on the table.
-    if ((t === 'build' || t === 'layout') && (this.isTurned() || this.view.target)) {
+    if ((t === 'build' || t === 'layout' || t === 'shape') && (this.isTurned() || this.view.target)) {
       this.view.target = new THREE.Quaternion();
       if (t === 'build') msg = `Orientation reset so the solids rest on the table while you build. ${msg}`;
     }
     this.app.toast(msg, t === 'inspect' || t === 'layout' ? 6000 : undefined);
     if (t === 'layout' && prev !== 'layout' && !this.shell.flatReport().ok) this.layFlat({ intro: true });
+    this.updateAxes();
     this.app.notify?.();
   }
 
@@ -1253,9 +1261,140 @@ export class SolidsWorkspace {
   // ------------------------------------------------------------- build
 
   requireClosed() {
+    if (this.comp.isShaped()) {
+      this.app.toast('This composition has a changed shape. Building works on the regular solids: press Reset shape (Shape tool) to add, move, turn or remove solids.', 5000);
+      return false;
+    }
     if (this.shell.isClosed()) return true;
     this.app.toast('Refold all before changing the solids.');
     return false;
+  }
+
+  // ------------------------------------------------------------- shape
+  // Controlled shape change: stretch the whole composition along its own
+  // X (width), Y (height) and Z (depth) axes. Shared vertices and joined
+  // faces stay shared and joined, internal faces stay removed, every panel
+  // stays planar, and the fold angles and net are worked out again from the
+  // new closed form. Panels stay rigid when folding. Editing single edges
+  // needs constraint rules that are not designed yet, so it is not offered.
+
+  // Width, height and depth of the closed form (metres).
+  shapeSize(shape = this.comp.shape) {
+    const box = new THREE.Box3();
+    for (const f of this.comp.shapedFaces(shape)) for (const v of f.verts) box.expandByPoint(v);
+    return box.getSize(new THREE.Vector3());
+  }
+
+  // Why a shape would be invalid or degenerate, or null.
+  shapeProblem(shape) {
+    const [lo, hi] = SHAPE_LIMITS.factor;
+    for (const k of ['x', 'y', 'z']) {
+      const v = shape[k];
+      if (!Number.isFinite(v) || v <= 0) return 'Each size must be a positive number.';
+    }
+    const faces = this.comp.shapedFaces(shape);
+    let minEdge = Infinity, minAngle = 180, minArea = Infinity;
+    const box = new THREE.Box3();
+    for (const f of faces) {
+      const n = f.verts.length;
+      let area = new THREE.Vector3();
+      for (let i = 0; i < n; i++) {
+        const a = f.verts[i], b = f.verts[(i + 1) % n], c = f.verts[(i + 2) % n];
+        box.expandByPoint(a);
+        minEdge = Math.min(minEdge, a.distanceTo(b));
+        const u = a.clone().sub(b).normalize(), w = c.clone().sub(b).normalize();
+        minAngle = Math.min(minAngle, deg(Math.acos(THREE.MathUtils.clamp(u.dot(w), -1, 1))));
+        area.add(new THREE.Vector3().crossVectors(a, b));
+      }
+      minArea = Math.min(minArea, area.length() / 2);
+    }
+    const size = box.getSize(new THREE.Vector3());
+    if (minEdge < SHAPE_LIMITS.minEdge) return `That would make an edge ${(minEdge * 1000).toFixed(1)} mm long; edges must be at least ${SHAPE_LIMITS.minEdge * 1000} mm.`;
+    if (Math.max(size.x, size.y, size.z) > SHAPE_LIMITS.maxSize) return `That would make the form ${(Math.max(size.x, size.y, size.z) * 1000).toFixed(0)} mm across; it must fit within ${SHAPE_LIMITS.maxSize * 1000} mm.`;
+    if (minAngle < SHAPE_LIMITS.minAngle) return `That would squash a face corner to ${minAngle.toFixed(1)}°; corners must stay above ${SHAPE_LIMITS.minAngle}°.`;
+    if (minArea < 1e-6) return 'That would flatten a face to almost nothing.';
+    for (const k of ['x', 'y', 'z']) {
+      const v = shape[k];
+      if (v < lo - 1e-9 || v > hi + 1e-9) return `Stretch along ${k.toUpperCase()} must stay between ${lo}× and ${hi}× the regular size.`;
+    }
+    return null;
+  }
+
+  // "fold angles 90° (all 12)" or "fold angles 54.7° to 125.3° (5 values)"
+  foldText() {
+    const g = this.shell.foldAngles().filter(([a]) => Math.abs(a - 180) > 0.05);
+    if (!g.length) return 'no folds';
+    const n = g.reduce((s, [, c]) => s + c, 0);
+    if (g.length === 1) return `every fold ${g[0][0]}° (${n} edges)`;
+    if (g.length <= 4) return `folds ${g.map(([a, c]) => `${a}° ×${c}`).join(', ')}`;
+    return `folds from ${g[0][0]}° to ${g[g.length - 1][0]}° (${g.length} different angles over ${n} edges)`;
+  }
+
+  sizeText(size = this.shapeSize()) {
+    return `${(size.x * 1000).toFixed(1)} × ${(size.y * 1000).toFixed(1)} × ${(size.z * 1000).toFixed(1)} mm (width × height × depth)`;
+  }
+
+  setShape(shape, label = 'Shape changed') {
+    this.tools.finishAll();
+    this.stopAnim();
+    if (!this.shell.isClosed()) { this.app.toast('Refold all before changing the shape; the new fold angles and net come from the closed form.'); return false; }
+    const problem = this.shapeProblem(shape);
+    if (problem) { this.app.toast(`${problem} The shape was not changed.`, 5000); this.app.notify?.(); return false; }
+    const removedBefore = this.shell.internal.length * 2;
+    this.pushHistory();
+    this.comp.shape.copy(shape);
+    this.rebuild();
+    const removed = this.shell.internal.length * 2;
+    const planar = this.shell.planarity();
+    const kept = removed === removedBefore
+      ? (removed ? `the ${removed} joined internal faces are still removed` : 'no joined faces')
+      : `internal faces ${removedBefore} → ${removed}`;
+    this.app.toast(`${label}: ${this.sizeText()}. ${kept}; ${this.foldText()}; ${planar < 1e-9 ? 'every panel planar (checked)' : `panels out of plane by up to ${(planar * 1e6).toFixed(3)} µm`}. ${this.netSentence()}`, 7000);
+    this.updateAxes();
+    return true;
+  }
+
+  // Set width / height / depth in millimetres (any can be omitted).
+  setSizeMM(mm) {
+    const cur = this.shapeSize();
+    const s = this.comp.shape.clone();
+    for (const k of ['x', 'y', 'z']) {
+      if (mm[k] == null || mm[k] === '') continue;
+      const want = Number(mm[k]) / 1000;
+      if (!Number.isFinite(want) || want <= 0) { this.app.toast('Sizes must be positive numbers in millimetres.'); return false; }
+      s[k] *= want / cur[k];
+    }
+    return this.setShape(s, 'Resized');
+  }
+
+  stretchBy(axis, factor) {
+    const s = this.comp.shape.clone();
+    s[axis] *= factor;
+    return this.setShape(s, `Stretched along ${axis.toUpperCase()}`);
+  }
+
+  resetShape() {
+    if (!this.comp.isShaped()) { this.app.toast('The solids are already regular.'); return; }
+    this.setShape(new THREE.Vector3(1, 1, 1), 'Back to the regular solids');
+  }
+
+  // Arrows for the object axes, shown in the Shape tool.
+  updateAxes() {
+    const show = this.state.tool === 'shape';
+    if (!show) { if (this.axes) this.axes.visible = false; return; }
+    if (!this.axes) {
+      this.axes = new THREE.Group();
+      this.axes.userData.ui = true;
+      for (const [dir, color] of [[[1, 0, 0], '#e0452b'], [[0, 1, 0], '#2fa35a'], [[0, 0, 1], '#3a78e0']]) {
+        const a = new THREE.ArrowHelper(new THREE.Vector3(...dir), new THREE.Vector3(), 0.07, color, 0.018, 0.011);
+        this.axes.add(a);
+      }
+      this.shellGroup.add(this.axes);
+    }
+    const box = new THREE.Box3();
+    for (const p of this.shell.panels) for (const v of p.verts) box.expandByPoint(v);
+    this.axes.position.set(box.min.x - 0.02, 0.001, box.max.z + 0.02);
+    this.axes.visible = true;
   }
 
   selectFace(p) {
@@ -1443,6 +1582,8 @@ export class SolidsWorkspace {
     if (this.state.tool === 'build') { const jt = this.jointText(); if (jt) parts.push(`Joints: ${jt}`); }
     if (this.state.tool === 'layout') parts.push(`Layout: ${this.layoutText().text}`);
     if (this.state.tool === 'inspect') parts.push(this.isTurned() ? `Turned ${Math.round(this.viewTurnDegrees())}° for viewing` : 'Resting orientation');
+    if (this.state.tool === 'shape' || this.comp.isShaped()) parts.push(`${this.comp.isShaped() ? 'Shape changed' : 'Regular solids'}: ${this.sizeText()}`);
+    if (this.state.tool === 'shape') parts.push(this.foldText());
     parts.push(this.netText());
     return parts.join(' · ');
   }
@@ -1457,6 +1598,7 @@ export class SolidsWorkspace {
       { label: 'Open', action: () => a.setTool('open'), active: s.tool === 'open' },
       { label: 'Edges', action: () => a.setTool('edges'), active: s.tool === 'edges' },
       { label: 'Layout', action: () => a.setTool('layout'), active: s.tool === 'layout' },
+      { label: 'Shape', action: () => a.setTool('shape'), active: s.tool === 'shape' },
     ], 8);
     const y1 = y0 + 100, y2 = y0 + 190;
     if (s.tool === 'inspect') {
@@ -1467,6 +1609,19 @@ export class SolidsWorkspace {
         { label: 'Tip 90°', action: () => a.stepView('tip', 90) },
       ], 8);
       B.push({ kind: 'text', x: M, y: y2, w: W, h: 78, label: 'Pinch or pull the trigger on the form and turn your wrist; with both hands, move them around each other. Only the view turns.' });
+    } else if (s.tool === 'shape') {
+      row(y1, 78, [
+        { label: 'X −10%', action: () => a.stretchBy('x', 1 / 1.1) },
+        { label: 'X +10%', action: () => a.stretchBy('x', 1.1) },
+        { label: 'Y −10%', action: () => a.stretchBy('y', 1 / 1.1) },
+        { label: 'Y +10%', action: () => a.stretchBy('y', 1.1) },
+        { label: 'Z −10%', action: () => a.stretchBy('z', 1 / 1.1) },
+        { label: 'Z +10%', action: () => a.stretchBy('z', 1.1) },
+      ], 6);
+      row(y2, 78, [
+        { label: 'Reset shape', action: () => a.resetShape() },
+        { label: a.sizeText().replace(' (width × height × depth)', ''), w: 2.6, kind: 'label' },
+      ], 8);
     } else if (s.tool === 'layout') {
       row(y1, 78, [
         { label: 'Lay flat', action: () => a.layFlat() },
