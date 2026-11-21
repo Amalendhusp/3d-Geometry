@@ -31,6 +31,8 @@ export class Tools {
   down(ptr, toolOverride) {
     const tool = toolOverride || this.state.tool;
     if (this.active.has(ptr.id)) return false;
+    this.hoverKey = null;
+    this.clearHover();
     if (tool === 'move') return this.beginMove(ptr, !!toolOverride);
     const hit = ptr.pick();
     if (!hit) return false;
@@ -64,6 +66,48 @@ export class Tools {
   }
 
   isBusy() { return this.active.size > 0; }
+
+  // Show what a press here would do, before anything is pressed:
+  // fold -> the flap that would move and the crease it would turn on;
+  // cut -> the crease segment that would be cut; crease -> the snap point.
+  hover(ptr, hit) {
+    const tool = this.state.tool;
+    const key = hit && hit.face ? `${tool}|${hit.face.id}|${Math.round(hit.x * 250)}|${Math.round(hit.y * 250)}` : null;
+    if (key === this.hoverKey) return;
+    this.hoverKey = key;
+    this.clearHover();
+    if (!hit || !hit.face || this.anim) return;
+    const paper = this.paper;
+    if (tool === 'fold') {
+      const s = paper.beginFold(hit, this.viewerLocal(), this.state.layerMode);
+      if (s.error) return;
+      this.hoverFold = s;
+      paper.setHighlightSets(this.session ? new Set(this.session.moving) : null, new Set(s.moving));
+      this.app.showAxis(s, 'hover');
+    } else if (tool === 'cut') {
+      const tol = Math.max(0.006, paper.size * 0.03) * (ptr && ptr.kind === 'ray' && !hit.near ? 1.7 : 1);
+      const line = paper.creaseLineAt(hit, tol);
+      if (line) { this.app.showCutPreview(line, line.segment[0], line.segment[1], true); this.hoverShown = true; }
+    } else if (tool === 'crease') {
+      const snapR = Math.max(0.006, paper.size * 0.03);
+      const snapped = this.state.snap ? paper.snap(hit.face, hit.x, hit.y, snapR) : null;
+      const q = snapped || [hit.x, hit.y];
+      this.app.showSnapPreview(hit.face, q, !!snapped);
+      this.hoverShown = true;
+    }
+  }
+
+  clearHover() {
+    if (this.hoverFold) {
+      this.hoverFold = null;
+      this.paper.setHighlightSets(this.session ? new Set(this.session.moving) : null, null);
+      if (this.session) this.app.showAxis(this.session); else this.app.hideAxis();
+    }
+    if (this.hoverShown) {
+      this.hoverShown = false;
+      if (!this.active.size) this.app.hideCreasePreview();
+    }
+  }
 
   // End every gesture in progress (before undo or a new sheet replaces faces).
   finishAll() {
@@ -205,6 +249,14 @@ export class Tools {
         paper.setFoldAngle(s, th);
         this.app.foldChanged(s);
       },
+      cancel: () => {
+        // Hand lost mid-fold: put the paper back exactly as it was.
+        const before = s.before, pushed = s.pushed;
+        this.clearSelection();
+        paper.restore(before);
+        if (pushed) { this.app.history.stack.pop(); this.app.notify(); }
+        this.app.geometryChanged();
+      },
       end: () => {
         paper.finalizeFold(s, true);
         if (Math.abs(s.theta - startTheta) < 1e-6) {
@@ -324,7 +376,7 @@ export class Tools {
 Tools.prototype.beginCut = function beginCut(ptr, hit) {
   this.clearSelection();
   const paper = this.paper;
-  const near = Math.max(0.006, paper.size * 0.03);
+  const near = Math.max(0.006, paper.size * 0.03) * (ptr.kind === 'ray' && !hit.near ? 1.7 : 1);
   const line = paper.creaseLineAt(hit, near);
   if (!line) {
     if (ptr.kind !== 'touch') this.app.toast('Start on a crease line. Cuts follow creases.');

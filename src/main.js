@@ -8,6 +8,7 @@ import { XRInput } from './xr.js';
 import { UI } from './ui.js';
 import { SolidsWorkspace } from './solids/workspace.js';
 import { SolidsUI } from './solids/ui.js';
+import { Placement, SURFACES, SURFACE_LABELS } from './placement.js';
 
 const PALETTE = ['#1d1f2b', '#d8452f', '#f0a325', '#f2d64b', '#3f9b5a', '#2f74c0', '#7a4bb3', '#ffffff'];
 const BRUSH_SIZES = [1, 2, 3, 5, 8, 12, 18, 25, 35];
@@ -31,8 +32,10 @@ class App {
       backColor: '#bcd3ee',
       detail: 2048,
       onTable: true,
+      surface: 'mat', // 'mat' | 'plain' | 'hidden'
       xr: null, // 'immersive-vr' | 'immersive-ar' | null
     };
+    this.panelPage = 'work'; // VR panel page: 'work' | 'place'
     this.statusText = 'Pick a tool. Paint, draw a crease, then fold along it.';
     this.tableTop = TABLE_TOP;
     this.history = this.makeHistory();
@@ -43,16 +46,17 @@ class App {
     this.paint = new PaintSurface(this.renderer);
     this.paint.create(0.3, 0.3, this.state.frontColor, this.state.backColor, this.state.detail);
     this.paper = new Paper(this.paint);
-    this.workspace.add(this.paper.root);
+    this.surface.add(this.paper.root);
     this.paper.reset(0.3, 0.3);
     this.tools = new Tools(this);
     this.panel = new VRPanel(this);
     this.panel.mesh.visible = false;
-    this.workspace.add(this.panel.mesh);
+    this.surface.add(this.panel.mesh);
     this.initPreviews();
     this.space = location.hash === '#solids' ? 'solids' : 'paper';
     this.solids = new SolidsWorkspace(this);
-    this.workspace.add(this.solids.root);
+    this.surface.add(this.solids.root);
+    this.placement = new Placement(this);
     this.actions = this.makeActions();
     this.xrInput = new XRInput(this);
     this.haptic = () => this.xrInput.hapticAll();
@@ -103,15 +107,20 @@ class App {
     this.camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.03, 60);
     this.camera.position.set(0, 1.25, 0.55);
 
+    // workspace: the table's footprint on the floor (position + yaw).
+    // surface: the table top, at table height; everything on it rides along.
     this.workspace = new THREE.Group();
     this.workspace.name = 'workspace';
     scene.add(this.workspace);
+    this.surface = new THREE.Group();
+    this.surface.name = 'surface';
+    this.workspace.add(this.surface);
 
     const hemi = new THREE.HemisphereLight('#fffaf0', '#8c8476', 1.5);
     scene.add(hemi);
     const sun = new THREE.DirectionalLight('#ffffff', 1.9);
-    sun.position.set(0.5, TABLE_TOP + 1.6, 0.7);
-    sun.target.position.set(0, TABLE_TOP, 0);
+    sun.position.set(0.5, 1.6, 0.7);
+    sun.target.position.set(0, 0, 0);
     sun.castShadow = true;
     sun.shadow.mapSize.set(1024, 1024);
     sun.shadow.camera.near = 0.2;
@@ -119,7 +128,7 @@ class App {
     sun.shadow.bias = -0.0004;
     sun.shadow.normalBias = 0.01;
     this.sun = sun;
-    this.workspace.add(sun, sun.target);
+    this.surface.add(sun, sun.target);
 
     this.env = new THREE.Group();
     scene.add(this.env);
@@ -133,13 +142,13 @@ class App {
     floor.receiveShadow = true;
     this.env.add(floor);
 
-    this.table = new THREE.Group();
+    this.table = new THREE.Group(); // legs (floor based)
     this.workspace.add(this.table);
-    const wood = new THREE.MeshStandardMaterial({ color: '#a77b52', roughness: 0.75 });
-    this.tableTopMesh = new THREE.Mesh(new THREE.BoxGeometry(1, 0.04, 1), wood);
+    this.wood = new THREE.MeshStandardMaterial({ color: '#a77b52', roughness: 0.75 });
+    this.tableTopMesh = new THREE.Mesh(new THREE.BoxGeometry(1, 0.04, 1), this.wood);
     this.tableTopMesh.receiveShadow = true;
     this.tableTopMesh.castShadow = true;
-    this.table.add(this.tableTopMesh);
+    this.surface.add(this.tableTopMesh);
     this.legs = [];
     const legMat = new THREE.MeshStandardMaterial({ color: '#2b2f45', roughness: 0.6, metalness: 0.2 });
     for (let k = 0; k < 4; k++) {
@@ -151,45 +160,88 @@ class App {
     this.mat = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), new THREE.MeshStandardMaterial({ roughness: 0.95 }));
     this.mat.rotation.x = -Math.PI / 2;
     this.mat.receiveShadow = true;
-    this.table.add(this.mat);
+    this.surface.add(this.mat);
   }
 
-  // Size the table and cutting mat to the sheet.
+  // Depth of the work area (for placing the table at arm's length).
+  workDepth() {
+    return this.space === 'solids' ? Math.min(0.6, this.solids.extent()) : this.paper.H;
+  }
+
+  // Size the table and cutting mat to the work; surface coordinates.
   layoutTable() {
     const ext = this.space === 'solids' && this.solids ? this.solids.extent() : null;
     const W = ext ?? this.paper.W, H = ext ?? this.paper.H;
     const tw = Math.max(1.0, W + 0.45), td = Math.max(0.7, H + 0.35);
-    const top = this.tableTop;
+    this.tableSize = { tw, td };
     this.tableTopMesh.scale.set(tw, 1, td);
-    this.tableTopMesh.position.set(0, top - 0.02, 0);
-    const lx = tw / 2 - 0.06, lz = td / 2 - 0.06;
-    [[-lx, -lz], [lx, -lz], [-lx, lz], [lx, lz]].forEach(([x, z], k) => {
+    this.tableTopMesh.position.set(0, -0.02, 0);
+    this.legPos = [[-(tw / 2 - 0.06), -(td / 2 - 0.06)], [tw / 2 - 0.06, -(td / 2 - 0.06)], [-(tw / 2 - 0.06), td / 2 - 0.06], [tw / 2 - 0.06, td / 2 - 0.06]];
+    const mw = Math.min(tw - 0.06, Math.max(W, H) + 0.16), md = Math.min(td - 0.06, Math.max(W, H) + 0.12);
+    const key = `${mw.toFixed(3)}x${md.toFixed(3)}`;
+    if (this.matKey !== key) {
+      this.matKey = key;
+      if (this.mat.material.map) this.mat.material.map.dispose();
+      this.mat.material.map = makeMatTexture(mw, md);
+      this.mat.material.needsUpdate = true;
+    }
+    this.mat.scale.set(mw, md, 1);
+    this.mat.position.set(0, 0.0005, 0);
+
+    const sc = this.sun.shadow.camera;
+    const shadowExt = Math.max(tw, td) * 0.75 + 0.2;
+    sc.left = -shadowExt; sc.right = shadowExt; sc.top = shadowExt; sc.bottom = -shadowExt;
+    sc.updateProjectionMatrix();
+
+    if (this.solids && !this.solids.carried) this.solids.root.position.set(0, 0.002, 0);
+    if (!this.placement?.panelCustom) this.resetPanelPose();
+    this.placement?.layout(tw, td);
+    this.handTools?.layout(tw, td);
+    this.applySurfaceStyle();
+    this.applyHeight();
+  }
+
+  // Table height changes only move the surface and stretch the legs.
+  applyHeight() {
+    const top = this.tableTop;
+    this.surface.position.y = top;
+    this.legPos.forEach(([x, z], k) => {
       const leg = this.legs[k];
-      leg.scale.y = top - 0.04;
+      leg.scale.y = Math.max(0.05, top - 0.04);
       leg.position.set(x, (top - 0.04) / 2, z);
     });
-    const mw = Math.min(tw - 0.06, Math.max(W, H) + 0.16), md = Math.min(td - 0.06, Math.max(W, H) + 0.12);
-    this.mat.scale.set(mw, md, 1);
-    this.mat.position.set(0, top + 0.0005, 0);
-    if (this.mat.material.map) this.mat.material.map.dispose();
-    this.mat.material.map = makeMatTexture(mw, md);
-    this.mat.material.needsUpdate = true;
+  }
 
-    const s = this.sun.shadow.camera;
-    const shadowExt = Math.max(tw, td) * 0.75 + 0.2;
-    s.left = -shadowExt; s.right = shadowExt; s.top = shadowExt; s.bottom = -shadowExt;
-    s.updateProjectionMatrix();
-    this.sun.position.set(0.5, top + 1.6, 0.7);
-    this.sun.target.position.set(0, top, 0);
-
-    if (this.solids && !this.solids.carried) this.solids.root.position.set(0, top + 0.002, 0);
-
-    // VR panel to the left of the sheet, angled toward the user.
-    const px = -Math.max(0.36, W / 2 + 0.16);
-    this.panel.mesh.position.set(px, top + 0.29, Math.min(0.2, H / 2 + 0.05));
+  // Default spot for the VR panel: left of the work, angled toward you.
+  resetPanelPose() {
+    const W = this.space === 'solids' ? this.solids.extent() : this.paper.W;
+    const H = this.space === 'solids' ? this.solids.extent() : this.paper.H;
+    const seated = this.placement?.used === 'seated';
+    const px = -Math.max(seated ? 0.32 : 0.36, W / 2 + 0.16);
+    this.panel.mesh.position.set(px, seated ? 0.22 : 0.29, Math.min(0.2, H / 2 + 0.05));
     this.panel.mesh.rotation.set(0, 0, 0);
     this.panel.mesh.rotateY(0.62);
-    this.panel.mesh.rotateX(-0.42);
+    this.panel.mesh.rotateX(seated ? -0.55 : -0.42);
+  }
+
+  setSurface(style) {
+    this.state.surface = style;
+    this.applySurfaceStyle();
+    this.toast(`Surface: ${SURFACE_LABELS[style]}.`);
+    this.notify();
+  }
+
+  cycleSurface() {
+    this.setSurface(SURFACES[(SURFACES.indexOf(this.state.surface) + 1) % SURFACES.length]);
+  }
+
+  applySurfaceStyle() {
+    const style = this.state.surface;
+    const hidden = style === 'hidden' || this.state.xr === 'immersive-ar';
+    this.tableTopMesh.visible = !hidden;
+    this.table.visible = !hidden;
+    this.mat.visible = !hidden && style === 'mat';
+    this.wood.color.set(style === 'plain' ? '#d8c6a6' : '#a77b52');
   }
 
   initPreviews() {
@@ -199,6 +251,7 @@ class App {
     this.paper.root.add(this.creasePreview);
     this.previewMat = accent;
     this.cutMat = new THREE.MeshBasicMaterial({ color: '#c43d1a', transparent: true, opacity: 0.95, depthTest: false, depthWrite: false, side: THREE.DoubleSide });
+    this.cutHoverMat = new THREE.MeshBasicMaterial({ color: '#ff8a5c', transparent: true, opacity: 0.8, depthTest: false, depthWrite: false, side: THREE.DoubleSide });
     this.tickMat = new THREE.MeshBasicMaterial({ color: '#1d1f2b', transparent: true, opacity: 0.7, depthTest: false, depthWrite: false, side: THREE.DoubleSide });
     this.axisMat = new THREE.MeshBasicMaterial({ color: '#e0661d', transparent: true, opacity: 0.95, depthTest: false, depthWrite: false });
     this.axis = new THREE.Mesh(new THREE.CylinderGeometry(1, 1, 1, 10, 1, true), this.axisMat);
@@ -223,11 +276,18 @@ class App {
 
   // Cut preview: the span [a, b] along the crease line, plus the crossings
   // it can snap to.
-  showCutPreview(line, a, b) {
+  showCutPreview(line, a, b, hover = false) {
     const lift = this.paper.maxStackHeight() + 0.0004;
     const at = (t) => line.P.clone().addScaledVector(line.u, t).addScaledVector(line.n, lift);
     const stops = line.stops.filter((t, i) => i === 0 || t - line.stops[i - 1] > 1e-4).map(at);
-    this.drawPreview([[at(a), at(b)]], line.n, this.cutMat, [at(a), at(b)], stops);
+    this.drawPreview([[at(a), at(b)]], line.n, hover ? this.cutHoverMat : this.cutMat, [at(a), at(b)], stops);
+  }
+
+  // Where a crease would start: a ring, filled when it snaps to a point.
+  showSnapPreview(face, p, snapped) {
+    const n = new THREE.Vector3().setFromMatrixColumn(face.M, 2).normalize();
+    const P = this.paper.toLocal(face, p[0], p[1]).addScaledVector(n, face.off);
+    this.drawPreview([], n, this.previewMat, snapped ? [P] : [], snapped ? [] : [P]);
   }
 
   drawPreview(segs, n, mat, dots, ticks = []) {
@@ -267,7 +327,8 @@ class App {
     this.creasePreview.clear();
   }
 
-  showAxis(s) {
+  showAxis(s, mode) {
+    this.axisMat.color.set(mode === 'hover' ? '#4f8fff' : '#e0661d');
     const A = s.axisA, B = s.axisB;
     const len = A.distanceTo(B);
     if (!(len > 1e-5)) { this.axis.visible = false; return; }
@@ -385,15 +446,14 @@ class App {
     if (!this.state.onTable) return;
     const box = this.paper.worldBounds();
     if (box.isEmpty()) return;
-    const parentY = this.workspace.getWorldPosition(new THREE.Vector3()).y;
-    const want = parentY + this.tableTop + 0.0015;
+    const want = this.surface.getWorldPosition(new THREE.Vector3()).y + 0.0015;
     this.paper.root.position.y += want - box.min.y;
     this.paper.root.updateMatrixWorld(true);
   }
 
   resetPosition() {
     const root = this.paper.root;
-    root.position.set(0, this.tableTop + 0.0015, 0);
+    root.position.set(0, 0.0015, 0);
     root.quaternion.setFromAxisAngle(new THREE.Vector3(1, 0, 0), -Math.PI / 2);
     this.state.onTable = true;
     this.restOnTable();
@@ -635,7 +695,7 @@ class App {
       this.activeTools.cancel(ptr);
       active = null;
     });
-    el.addEventListener('pointerleave', () => { this.hoverCursor.visible = false; });
+    el.addEventListener('pointerleave', () => { this.hoverCursor.visible = false; this.activeTools.hover?.(null, null); });
 
     window.addEventListener('keydown', (e) => {
       if (e.target && (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT')) return;
@@ -659,6 +719,7 @@ class App {
   updateHoverCursor(ptr) {
     const c = this.hoverCursor;
     const hit = this.space === 'paper' && this.state.tool === 'move' ? null : ptr.pick();
+    this.activeTools.hover?.(ptr, hit);
     c.visible = !!hit;
     if (!hit) return;
     let n;
@@ -682,12 +743,13 @@ class App {
     const r = this.renderer;
     r.xr.addEventListener('sessionstart', () => {
       this.needRecenter = true;
+      this.placement.updateVisibility();
       this.panel.mesh.visible = true;
       this.hoverCursor.visible = false;
       this.savedView = { pos: this.camera.position.clone(), target: this.controls.target.clone() };
       const ar = this.state.xr === 'immersive-ar';
       this.env.visible = !ar;
-      this.table.visible = !ar;
+      this.applySurfaceStyle();
       this.scene.background = ar ? null : this.bg;
       this.panel.invalidate();
       this.notify();
@@ -696,11 +758,13 @@ class App {
       this.state.xr = null;
       this.panel.mesh.visible = false;
       this.env.visible = true;
-      this.table.visible = true;
       this.scene.background = this.bg;
       this.workspace.position.set(0, 0, 0);
       this.workspace.rotation.set(0, 0, 0);
       this.tableTop = TABLE_TOP;
+      this.placement.panelCustom = false;
+      this.placement.used = 'standing';
+      this.placement.updateVisibility();
       this.layoutTable();
       if (this.state.onTable) this.resetPosition();
       this.onResize();
@@ -739,23 +803,7 @@ class App {
     }
   }
 
-  // Put the table half a metre in front of the user, at a comfortable height.
-  recenterXR() {
-    const head = this.viewerPosition();
-    const cam = this.renderer.xr.getCamera();
-    const fwd = new THREE.Vector3(0, 0, -1).applyQuaternion(cam.getWorldQuaternion(new THREE.Quaternion()));
-    fwd.y = 0;
-    if (fwd.lengthSq() < 1e-6) fwd.set(0, 0, -1);
-    fwd.normalize();
-    const reach = 0.42 + (this.space === 'solids' ? Math.min(0.3, this.solids.extent() / 2) : this.paper.H / 2);
-    this.workspace.position.set(head.x + fwd.x * reach, 0, head.z + fwd.z * reach);
-    this.workspace.rotation.set(0, Math.atan2(-fwd.x, -fwd.z), 0);
-    const h = head.y > 0.5 ? head.y : 1.6;
-    this.tableTop = THREE.MathUtils.clamp(h - 0.62, 0.62, 1.05);
-    this.layoutTable();
-    this.workspace.updateMatrixWorld(true);
-    this.resetPosition();
-  }
+  recenterXR() { this.placement.placeInFront(); }
 
   // ----------------------------------------------------------- frame
 

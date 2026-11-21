@@ -44,6 +44,8 @@ export class SolidsWorkspace {
     this.state = { tool: 'open', openMode: 'group' };
     this.sel = { panel: null, hinge: null, solidId: null, fi: null };
     this.loopEdges = new Set();
+    this.hoverPanel = null;
+    this.hoverEdge = null;
     this.overlapSet = new Set();
     this.moving = new Set();
     this.history = [];
@@ -157,8 +159,8 @@ export class SolidsWorkspace {
   material(side, parity, state) {
     const key = `${side}|${parity}|${state}`;
     if (this.matCache.has(key)) return this.matCache.get(key);
-    const tint = { none: null, selected: '#f0b44c', moving: '#ffd27a', overlap: '#ff2a12', solid: '#4a8cff', face: '#f0b44c' }[state];
-    const strength = { none: 0, selected: 0.38, moving: 0.18, overlap: 0.55, solid: 0.25, face: 0.45 }[state];
+    const tint = { none: null, selected: '#f0b44c', moving: '#ffd27a', overlap: '#ff2a12', solid: '#4a8cff', face: '#f0b44c', hover: '#5aa0ff' }[state];
+    const strength = { none: 0, selected: 0.38, moving: 0.18, overlap: 0.55, solid: 0.25, face: 0.45, hover: 0.22 }[state];
     const m = new THREE.MeshStandardMaterial({
       color: side === 'out' ? COLORS.outside[parity] : COLORS.inside,
       roughness: 0.85,
@@ -172,6 +174,7 @@ export class SolidsWorkspace {
   }
 
   buildMeshes() {
+    this.hoverPanel = this.hoverEdge = this.hoverHinge = null;
     for (const m of this.meshes.values()) {
       this.shellGroup.remove(m.group);
       m.geometry.dispose();
@@ -216,10 +219,11 @@ export class SolidsWorkspace {
     if (this.overlapSet.has(p)) return 'overlap';
     if (tool === 'build') {
       if (this.sel.solidId === p.solidId) return p.fi === this.sel.fi ? 'face' : 'solid';
-      return 'none';
+      return this.hoverPanel === p ? 'hover' : 'none';
     }
     if (this.sel.panel === p) return 'selected';
     if (this.moving.has(p)) return 'moving';
+    if (this.hoverPanel === p) return 'hover';
     return 'none';
   }
 
@@ -245,6 +249,8 @@ export class SolidsWorkspace {
 
   edgeStyle(p, e, okEdges) {
     const w = this.edgeLen * 0.022;
+    if (this.hoverEdge === e) return { color: '#ffffff', w: w * 2.6 };
+    if (this.hoverPanel === p && this.hoverHinge === e && this.sel.panel !== p) return { color: '#5aa0ff', w: w * 2.2 };
     if (this.sel.panel === p && this.sel.hinge === e && this.state.tool === 'open') return { color: COLORS.chosen, w: w * 2.4 };
     if (this.loopEdges.has(e)) return { color: COLORS.loop, w: w * 2 };
     if (this.sel.panel === p && okEdges.has(e)) return { color: COLORS.option, w: w * 1.9 };
@@ -323,6 +329,26 @@ export class SolidsWorkspace {
     const normal = panel.normal.clone().transformDirection(m.group.matrixWorld);
     if (viewDir && normal.dot(viewDir) > 0) normal.negate();
     return { panel, point: point.clone(), distance, local, normal };
+  }
+
+  // Preview what a press would do: the panel (and the hinge it would swing
+  // on) in Open, the edge in Edges, the face in Build.
+  setHover(hit, ptr) {
+    let panel = null, edge = null, hinge = null;
+    if (hit && hit.panel) {
+      panel = hit.panel;
+      if (this.state.tool === 'edges') {
+        edge = this.edgeNear(panel, hit.local, ptr && ptr.kind === 'ray' && !hit.near ? 0.32 : 0.25);
+        panel = null;
+      } else if (this.state.tool === 'open' && this.sel.panel !== panel) {
+        hinge = this.defaultHinge(panel);
+      }
+    }
+    if (panel === this.hoverPanel && edge === this.hoverEdge && hinge === this.hoverHinge) return;
+    this.hoverPanel = panel;
+    this.hoverEdge = edge;
+    this.hoverHinge = hinge;
+    this.refreshStyles();
   }
 
   // Nearest panel surface to a world point (fingertips, pinches).
@@ -435,6 +461,7 @@ export class SolidsWorkspace {
   setTool(t) {
     this.tools.finishAll();
     this.state.tool = t;
+    this.hoverPanel = this.hoverEdge = this.hoverHinge = null;
     if (t !== 'open') this.sel.panel = this.sel.hinge = null;
     if (t !== 'build') this.sel.solidId = this.sel.fi = null;
     this.loopEdges.clear();
@@ -945,6 +972,7 @@ class SolidsTools {
 
   isBusy() { return this.active.size > 0; }
   clearSelection() {}
+  hover(ptr, hit) { this.ws.setHover(hit, ptr); }
   update(dt) { this.ws.update(dt); }
 
   // A press counts as a drag once the point under it moves a few mm.
@@ -982,6 +1010,13 @@ class SolidsTools {
           return;
         }
         if (swing) ws.endTurn(swing.plan, true);
+      },
+      cancel: () => {
+        // Tracking lost mid-swing: back to how it was before the grab.
+        if (!swing) return;
+        const snap = ws.history.pop();
+        ws.moving.clear();
+        if (snap) ws.restoreSnapshot(snap);
       },
     };
   }
@@ -1028,7 +1063,7 @@ class SolidsTools {
 
   beginEdge(ptr, hit) {
     const ws = this.ws;
-    const e = ws.edgeNear(hit.panel, hit.local, 0.25);
+    const e = ws.edgeNear(hit.panel, hit.local, ptr.kind === 'ray' && !hit.near ? 0.32 : 0.25);
     return {
       move: () => {},
       end: () => {

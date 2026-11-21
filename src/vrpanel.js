@@ -38,6 +38,19 @@ export class VRPanel {
     this.buttons = [];
     this.dirty = true;
     this.font = '"Zen Kaku Gothic New", system-ui, sans-serif';
+    this.pressedKeys = new Set();
+    // Where a fingertip is about to touch the panel.
+    this.contact = new THREE.Mesh(
+      new THREE.RingGeometry(0.7, 1, 32),
+      new THREE.MeshBasicMaterial({ color: '#ffd27a', transparent: true, opacity: 0.95, depthTest: false }),
+    );
+    this.contact.renderOrder = 25;
+    this.contact.visible = false;
+    this.mesh.add(this.contact);
+    this.contactDot = new THREE.Mesh(new THREE.CircleGeometry(1, 24), new THREE.MeshBasicMaterial({ color: '#36d98a', depthTest: false }));
+    this.contactDot.renderOrder = 26;
+    this.contactDot.visible = false;
+    this.mesh.add(this.contactDot);
   }
 
   invalidate() { this.dirty = true; }
@@ -61,10 +74,19 @@ export class VRPanel {
 
     // Workspace switch, then the active workspace's controls.
     const space = this.app.space;
+    const page = this.app.panelPage;
     row(84, 60, [
-      { label: 'Paper folding', action: () => a.setSpace('paper'), active: space === 'paper' },
-      { label: 'Solid → Unfold', action: () => a.setSpace('solids'), active: space === 'solids' },
+      { label: 'Paper', action: () => { this.app.panelPage = 'work'; a.setSpace('paper'); this.invalidate(); }, active: page === 'work' && space === 'paper' },
+      { label: 'Solids', action: () => { this.app.panelPage = 'work'; a.setSpace('solids'); this.invalidate(); }, active: page === 'work' && space === 'solids' },
+      { label: 'Place & view', action: () => { this.app.panelPage = 'place'; this.invalidate(); }, active: page === 'place' },
     ]);
+    if (page === 'place') {
+      this.placeRows(row, B, M, W);
+      B.push({ kind: 'text', x: M, y: 672, w: W - 210, h: 170, label: this.app.statusText || '', status: true });
+      btn(PX_W - M - 196, 752, 196, 70, 'Exit VR', () => a.exitXR());
+      this.buttons = B;
+      return;
+    }
     if (space === 'solids') {
       this.app.solids.panelRows(row, B, M, W, 160);
       B.push({ kind: 'text', x: M, y: 672, w: W - 210, h: 170, label: this.app.statusText || '', status: true });
@@ -144,6 +166,29 @@ export class VRPanel {
     this.buttons = B;
   }
 
+  // Workspace placement and surface options.
+  placeRows(row, B, M, W) {
+    const pl = this.app.placement;
+    const locked = pl.locked;
+    row(160, 84, [
+      { label: 'Place in front of me', w: 2, action: () => pl.placeInFront() },
+      { label: 'Seated', action: () => pl.setPosture('seated'), active: pl.used === 'seated' },
+      { label: 'Standing', action: () => pl.setPosture('standing'), active: pl.used === 'standing' },
+    ]);
+    const n = (label, kind, sign) => ({ label, action: () => pl.nudge(kind, sign), disabled: locked });
+    row(258, 78, [n('Lower', 'height', -1), n('Higher', 'height', 1), n('Closer', 'distance', -1), n('Farther', 'distance', 1)]);
+    row(346, 78, [n('Left', 'side', -1), n('Right', 'side', 1), n('Turn ⟲', 'turn', 1), n('Turn ⟳', 'turn', -1)]);
+    const surf = { mat: 'Cutting mat', plain: 'Plain table', hidden: 'No table' }[this.app.state.surface];
+    row(434, 78, [
+      { label: locked ? 'Locked ✓' : 'Lock placement', action: () => pl.setLocked(!locked), active: locked },
+      { label: `Surface: ${surf}`, w: 1.4, action: () => this.app.cycleSurface() },
+      ...(this.app.envLabel ? [{ label: `View: ${this.app.envLabel()}`, w: 1.3, action: () => this.app.cycleEnvironment() }] : []),
+    ]);
+    B.push({ kind: 'text', x: M, y: 530, w: W, h: 130, label: locked
+      ? 'Placement is locked. Unlock to move the table or this panel.'
+      : 'Grab the yellow bar at the front edge to slide, raise or lower the table; the round knobs turn it; the bar under this panel moves the panel.' });
+  }
+
   draw() {
     this.layout();
     const ctx = this.ctx;
@@ -178,10 +223,31 @@ export class VRPanel {
         ctx.fillText(b.label, b.x + b.w / 2, b.y + b.h / 2);
         continue;
       }
+      if (b.disabled) {
+        roundRect(ctx, b.x, b.y, b.w, b.h, 18);
+        ctx.fillStyle = 'rgba(45, 52, 104, 0.45)';
+        ctx.fill();
+        ctx.fillStyle = C.muted;
+        ctx.font = `600 30px ${this.font}`;
+        ctx.textAlign = 'center';
+        ctx.fillText(b.label, b.x + b.w / 2, b.y + b.h / 2 + 1);
+        continue;
+      }
       const isFlash = this.flash && this.flash.b === b.label && performance.now() - this.flash.t < 180;
-      roundRect(ctx, b.x, b.y, b.w, b.h, 18);
-      ctx.fillStyle = b.active || isFlash ? C.active : hovered.has(`${b.x},${b.y}`) ? C.btnHover : C.btn;
+      const key = `${b.x},${b.y}`;
+      const isHover = hovered.has(key);
+      const isPressed = this.pressedKeys.has(key);
+      const inset = isPressed ? 4 : 0;
+      roundRect(ctx, b.x + inset, b.y + inset, b.w - 2 * inset, b.h - 2 * inset, 18);
+      ctx.fillStyle = b.active || isFlash || isPressed ? C.active : isHover ? C.btnHover : C.btn;
       ctx.fill();
+      if (isHover) {
+        // A bold outline marks exactly what will be pressed.
+        roundRect(ctx, b.x - 5, b.y - 5, b.w + 10, b.h + 10, 22);
+        ctx.strokeStyle = '#ffd27a';
+        ctx.lineWidth = 6;
+        ctx.stroke();
+      }
       if (b.swatch) {
         roundRect(ctx, b.x + 12, b.y + 12, b.w - 24, b.h - 24, 12);
         ctx.fillStyle = b.swatch;
@@ -208,14 +274,21 @@ export class VRPanel {
     if (this.dirty && this.mesh.visible) this.draw();
   }
 
-  buttonAtLocal(local) {
+  // Button under a panel-local point. With tolerance (canvas px), a point
+  // in the gap between buttons picks the nearest one.
+  buttonAtLocal(local, tolerance = 0) {
     const px = (local.x / this.width + 0.5) * PX_W;
     const py = (0.5 - local.y / this.height) * PX_H;
+    let best = null, bd = tolerance;
     for (const b of this.buttons) {
-      if (!b.action) continue;
-      if (px >= b.x && px <= b.x + b.w && py >= b.y && py <= b.y + b.h) return b;
+      if (!b.action || b.disabled) continue;
+      const dx = Math.max(b.x - px, 0, px - (b.x + b.w));
+      const dy = Math.max(b.y - py, 0, py - (b.y + b.h));
+      const d = Math.hypot(dx, dy);
+      if (d === 0) return b;
+      if (d <= bd) { bd = d; best = b; }
     }
-    return null;
+    return best;
   }
 
   // Ray test in world space. Returns { distance, point, button } or null.
@@ -224,7 +297,15 @@ export class VRPanel {
     const hits = new THREE.Raycaster(ray.origin, ray.direction, 0, 10).intersectObject(this.mesh, false);
     if (!hits.length) return null;
     const local = this.mesh.worldToLocal(hits[0].point.clone());
-    return { distance: hits[0].distance, point: hits[0].point, button: this.buttonAtLocal(local) };
+    const normal = new THREE.Vector3(0, 0, 1).transformDirection(this.mesh.matrixWorld);
+    return { distance: hits[0].distance, point: hits[0].point, normal, button: this.buttonAtLocal(local, 30) };
+  }
+
+  setPressed(button, on) {
+    if (!button) return;
+    const key = `${button.x},${button.y}`;
+    if (on) this.pressedKeys.add(key); else this.pressedKeys.delete(key);
+    this.dirty = true;
   }
 
   setHover(id, button) {
@@ -244,27 +325,47 @@ export class VRPanel {
     this.dirty = true;
   }
 
-  // Fingertip poke. Returns true while the finger is engaging the panel.
+  // Fingertip poke. Shows the contact point as the finger approaches,
+  // outlines the button it will press, presses at 1.2 cm and releases at
+  // 2.5 cm. Returns 'none' | 'near' | 'touch'.
   poke(id, tipWorld) {
-    if (!this.mesh.visible) return false;
-    const local = this.mesh.worldToLocal(tipWorld.clone());
-    const inside = Math.abs(local.x) < this.width / 2 && Math.abs(local.y) < this.height / 2;
-    const state = this.pokes.get(id) || { down: false };
+    const state = this.pokes.get(id) || { down: false, button: null };
     this.pokes.set(id, state);
-    if (!inside || local.z > 0.08 || local.z < -0.05) {
+    const clear = () => {
+      if (state.down) this.setPressed(state.button, false);
       state.down = false;
+      state.button = null;
       this.setHover(id + ':poke', null);
-      return false;
-    }
-    const b = this.buttonAtLocal(local);
+      if (this.contactOwner === id) { this.contact.visible = this.contactDot.visible = false; this.contactOwner = null; }
+      return 'none';
+    };
+    if (!this.mesh.visible || !tipWorld) return clear();
+    const local = this.mesh.worldToLocal(tipWorld.clone());
+    const margin = 0.02;
+    const inside = Math.abs(local.x) < this.width / 2 + margin && Math.abs(local.y) < this.height / 2 + margin;
+    if (!inside || local.z > 0.07 || local.z < -0.05) return clear();
+    const b = state.down ? state.button : this.buttonAtLocal(local, 24);
     this.setHover(id + ':poke', b);
+    // Contact marker: a ring that shrinks as the finger approaches.
+    this.contactOwner = id;
+    const z = Math.max(0, local.z);
+    this.contact.visible = true;
+    this.contact.position.set(local.x, local.y, 0.002);
+    this.contact.scale.setScalar(0.004 + z * 0.25);
+    this.contactDot.visible = state.down || z < 0.012;
+    this.contactDot.position.set(local.x, local.y, 0.003);
+    this.contactDot.scale.setScalar(0.004);
     if (!state.down && local.z < 0.012) {
       state.down = true;
+      state.button = b;
+      this.setPressed(b, true);
       this.click(b);
     } else if (state.down && local.z > 0.025) {
+      this.setPressed(state.button, false);
       state.down = false;
+      state.button = null;
     }
-    return local.z < 0.04;
+    return state.down || local.z < 0.03 ? 'touch' : 'near';
   }
 }
 

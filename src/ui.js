@@ -99,6 +99,20 @@ export class UI {
         detail: Number($('#detail').value),
       });
     });
+    const scene = $('#sceneDialog');
+    $('#sceneBtn').addEventListener('click', () => {
+      $('#surfaceSel').value = this.app.state.surface;
+      const env = $('#envSel');
+      env.innerHTML = '';
+      for (const [k, label] of Object.entries(this.app.environments ? this.app.environments.labels : { studio: 'Studio' })) env.appendChild(new Option(label, k));
+      env.value = this.app.environments ? this.app.environments.current : 'studio';
+      env.disabled = !this.app.environments;
+      scene.hidden = false;
+    });
+    $('#surfaceSel').addEventListener('change', (e) => this.app.setSurface(e.target.value));
+    $('#envSel').addEventListener('change', (e) => this.app.setEnvironment?.(e.target.value));
+    $('#sceneClose').addEventListener('click', () => { scene.hidden = true; });
+    scene.addEventListener('click', (e) => { if (e.target === scene) scene.hidden = true; });
     const help = $('#helpDialog');
     $('#helpBtn').addEventListener('click', () => { help.hidden = false; $('#helpClose').focus(); });
     $('#helpClose').addEventListener('click', () => { help.hidden = true; });
@@ -107,6 +121,7 @@ export class UI {
       if (e.key !== 'Escape') return;
       if (!dlg.hidden) close();
       help.hidden = true;
+      scene.hidden = true;
     });
   }
 

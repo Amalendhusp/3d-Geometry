@@ -69,14 +69,16 @@ export class Paper {
   makeMaterials() {
     const mk = (side, map, hi) => new THREE.MeshStandardMaterial({
       map, side, roughness: 0.93, metalness: 0,
-      emissive: hi ? new THREE.Color('#ffb13d') : new THREE.Color('#000000'),
-      emissiveIntensity: hi ? 0.1 : 0,
+      emissive: new THREE.Color(hi === 'hover' ? '#5aa0ff' : hi ? '#ffb13d' : '#000000'),
+      emissiveIntensity: hi === 'hover' ? 0.16 : hi ? 0.1 : 0,
     });
     this.mat = {
       front: mk(THREE.FrontSide, this.paint.front.texture, false),
       back: mk(THREE.BackSide, this.paint.back.texture, false),
       frontHi: mk(THREE.FrontSide, this.paint.front.texture, true),
       backHi: mk(THREE.BackSide, this.paint.back.texture, true),
+      frontHover: mk(THREE.FrontSide, this.paint.front.texture, 'hover'),
+      backHover: mk(THREE.BackSide, this.paint.back.texture, 'hover'),
       creaseF: new THREE.MeshBasicMaterial({
         vertexColors: true, transparent: true, opacity: 0.9, side: THREE.FrontSide,
         depthWrite: false, polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -2,
@@ -89,8 +91,8 @@ export class Paper {
   }
 
   refreshTextures() {
-    this.mat.front.map = this.mat.frontHi.map = this.paint.front.texture;
-    this.mat.back.map = this.mat.backHi.map = this.paint.back.texture;
+    this.mat.front.map = this.mat.frontHi.map = this.mat.frontHover.map = this.paint.front.texture;
+    this.mat.back.map = this.mat.backHi.map = this.mat.backHover.map = this.paint.back.texture;
     for (const m of Object.values(this.mat)) m.needsUpdate = true;
   }
 
@@ -576,6 +578,15 @@ export class Paper {
     for (const g of s.moving) s.M0.set(g, g.M.clone());
     for (const g of this.faces) s.off0.set(g, g.off);
     return s;
+  }
+
+  // Selected faces (warm tint) and hovered faces (cool tint) together.
+  setHighlightSets(selected, hovered) {
+    for (const f of this.faces) {
+      const sel = selected && selected.has(f), hov = !sel && hovered && hovered.has(f);
+      f.front.material = sel ? this.mat.frontHi : hov ? this.mat.frontHover : this.mat.front;
+      f.back.material = sel ? this.mat.backHi : hov ? this.mat.backHover : this.mat.back;
+    }
   }
 
   setHighlight(session, on) {
