@@ -927,22 +927,35 @@ export class SolidsWorkspace {
     this.app.toast(`${TEMPLATES[s.type].name} removed. ${this.describe()}. ${this.netSentence()}`, 5000);
   }
 
-  // Turn the whole composition 90° about the vertical axis or tip it over.
+  // Turn the whole composition: 'y' a quarter turn about the vertical, or
+  // 'x' tip it over onto the next outer face it can rest flat on (a face of
+  // its convex hull), whatever the solids are.
   turnAll(axis) {
     if (!this.requireClosed()) return;
-    this.pushHistory();
-    const q = new THREE.Quaternion().setFromAxisAngle(axis === 'y' ? new THREE.Vector3(0, 1, 0) : new THREE.Vector3(1, 0, 0), Math.PI / 2);
-    const box = new THREE.Box3();
-    for (const s of this.comp.solids) for (const v of s.worldVerts()) box.expandByPoint(v);
+    const verts = this.comp.solids.flatMap((s) => s.worldVerts());
+    const box = new THREE.Box3().setFromPoints(verts);
     const c = box.getCenter(new THREE.Vector3());
+    let q;
+    if (axis === 'y') q = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), Math.PI / 2);
+    else {
+      const tol = this.edgeLen * 1e-4;
+      const onHull = (p) => verts.every((v) => v.clone().sub(p.verts[0]).dot(p.normal) <= tol);
+      const down = new THREE.Vector3(0, -1, 0);
+      const cands = this.shell.panels.filter((p) => p.normal.dot(down) < 0.999 && onHull(p));
+      if (!cands.length) { this.app.toast('There is no other face this composition can rest on.'); return; }
+      // The smallest tip: the hull face whose normal is closest to straight down.
+      cands.sort((a, b) => b.normal.dot(down) - a.normal.dot(down));
+      q = new THREE.Quaternion().setFromUnitVectors(cands[0].normal.clone(), down);
+    }
+    this.pushHistory();
     for (const s of this.comp.solids) {
       s.position.sub(c).applyQuaternion(q).add(c);
-      s.quaternion.premultiply(q);
+      s.quaternion.premultiply(q).normalize();
       roundPose(s);
     }
     this.centre();
     this.rebuild();
-    this.app.toast(axis === 'y' ? 'Turned a quarter turn.' : 'Tipped over: a different panel now rests on the table.');
+    this.app.toast(`${axis === 'y' ? 'Turned a quarter turn.' : 'Tipped over onto another face.'} ${this.netSentence()}`);
   }
 
   // Rotate the picked solid in place about the vertical axis, by its own
@@ -971,6 +984,7 @@ export class SolidsWorkspace {
 
   // Ghost preview for moving a solid.
   showGhost(type, edge, position, quaternion, state) {
+    if (this.ghost && this.ghost.userData.type !== type) { this.root.remove(this.ghost); this.ghost.geometry.dispose(); this.ghost = null; }
     if (!this.ghost) {
       const tm = template(type);
       const pos = [];
@@ -984,6 +998,7 @@ export class SolidsWorkspace {
       g.computeVertexNormals();
       this.ghost = new THREE.Mesh(g, new THREE.MeshStandardMaterial({ transparent: true, opacity: 0.45, depthWrite: false, roughness: 0.6 }));
       this.ghost.add(new THREE.LineSegments(new THREE.EdgesGeometry(g), new THREE.LineBasicMaterial({ color: '#1d1f2b' })));
+      this.ghost.userData.type = type;
       this.root.add(this.ghost);
     }
     this.ghost.visible = true;
@@ -1020,11 +1035,12 @@ export class SolidsWorkspace {
       const short = { cube: 'Cube', tetra: 'Tetra', octa: 'Octa', cubocta: 'Cubocta' };
       row(y1, 78, SOLID_TYPES.map((t) => ({ label: short[t], action: () => a.setAddType(t), active: a.addType === t })), 10);
       row(y2, 78, [
-        { label: `Add ${short[a.addType].toLowerCase()}`, action: () => a.addSolid() },
+        { label: `Add ${short[a.addType].toLowerCase()}`, w: 1.2, action: () => a.addSolid() },
         { label: 'Duplicate', action: () => a.duplicate() },
         { label: 'Rotate', action: () => a.rotateSolid() },
         { label: 'Remove', action: () => a.removeSolid() },
-      ]);
+        { label: 'Tip over', action: () => a.turnAll('x') },
+      ], 8);
     } else if (s.tool === 'open') {
       row(y1, 78, [
         { label: 'Group', action: () => a.setOpenMode('group'), active: s.openMode === 'group' },
