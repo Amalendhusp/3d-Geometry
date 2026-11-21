@@ -172,12 +172,14 @@ export function checkForm(model, P) {
   return null;
 }
 
-// Move `moving` vertices by `delta` (pinned ones stay), keeping faces
+// Move `moving` vertices along a path: at(key, t) is where a vertex
+// should be at fraction t of the move (pinned ones stay), keeping faces
 // planar. Returns the positions reached, the fraction of the move done
 // (1 = all of it) and, if less, why it stopped.
-export function editTo(model, start, pins, moving, delta) {
+export function editPath(model, start, pins, moving, at) {
+  moving = moving.filter((k) => !pins.has(k));
   const attempt = (t) => {
-    const targets = new Map(moving.map((k) => [k, start.get(k).clone().addScaledVector(delta, t)]));
+    const targets = new Map(moving.map((k) => [k, at(k, t)]));
     const s = solvePlanar(model, start, pins, targets);
     if (s.dev > PLANAR_TOL) return { ok: false, P: s.P, reason: `face ${s.face} would have to bend: its pinned corners hold it` };
     const why = checkForm(model, s.P);
@@ -192,6 +194,60 @@ export function editTo(model, start, pins, moving, delta) {
     if (r.ok) { lo = mid; best = r; } else hi = mid;
   }
   return { t: lo, P: best ? best.P : new Map([...start].map(([k, v]) => [k, v.clone()])), reason: full.reason };
+}
+
+// Move vertices by `delta`.
+export function editTo(model, start, pins, moving, delta) {
+  return editPath(model, start, pins, moving, (k, t) => start.get(k).clone().addScaledVector(delta, t));
+}
+
+// Best-fit plane (centre and normal) of some vertices.
+export function groupPlane(start, keys) {
+  const pts = keys.map((k) => start.get(k));
+  const { c, n } = fitPlane(pts, pts.map(() => 1));
+  return { c, n };
+}
+
+// Scale a group of vertices about its centre within its own plane (by
+// `s` at the end of the move): the in-plane offsets shrink or grow, the
+// offsets out of the plane stay.
+export function scalePath(start, keys, s) {
+  const { c, n } = groupPlane(start, keys);
+  return (k, t) => {
+    const v = start.get(k).clone().sub(c);
+    const vn = n.clone().multiplyScalar(v.dot(n));
+    return c.clone().add(vn).addScaledVector(v.sub(vn), 1 + (s - 1) * t);
+  };
+}
+
+// What shape each face is, in words: "2 squares, 4 trapezoids".
+export function faceShapes(model, P) {
+  const tol = 5e-4, angTol = 0.5;
+  const counts = new Map();
+  const add = (k) => counts.set(k, (counts.get(k) || 0) + 1);
+  for (const f of model.faces) {
+    const p = f.keys.map((k) => P.get(k));
+    const n = p.length;
+    const side = p.map((v, i) => v.distanceTo(p[(i + 1) % n]));
+    if (n === 3) {
+      const [a, b, c] = side;
+      const eq = (x, y) => Math.abs(x - y) < tol;
+      add(eq(a, b) && eq(b, c) ? 'equilateral triangle' : eq(a, b) || eq(b, c) || eq(a, c) ? 'isosceles triangle' : 'scalene triangle');
+      continue;
+    }
+    if (n !== 4) { add(`${n}-sided face`); continue; }
+    const dir = (i) => p[(i + 1) % n].clone().sub(p[i]).normalize();
+    const par = (i, j) => Math.abs(Math.abs(dir(i).dot(dir(j))) - 1) < 1e-6;
+    const right = [0, 1, 2, 3].every((i) => Math.abs(THREE.MathUtils.radToDeg(dir(i).angleTo(dir((i + 1) % 4))) - 90) < angTol);
+    const equal = side.every((x) => Math.abs(x - side[0]) < tol);
+    if (right && equal) add('square');
+    else if (right) add('rectangle');
+    else if (par(0, 2) && par(1, 3)) add(equal ? 'rhombus' : 'parallelogram');
+    else if (par(0, 2) || par(1, 3)) add('trapezoid');
+    else add('quadrilateral');
+  }
+  const plural = (k, c) => (c === 1 ? k : k.endsWith('s') ? k : `${k}s`);
+  return [...counts].map(([k, c]) => `${c} ${plural(k, c)}`).join(', ');
 }
 
 // Vertices (other than the moving ones) that moved, and edges whose length changed.

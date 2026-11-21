@@ -1916,16 +1916,22 @@ export class SolidsWorkspace {
       ], 8);
       B.push({ kind: 'text', x: M, y: y2, w: W, h: 78, label: 'Pinch or pull the trigger on the form and turn your wrist; with both hands, move them around each other. Only the view turns.' });
     } else if (s.tool === 'shape' && a.shapeEdit.mode === 'edit') {
+      const ed = a.shapeEdit;
       row(y1, 78, [
-        { label: 'Resize', action: () => a.shapeEdit.setMode('resize'), active: false },
-        { label: 'Edit vertices', w: 1.3, action: () => a.shapeEdit.setMode('edit'), active: true },
-        { label: 'Pin base', action: () => a.shapeEdit.pinBase() },
-        { label: 'Clear pins', action: () => a.shapeEdit.clearPins() },
-      ], 8);
+        { label: 'Resize', action: () => ed.setMode('resize'), active: false },
+        { label: 'Edit vertices', w: 1.3, action: () => ed.setMode('edit'), active: true },
+        { label: 'Tap: pin', action: () => ed.setTapMode('pin'), active: ed.tapMode === 'pin' },
+        { label: 'Tap: select', action: () => ed.setTapMode('select'), active: ed.tapMode === 'select' },
+        { label: 'Pin base', action: () => ed.pinBase() },
+        { label: 'Clear pins', action: () => ed.clearPins() },
+      ], 6);
       row(y2, 78, [
-        { label: 'Triangulate at corner', w: 1.6, action: () => a.shapeEdit.triangulateAt() },
-        { label: 'Reset edits', action: () => a.shapeEdit.resetEdits() },
-      ], 8);
+        { label: 'Shrink 10%', action: () => ed.stepScale(0.9) },
+        { label: 'Grow 10%', action: () => ed.stepScale(1.1) },
+        { label: 'Clear sel.', action: () => ed.clearSelection() },
+        { label: 'Triangulate', action: () => ed.triangulateAt() },
+        { label: 'Reset edits', action: () => ed.resetEdits() },
+      ], 6);
     } else if (s.tool === 'shape') {
       row(y1, 78, [
         { label: 'Resize', action: () => a.shapeEdit.setMode('resize'), active: true },
@@ -2189,6 +2195,35 @@ class SolidsTools {
       if (n.lengthSq() < 1e-6) n.set(0, 0, 1);
       ref.plane = new THREE.Plane().setFromNormalAndCoplanarPoint(n, hit.point);
     }
+    if (sel.kind === 'ring') {
+      // Drag the ring in or out: the selected group scales in its plane.
+      const ring = ed.ringWorld();
+      if (!ring) return null;
+      const plane = new THREE.Plane().setFromNormalAndCoplanarPoint(ring.n, ring.c);
+      const onPlane = (p) => (p.kind === 'screen' ? p.ray.intersectPlane(plane, new THREE.Vector3()) : plane.projectPoint(p.grabPoint(null, ref.dist, ref.stick).point, new THREE.Vector3()));
+      let P0 = onPlane(ptr);
+      let d = null, started = false;
+      return {
+        rebase: (p) => { if (!started) { moved.rebase?.(p); P0 = onPlane(p) || P0; } },
+        move: (p) => {
+          if (!started) {
+            if (!moved(p)) return;
+            started = true;
+            d = ed.startScale();
+          }
+          if (!d || !P0) return;
+          const P = onPlane(p);
+          const r0 = P0.distanceTo(ring.c);
+          if (!P || r0 < 1e-4) return;
+          ed.moveScale(d, Math.max(0.05, P.distanceTo(ring.c) / r0));
+        },
+        end: () => {
+          if (!started) { ws.app.toast('Drag the ring inward or outward to scale the selected corners in their plane.'); return; }
+          if (d) ed.endEdit(d);
+        },
+        cancel: () => { if (d) ed.cancelEdit(d); },
+      };
+    }
     let W0 = this.spacePoint(ptr, ref) || hit.point.clone();
     let d = null, started = false;
     return {
@@ -2207,7 +2242,7 @@ class SolidsTools {
         ed.moveEdit(d, delta);
       },
       end: () => {
-        if (!started) { ed.togglePins(sel); return; }
+        if (!started) { if (ed.tapMode === 'select') ed.toggleSelect(sel); else ed.togglePins(sel); return; }
         if (d) ed.endEdit(d);
       },
       cancel: () => { if (d) ed.cancelEdit(d); },

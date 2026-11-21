@@ -48,6 +48,10 @@ export class SolidsUI {
     on('#shapeResetBtn', () => ws.resetShape());
     $$('[data-smode]').forEach((b) => b.addEventListener('click', () => ws.shapeEdit.setMode(b.dataset.smode)));
     on('#pinBaseBtn', () => ws.shapeEdit.pinBase());
+    $$('[data-tapmode]').forEach((b) => b.addEventListener('click', () => ws.shapeEdit.setTapMode(b.dataset.tapmode)));
+    on('#clearSelBtn', () => ws.shapeEdit.clearSelection());
+    on('#shrinkBtn', () => ws.shapeEdit.stepScale(0.9));
+    on('#growBtn', () => ws.shapeEdit.stepScale(1.1));
     on('#clearPinsBtn', () => ws.shapeEdit.clearPins());
     on('#triBtn', () => ws.shapeEdit.triangulateAt());
     on('#resetEditsBtn', () => ws.shapeEdit.resetEdits());
@@ -170,6 +174,7 @@ export class SolidsUI {
     const smode = ws.shapeEdit.mode;
     $$('[data-smode]').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.smode === smode)));
     $$('[data-smode-for]').forEach((g) => { g.hidden = g.dataset.smodeFor !== smode; });
+    $$('[data-tapmode]').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.tapmode === ws.shapeEdit.tapMode)));
     if (ws.state.tool === 'shape') {
       // Refill the size boxes only when the size itself changed, so numbers
       // being typed are never overwritten by an unrelated refresh.

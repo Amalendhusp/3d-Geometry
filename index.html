@@ -361,11 +361,17 @@
       <button data-smode="edit" aria-pressed="false" title="Move corners and edges of the assembled form freely">Edit vertices</button>
       <span class="sep"></span>
       <span class="group" data-smode-for="edit" hidden>
+        <span class="label">Tap</span>
+        <button data-tapmode="pin" aria-pressed="true" title="Taps pin corners, edges or faces (blue)">Pins</button>
+        <button data-tapmode="select" aria-pressed="false" title="Taps add corners, edges or faces to the group (amber)">Selects</button>
         <button id="pinBaseBtn">Pin base</button>
         <button id="clearPinsBtn">Clear pins</button>
-        <button id="triBtn" title="Split the faces at the last corner you touched into triangles, adding fold lines">Triangulate at corner</button>
+        <button id="clearSelBtn">Clear selection</button>
+        <button id="shrinkBtn" title="Scale the selected corners 10% smaller in their plane">Shrink 10%</button>
+        <button id="growBtn" title="Scale the selected corners 10% larger in their plane">Grow 10%</button>
+        <button id="triBtn" title="Split the faces at the last corner you pointed at into triangles, adding fold lines">Triangulate at corner</button>
         <button id="resetEditsBtn">Reset edits</button>
-        <span class="hint">Drag a corner or edge of the floating form: left/right and up/down (Shift: slide level). Tap to pin. Faces stay flat; corners that must follow turn orange. Edge lengths and angles change; the net below is redrawn.</span>
+        <span class="hint">Drag a corner or edge of the floating form (left/right, up/down; Shift: level). Blue = pinned, amber = selected, orange = moved to keep faces flat. Drag a selected corner to move the group; drag the ring to scale it in its plane.</span>
       </span>
       <span class="group" data-smode-for="resize">
       <label class="dim"><span style="color:#e0452b">X</span> width <input id="shapeW" type="number" min="10" max="900" step="1" inputmode="decimal" aria-label="Width in millimetres"></label>

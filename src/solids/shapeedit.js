@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { flatTargets, netPoses } from './layout.js';
-import { editModel, editTo, changes, editsFrom } from './vertexedit.js';
+import { editModel, editTo, editPath, scalePath, groupPlane, faceShapes, changes, editsFrom } from './vertexedit.js';
 import {
   resizable, handleAxes, autoAnchor, lockedAxes, resizePlan, solveShape, captureLayout,
   elPos, elEdge, elVid, edgeAxis, sameEl, AXIS_NAME, AXIS_LETTER,
@@ -17,7 +17,7 @@ import {
 // one undoable change.
 
 const COL = {
-  hover: '#ffe08a', pin: '#2f7bff', change: '#ff8a1f', handle: '#f0b44c',
+  hover: '#ffe08a', pin: '#2f7bff', change: '#ff6a00', handle: '#f0b44c', sel: '#ffb300',
   ghostEdge: '#2b3150', ghostVert: '#2b3150', dot: '#ffffff', anchor: '#7fb2ff', fold: '#17a45f',
 };
 
@@ -54,6 +54,8 @@ export class ShapeEditor {
     this.focusKey = null;
     this.frozen = null;
     this.lastChange = null;
+    this.selected = new Set(); // vertex keys selected as a group in Edit
+    this.tapMode = 'pin'; // what a tap does in Edit: 'pin' or 'select'
   }
 
   get shell() { return this.ws.shell; }
@@ -71,7 +73,10 @@ export class ShapeEditor {
     this.pins = new Set();
     this.lastChange = null;
     this.frozen = null;
-    this.mode = this.supported() && !ws.comp.isEdited() ? 'resize' : 'edit';
+    this.selected = new Set();
+    this.tapMode = 'pin';
+    // Edit vertices is the main mode; Resize (boxes) is one tap away.
+    this.mode = 'edit';
     const sh = this.shell;
     let box;
     if (!sh.flatReport().ok) {
@@ -246,6 +251,7 @@ export class ShapeEditor {
       this.dot(this.ghost, v.clone().add(off), r, color);
     }
     this.sizeLabels(off, f.axes);
+    this.badge(off, 'Resize (box)');
 
     // Net marks: handles at corners, the focused element in all its
     // copies, the pin, the edges that will change, the anchor while dragging.
@@ -365,14 +371,30 @@ export class ShapeEditor {
   pickGhost(ray) {
     if (!this.active) return null;
     this.ws.root.updateMatrixWorld(true);
+    const ring = this.ringWorld();
+    if (ring) {
+      const P = ray.intersectPlane(new THREE.Plane().setFromNormalAndCoplanarPoint(ring.n, ring.c), new THREE.Vector3());
+      if (P) {
+        const t = P.distanceTo(ray.origin);
+        if (Math.abs(P.distanceTo(ring.c) - ring.R) < Math.max(0.008, t * 0.015)) return { panel: null, ghost: { kind: 'ring' }, point: P, distance: t, normal: ray.direction.clone().negate() };
+      }
+    }
     const { verts, edges } = this.ghostParts();
+    // The first ghost face the ray meets hides corners and edges behind it.
+    let faceHit = null;
+    if (this.mode === 'edit' && this.faceMesh) {
+      this.faceMesh.updateMatrixWorld(true);
+      faceHit = new THREE.Raycaster(ray.origin, ray.direction, 0, 20).intersectObject(this.faceMesh, false)[0] || null;
+    }
+    const front = (t, tol) => !faceHit || t <= faceHit.distance + tol;
     let best = null;
     const tolAt = (t) => Math.max(0.006, t * 0.014);
     for (const [vid, v] of verts) {
       const t = v.clone().sub(ray.origin).dot(ray.direction);
-      if (t <= 0) continue;
+      if (t <= 0 || !front(t, tolAt(t))) continue;
       const d = ray.distanceToPoint(v);
-      if (d < tolAt(t) * 1.3 && (!best || d / tolAt(t) < best.score)) best = { score: d / tolAt(t) * 0.8, ghost: { kind: 'vertex', vid }, point: v.clone(), distance: t };
+      // The grab point is on the ray, so a still press never counts as a drag.
+      if (d < tolAt(t) * 1.3 && (!best || d / tolAt(t) < best.score)) best = { score: d / tolAt(t) * 0.8, ghost: { kind: 'vertex', vid }, point: ray.at(t, new THREE.Vector3()), distance: t };
     }
     // A corner within reach always wins over the edges that meet there.
     for (const { e, a, b } of best ? [] : edges) {
@@ -380,13 +402,10 @@ export class ShapeEditor {
       const d2 = ray.distanceSqToSegment(a, b, pOnRay, pOnSeg);
       const t = pOnRay.clone().sub(ray.origin).length();
       const d = Math.sqrt(d2);
-      if (d < tolAt(t) && (!best || d / tolAt(t) < best.score)) best = { score: d / tolAt(t), ghost: { kind: 'edge', edge: e }, point: pOnSeg.clone(), distance: t };
+      if (!front(t, tolAt(t))) continue;
+      if (d < tolAt(t) && (!best || d / tolAt(t) < best.score)) best = { score: d / tolAt(t), ghost: { kind: 'edge', edge: e }, point: pOnRay.clone(), distance: t };
     }
-    if (!best && this.mode === 'edit' && this.faceMesh) {
-      const rc = new THREE.Raycaster(ray.origin, ray.direction, 0, 20);
-      const hit = rc.intersectObject(this.faceMesh, false)[0];
-      if (hit) return { panel: null, ghost: { kind: 'face', panel: this.faceTriPanel[hit.faceIndex] }, point: hit.point.clone(), distance: hit.distance, normal: ray.direction.clone().negate() };
-    }
+    if (!best && faceHit) return { panel: null, ghost: { kind: 'face', panel: this.faceTriPanel[faceHit.faceIndex] }, point: faceHit.point.clone(), distance: faceHit.distance, normal: ray.direction.clone().negate() };
     if (!best) return null;
     return { panel: null, ghost: best.ghost, point: best.point, distance: best.distance, normal: ray.direction.clone().negate() };
   }
@@ -395,6 +414,13 @@ export class ShapeEditor {
   nearGhost(point, maxDist) {
     if (!this.active) return null;
     this.ws.root.updateMatrixWorld(true);
+    const ring = this.ringWorld();
+    if (ring) {
+      const off = point.clone().sub(ring.c);
+      const h = off.dot(ring.n);
+      const inPlane = off.addScaledVector(ring.n, -h).length();
+      if (Math.abs(h) < Math.max(maxDist, 0.02) && Math.abs(inPlane - ring.R) < Math.max(maxDist, 0.02)) return { panel: null, ghost: { kind: 'ring' }, point: point.clone(), distance: Math.abs(h), normal: ring.n.clone(), near: true };
+    }
     const { verts, edges } = this.ghostParts();
     const tol = Math.max(maxDist, 0.02);
     let best = null;
@@ -576,6 +602,7 @@ export class ShapeEditor {
     this.mode = m;
     this.hover = this.hoverE = null;
     this.pin = null;
+    this.selected = new Set();
     this.frozen = null;
     if (m === 'edit') this.frozen = this.ghostOffset();
     this.refresh();
@@ -600,6 +627,7 @@ export class ShapeEditor {
     if (!hit) return null;
     if (hit.ghost) {
       const g = hit.ghost;
+      if (g.kind === 'ring') return { kind: 'ring', keys: [...this.selected], onGhost: true };
       if (g.kind === 'vertex') return { kind: 'vertex', keys: [this.keyOf(g.vid)], onGhost: true };
       if (g.kind === 'edge') return { kind: 'edge', keys: this.edgeKeys(g.edge), onGhost: true };
       if (g.kind === 'face' && g.panel) return { kind: 'face', keys: g.panel.vid.map((v) => this.keyOf(v)), onGhost: true };
@@ -663,15 +691,17 @@ export class ShapeEditor {
       if (pk === hovEdge) return [COL.hover, 2.6];
       if (drag.has(a) && drag.has(b)) return [COL.handle, 2.2];
       if (this.pins.has(a) && this.pins.has(b)) return [COL.pin, 1.8];
+      if (this.selected.has(a) && this.selected.has(b)) return [COL.sel, 1.8];
       if (chEdges.has(pk)) return [COL.change, 1.6];
       if (e.diagonal) return [COL.fold, 1.5];
       return null;
     };
     const colourOfVert = (k) => {
-      if (drag.has(k)) return [COL.handle, 4.5];
+      if (drag.has(k)) return [COL.handle, 4.6];
       if (hovKeys.has(k) && hov.kind === 'vertex') return [COL.hover, 5];
-      if (this.pins.has(k)) return [COL.pin, 3.6];
-      if (moved.has(k)) return [COL.change, 3.6];
+      if (this.pins.has(k)) return [COL.pin, 4];
+      if (moved.has(k)) return [COL.change, 4.2];
+      if (this.selected.has(k)) return [COL.sel, 4.2];
       if (hovKeys.has(k)) return [COL.hover, 3.2];
       return null;
     };
@@ -702,6 +732,17 @@ export class ShapeEditor {
       }
     }
 
+    // Scale ring around a selected group, in the group's plane.
+    const ring = this.ringInfo();
+    if (ring) {
+      const t = new THREE.Mesh(new THREE.TorusGeometry(ring.R, L * 0.016, 8, 64), this.mat(this.editDrag && this.editDrag.scale ? COL.handle : COL.sel, { opacity: 0.85 }));
+      t.position.copy(ring.c).add(off);
+      t.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), ring.n);
+      t.renderOrder = 3;
+      this.ghost.add(t);
+    }
+    this.badge(off, 'Edit vertices');
+
     // The same things in the net, in every copy.
     this.clear(this.marks);
     const lift = new THREE.Vector3(0, L * 0.012, 0);
@@ -731,7 +772,8 @@ export class ShapeEditor {
     const ws = this.ws;
     if (!sel.onGhost) { ws.app.toast('Drag corners and edges on the floating form above; the net below follows. Tapping here pins.'); return null; }
     if (sel.kind === 'face') { ws.app.toast('Drag a corner or an edge. Tap a face to pin all its corners.'); return null; }
-    const free = sel.keys.filter((k) => !this.pins.has(k));
+    const group = sel.keys.some((k) => this.selected.has(k)) ? [...new Set([...this.selected, ...sel.keys])] : sel.keys;
+    const free = group.filter((k) => !this.pins.has(k));
     if (!free.length) { ws.app.toast('That is pinned. Tap it to unpin, or drag another corner or edge.'); return null; }
     ws.stopAnim();
     const model = editModel(ws.shell);
@@ -745,17 +787,108 @@ export class ShapeEditor {
   }
 
   // Move the dragged vertices by `delta` (shell frame) from where they started.
-  moveEdit(d, delta) {
+  moveEdit(d, delta) { this.moveEditAt(d, (k, t) => d.start.get(k).clone().addScaledVector(delta, t)); }
+
+  // Scale the dragged group by `s` about its centre, within its plane.
+  moveScale(d, s) {
+    d.s = s;
+    this.moveEditAt(d, scalePath(d.start, d.keys, s));
+  }
+
+  moveEditAt(d, at) {
     const ws = this.ws;
-    const r = editTo(d.model, d.start, d.pins, d.keys, delta);
+    const r = editPath(d.model, d.start, d.pins, d.keys, at);
     d.t = r.t; d.reason = r.reason; d.P = r.P;
     ws.comp.edits = editsFrom(d.model, r.P);
     this.lastChange = changes(d.model, d.start, r.P, d.keys);
     ws.reshapeEdit(d.prev);
     const k = d.keys[0];
     const lens = [...d.model.nbr.get(k)].map((j) => (r.P.get(k).distanceTo(r.P.get(j)) * 1000).toFixed(0));
-    const at = r.P.get(k).clone().add(this.ghostOffset());
-    ws.setTag(r.t < 1 ? `Edit · stopped: ${r.reason}` : `Edit · edges ${lens.join(' / ')} mm`, ws.shellGroup.localToWorld(at));
+    const where = r.P.get(k).clone().add(this.ghostOffset());
+    const what = d.scale ? `Scale · ${Math.round((1 + (d.s - 1) * r.t) * 100)}%` : `Edit · edges ${lens.join(' / ')} mm`;
+    ws.setTag(r.t < 1 ? `Edit · stopped: ${r.reason}` : what, ws.shellGroup.localToWorld(where));
+  }
+
+  // Start scaling the selected group (ring drag or a step button).
+  startScale() {
+    const ws = this.ws;
+    const keys = [...this.selected].filter((k) => !this.pins.has(k));
+    if (keys.length < 2) { ws.app.toast('Select at least two corners first (tap a face or corners with Tap: Select), then scale them.'); return null; }
+    ws.stopAnim();
+    const model = editModel(ws.shell);
+    ws.pushHistory();
+    const d = { keys, model, start: model.pos, pins: new Set(this.pins), prev: this.netState(), before: ws.history[ws.history.length - 1], t: 1, reason: null, P: null, scale: true, s: 1 };
+    this.editDrag = d;
+    this.lastChange = null;
+    this.refresh();
+    return d;
+  }
+
+  // Buttons: scale the selection by a step (one undo step each).
+  stepScale(factor) {
+    const d = this.startScale();
+    if (!d) return;
+    this.moveScale(d, factor);
+    this.endEdit(d);
+  }
+
+  // Centre, normal and radius of the scale ring (shell frame), or null.
+  ringInfo() {
+    if (this.mode !== 'edit' || this.selected.size < 2) return null;
+    const m = editModel(this.shell);
+    const keys = [...this.selected].filter((k) => m.pos.has(k));
+    if (keys.length < 2) return null;
+    const { c, n } = groupPlane(m.pos, keys);
+    let R = 0;
+    for (const k of keys) { const v = m.pos.get(k).clone().sub(c); R = Math.max(R, v.addScaledVector(n, -v.dot(n)).length()); }
+    return { c, n, R: R * 1.18 + (this.L0 || 0.12) * 0.08 };
+  }
+
+  ringWorld() {
+    const r = this.ringInfo();
+    if (!r) return null;
+    const M = this.ws.shellGroup.matrixWorld;
+    return { c: r.c.clone().add(this.ghostOffset()).applyMatrix4(M), n: r.n.clone().transformDirection(M), R: r.R };
+  }
+
+  // Small floating label naming the Shape mode, above the ghost.
+  badge(off, text) {
+    if (typeof document === 'undefined') return;
+    const b = this.closedBox().translate(off);
+    const L = this.L0 || this.shell.edgeLen;
+    const sp = new THREE.Sprite(this.labelMat(text, text.startsWith('Edit')));
+    sp.position.set((b.min.x + b.max.x) / 2, b.max.y + L * 0.3, (b.min.z + b.max.z) / 2);
+    const h = L * 0.2;
+    sp.scale.set(h * sp.material.userData.aspect, h, 1);
+    sp.renderOrder = 4;
+    this.ghost.add(sp);
+  }
+
+  setTapMode(m) {
+    this.tapMode = m;
+    this.ws.app.toast(m === 'select'
+      ? 'Tap selects: tap corners, edges or a face to add them to the group (amber). Drag one of them to move the group; drag the ring to scale it in its plane.'
+      : 'Tap pins: tap corners, edges or a face to pin them (blue); pinned corners never move.');
+    this.ws.app.notify?.();
+  }
+
+  toggleSelect(sel) {
+    const ws = this.ws;
+    const all = sel.keys.every((k) => this.selected.has(k));
+    for (const k of sel.keys) { if (all) this.selected.delete(k); else this.selected.add(k); }
+    ws.app.toast(this.selected.size
+      ? `${this.selected.size} corner${this.selected.size > 1 ? 's' : ''} selected (amber). Drag one to move them together${this.selected.size > 1 ? ', or drag the ring (or Shrink / Grow) to scale them in their plane' : ''}.`
+      : 'Nothing selected.');
+    ws.app.haptic?.();
+    this.refresh();
+    ws.app.notify?.();
+  }
+
+  clearSelection() {
+    this.selected.clear();
+    this.ws.app.toast('Selection cleared.');
+    this.refresh();
+    this.ws.app.notify?.();
   }
 
   endEdit(d) {
@@ -787,8 +920,10 @@ export class ShapeEditor {
       const len = e.uses.map((u) => { const w = sh.worldPoly(u.panel); return w[u.i].distanceTo(w[(u.i + 1) % w.length]); });
       return Math.abs(len[0] - len[1]) < 1e-9;
     });
-    const stop = d.t < 1 ? `Stopped at the valid limit (${Math.round(d.t * 100)}% of the drag): ${d.reason}. ` : '';
-    ws.app.toast(`${stop}${edges} edge${edges === 1 ? '' : 's'} changed length; ${others ? `${others} other corner${others === 1 ? '' : 's'} moved to keep faces flat (orange)` : 'no other corner had to move'}. Closed ${closed ? '✓' : '✗'} · faces planar ${planar ? '✓' : '✗'} · seams match ${seams ? '✓' : '✗'} · no self-intersection ✓.${netMsg} One step: Undo puts it back.`, 8000);
+    const stop = d.t < 1 ? `Stopped at the valid limit (${Math.round(d.t * 100)}% of the move): ${d.reason}. ` : '';
+    const scaled = d.scale ? `Scaled ${d.keys.length} corners to ${Math.round((1 + (d.s - 1) * d.t) * 100)}% in their plane. ` : '';
+    const shapes = faceShapes(editModel(sh), editModel(sh).pos);
+    ws.app.toast(`${stop}${scaled}Faces: ${shapes}. ${edges} edge${edges === 1 ? '' : 's'} changed length; ${others ? `${others} other corner${others === 1 ? '' : 's'} moved to keep faces flat (orange)` : 'no other corner had to move'}. Closed ${closed ? '✓' : '✗'} · faces planar ${planar ? '✓' : '✗'} · seams match ${seams ? '✓' : '✗'} · no self-intersection ✓.${netMsg} One step: Undo puts it back.`, 8000);
     this.refresh();
     ws.app.notify?.();
   }
