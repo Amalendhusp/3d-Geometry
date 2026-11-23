@@ -141,7 +141,8 @@ export function refusalText(check) {
       parts.push(`Piece ${pc.index}: ${r.length} hinges are still folded (hinges ${r.slice(0, 4).map((x) => x.e.no).join(', ')}${r.length > 4 ? ', …' : ''}; up to ${worst.toFixed(2)}° from flat).`);
     } else parts.push(`Piece ${pc.index} is not flat (up to ${(pc.maxDev * 1000).toFixed(2)} mm out of its plane).`);
   }
-  if (check.excluded.some((pc) => pc.valid)) parts.push('A piece is exported once it lies flat: press Lay net on surface (Net → Arrange), or open those hinges fully.');
+  const folded = check.excluded.filter((pc) => pc.valid).reduce((n, pc) => n + pc.residual.length, 0);
+  if (check.excluded.some((pc) => pc.valid)) parts.push(`A piece is exported once it lies flat: press Lay net on surface (Net → Arrange), or open ${folded === 1 ? 'that hinge' : 'those hinges'} fully.`);
   return parts.join(' ');
 }
 

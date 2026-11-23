@@ -1235,7 +1235,10 @@ export class SolidsWorkspace {
     let msg = hints[t];
     // The view turn and magnification stay as they are: navigation is
     // separate from building and editing.
-    if ((this.isTurned() || this.isMagnified()) && t !== prev) msg += ` (View turned ${Math.round(this.viewTurnDegrees())}°${this.isMagnified() ? `, magnified ×${this.view.scale.toFixed(2)}` : ''}; Reset view puts it back.)`;
+    if ((this.isTurned() || this.isMagnified()) && t !== prev) {
+      const v = [this.isTurned() ? `turned ${Math.round(this.viewTurnDegrees())}°` : '', this.isMagnified() ? `magnified ×${this.view.scale.toFixed(2)}` : ''].filter(Boolean).join(', ');
+      msg += ` (View ${v}; Reset view puts it back.)`;
+    }
     this.app.toast(msg, t === 'inspect' || t === 'layout' ? 6000 : undefined);
     if (t === 'layout' && prev !== 'layout' && prev !== 'shape' && !this.shell.flatReport().ok) this.layFlat({ intro: true });
     if (t === 'layout' && prev === 'shape') {

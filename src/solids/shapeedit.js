@@ -881,6 +881,8 @@ export class ShapeEditor {
     if (typeof document === 'undefined') return;
     const b = this.closedBox().translate(off);
     const L = this.L0 || this.shell.edgeLen;
+    // In Arrange the ghost is only shown; editing happens in Reshape.
+    if (this.ws.state.tool !== 'shape') text = 'Assembled form · Reshape to edit';
     const sp = new THREE.Sprite(this.labelMat(text, text.startsWith('Edit')));
     sp.position.set((b.min.x + b.max.x) / 2, b.max.y + L * 0.3, (b.min.z + b.max.z) / 2);
     const h = L * 0.2;
