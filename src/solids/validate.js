@@ -120,7 +120,7 @@ export function validateLayout(shell, tol = TOL) {
   const ov = shell.overlapReport();
   for (const [a, b] of ov.pairs) {
     const pa = pieceOf.get(a), pb = pieceOf.get(b);
-    if (pa === pb) add({ kind: 'overlap', severity: 'error', piece: pa, panels: [a, b], edges: [], text: `Panels P${a.no} and P${b.no} overlap inside piece ${pa.index}: as laid out, this piece cannot be cut from one sheet. Try Other nets, or cut a hinge to split it.` });
+    if (pa === pb) add({ kind: 'overlap', severity: 'error', piece: pa, panels: [a, b], edges: [], text: `Panels P${a.no} and P${b.no} overlap inside piece ${pa.index}: as laid out, this piece cannot be cut from one sheet. Resolve overlaps finds the fewest additional cuts and keeps the rest of the net; Other nets searches a different hinge layout instead.` });
     else add({ kind: 'overlap', severity: 'warning', panels: [a, b], edges: [], text: `Panels P${a.no} (piece ${pa.index}) and P${b.no} (piece ${pb.index}) overlap: move the pieces apart or press Arrange pieces.` });
   }
   for (const pc of pieces) {

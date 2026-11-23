@@ -1894,7 +1894,7 @@ export class SolidsWorkspace {
     }
     const ov = check.issues.filter((i) => i.kind === 'overlap');
     const within = ov.filter((i) => i.severity === 'error').length;
-    if (within) msg += ` ${within} panel pair${within > 1 ? 's' : ''} overlap inside a piece (red), so that piece is not a valid net. Press Other nets to look for an overlap-free arrangement first; cutting a hinge to split the piece is the fallback.`;
+    if (within) msg += ` ${within} panel pair${within > 1 ? 's' : ''} overlap inside a piece (red), so that piece is not a valid net. Resolve overlaps finds the fewest additional cuts and keeps the rest of your layout; Other nets searches a different hinge layout instead.`;
     if (ov.length - within) msg += ` ${ov.length - within} pair${ov.length - within > 1 ? 's' : ''} overlap between pieces: drag them apart or press Arrange pieces.`;
     else if (!folded) msg += ' No overlaps within or between pieces.';
     if (check.errors || check.warnings) msg += ' See the issue list: Focus issue shows each one.';
