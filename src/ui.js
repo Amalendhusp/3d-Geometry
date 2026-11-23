@@ -153,8 +153,8 @@ export class UI {
     $('#snapBtn').setAttribute('aria-pressed', String(st.snap));
     $('#snapBtn').textContent = st.snap ? 'Snap on' : 'Snap off';
     $$('[data-layers]').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.layers === st.layerMode)));
-    $('#undoBtn').disabled = !app.history.canUndo;
-    $('#sheetLabel').textContent = `${fmt(app.paper.W * 100)} × ${fmt(app.paper.H * 100)} cm sheet`;
+    if (app.space !== 'solids') $('#undoBtn').disabled = !app.history.canUndo;
+    if ($('#sheetLabel')) $('#sheetLabel').textContent = `${fmt(app.paper.W * 100)} × ${fmt(app.paper.H * 100)} cm sheet`;
     const sel = !!app.tools.session;
     for (const id of ['valleyBtn', 'mountainBtn', 'flattenBtn', 'foldAngle']) $('#' + id).disabled = !sel;
     $('#foldHint').hidden = sel;

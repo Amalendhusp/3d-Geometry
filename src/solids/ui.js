@@ -21,70 +21,55 @@ export class SolidsUI {
   build() {
     const ws = this.ws;
     const app = this.app;
+    app.solidsPresets = PRESETS;
     $$('[data-space]').forEach((b) => b.addEventListener('click', () => app.setSpace(b.dataset.space)));
-    $$('[data-stool]').forEach((b) => b.addEventListener('click', () => ws.setTool(b.dataset.stool)));
+    $$('[data-stool]').forEach((b) => b.addEventListener('click', () => { ws.setTool(b.dataset.stool); this.sheetFor(b); }));
     $$('[data-omode]').forEach((b) => b.addEventListener('click', () => ws.setOpenMode(b.dataset.omode)));
-    const on = (id, fn) => $(id).addEventListener('click', fn);
+    $$('[data-addtype]').forEach((b) => b.addEventListener('click', () => ws.setAddType(b.dataset.addtype)));
+    const on = (id, fn) => { const el = $(id); if (el) el.addEventListener('click', fn); };
     on('#unfoldAllBtn', () => ws.unfoldAll());
     on('#refoldAllBtn', () => ws.refoldAll());
     on('#resetShellBtn', () => ws.resetLayout());
-    on('#saveShellBtn', () => ws.save());
-    on('#loadShellBtn', () => ws.load());
-    on('#addCubeBtn', () => ws.addSolid($('#addTypeSel').value));
+    on('#addCubeBtn', () => ws.addSolid(ws.addType));
     $('#addTypeSel').addEventListener('change', (e) => ws.setAddType(e.target.value));
-    on('#exportShellBtn', () => this.openExport());
     on('#exportClose', () => { $('#exportDialog').hidden = true; });
     on('#exportJsonBtn', () => this.exportFile());
     on('#exportSvgBtn', () => this.exportSVG());
     on('#exportPngBtn', () => this.exportPNG());
-    // Navigation bar (every workspace).
+    // View toolbar (every workspace and tab).
     on('#navFit', () => app.nav.fitAll());
     on('#navFocus', () => app.nav.focusSelected());
     on('#navReset', () => app.nav.resetView());
     on('#navTurn', () => ws.setNavTurn());
     on('#navTurn90', () => ws.stepView('up', 90));
     on('#navTip90', () => ws.stepView('tip', 90));
-    $$('[data-netmode]').forEach((b) => b.addEventListener('click', () => ws.setTool(b.dataset.netmode)));
+    on('#navMore', () => { const p = $('#navMorePanel'); p.hidden = !p.hidden; $('#navMore').setAttribute('aria-expanded', String(!p.hidden)); app.layoutChanged?.(); });
+    on('#navLabels', () => { const nb = $('#navBar'); nb.classList.toggle('labelled'); this.store('navLabels', nb.classList.contains('labelled') ? '1' : ''); this.render(); app.layoutChanged?.(); });
+    if (this.load('navLabels') === '1') $('#navBar').classList.add('labelled');
     on('#layFlatBtn', () => ws.layFlat());
     on('#arrangeBtn', () => ws.arrangePieces());
     on('#otherNetsBtn', () => ws.otherNets());
     on('#rotLeftBtn', () => ws.rotatePiece(15));
     on('#rotRightBtn', () => ws.rotatePiece(-15));
     on('#labelsBtn', () => ws.toggleLabels());
-    on('#shapeApplyBtn', () => ws.setSizeMM({ x: $('#shapeW').value, y: $('#shapeH').value, z: $('#shapeD').value }));
-    on('#shapeResetBtn', () => ws.resetShape());
-    $$('[data-smode]').forEach((b) => b.addEventListener('click', () => ws.shapeEdit.setMode(b.dataset.smode)));
-    on('#pinBaseBtn', () => ws.shapeEdit.pinBase());
-    $$('[data-tapmode]').forEach((b) => b.addEventListener('click', () => ws.shapeEdit.setTapMode(b.dataset.tapmode)));
     on('#clearSelBtn', () => ws.shapeEdit.clearSelection());
-    on('#shrinkBtn', () => ws.shapeEdit.stepScale(0.9));
-    on('#growBtn', () => ws.shapeEdit.stepScale(1.1));
-    on('#clearPinsBtn', () => ws.shapeEdit.clearPins());
     on('#triBtn', () => ws.shapeEdit.triangulateAt());
     on('#resetEditsBtn', () => ws.shapeEdit.resetEdits());
-    on('#shapeUnpinBtn', () => (ws.shapeEdit.pin ? ws.shapeEdit.togglePin(ws.shapeEdit.pin) : app.toast('Nothing is pinned. Tap a side or corner of the net to pin it.')));
     on('#idsBtn', () => ws.toggleIds());
-    on('#importShellBtn', () => $('#importShellFile').click());
-    on('#suggestBtn', () => ws.suggestLayouts());
+    on('#suggestBtn', () => ws.resolveOverlaps());
     on('#altApplyBtn', () => ws.applyAlternative());
     on('#altMineBtn', () => { ws.endAlternatives(); app.toast('Kept my layout.'); });
     $$('[data-etap]').forEach((b) => b.addEventListener('click', () => ws.setEdgeTap(b.dataset.etap)));
     on('#exportGlbBtn', () => this.exportModel('glb'));
     on('#exportObjBtn', () => this.exportModel('obj'));
     on('#focusIssueBtn', () => ws.focusIssue());
-    on('#nextIssueBtn', () => ws.nextIssue());
+    on('#nextIssueBtn', () => ws.nextIssue(1));
     on('#clearIssueBtn', () => ws.clearIssueFocus());
-    on('#issueListBtn', () => { this.listOpen = !this.listOpen; this.render(); });
     on('#svgIssuesBtn', () => {
       $('#exportDialog').hidden = true;
       if (ws.state.tool !== 'layout') ws.setTool('layout');
+      this.openDrop('errors');
       ws.focusIssue(0);
-    });
-    $('#importShellFile').addEventListener('change', async (e) => {
-      const f = e.target.files && e.target.files[0];
-      e.target.value = '';
-      if (!f) return;
-      try { ws.loadData(JSON.parse(await f.text()), 'Imported'); } catch { app.toast('That file could not be read as a composition.'); }
     });
     on('#dupCubeBtn', () => ws.duplicate());
     on('#rotCubeBtn', () => ws.rotateSolid());
@@ -95,16 +80,163 @@ export class SolidsUI {
     on('#setBaseBtn', () => ws.setBase());
     on('#defaultNetBtn', () => ws.defaultNet());
     on('#checkNetBtn', () => ws.checkNet());
-    const sel = $('#presetSel');
-    sel.appendChild(new Option('Choose…', ''));
-    for (const [k, p] of Object.entries(PRESETS)) sel.appendChild(new Option(p.label, k));
-    sel.addEventListener('change', () => {
-      if (sel.value) ws.preset(sel.value);
-      sel.value = '';
-    });
     const ang = $('#hingeAngle');
     ang.addEventListener('input', () => { ws.setAngle(Number(ang.value), false); this.label(Number(ang.value)); });
     ang.addEventListener('change', () => ws.setAngle(Number(ang.value), true));
+
+    // Undo / Redo (both workspaces).
+    // (Undo is bound by the Paper UI through the shared action.)
+    on('#redoBtn', () => app.actions.redo());
+
+    // Project menu.
+    const menu = $('#projectMenu');
+    const closeMenu = () => { menu.hidden = true; $('#menuBtn').setAttribute('aria-expanded', 'false'); };
+    on('#menuBtn', (e) => { e.stopPropagation(); menu.hidden = !menu.hidden; $('#menuBtn').setAttribute('aria-expanded', String(!menu.hidden)); if (!menu.hidden) menu.querySelector('button')?.focus(); });
+    document.addEventListener('pointerdown', (e) => { if (!menu.hidden && !menu.contains(e.target) && e.target !== $('#menuBtn') && !$('#menuBtn').contains(e.target)) closeMenu(); });
+    document.addEventListener('keydown', (e) => { if (e.key === 'Escape') { closeMenu(); this.closeDrops(); } });
+    const item = (id, fn) => on(id, () => { closeMenu(); fn(); });
+    menu.addEventListener('click', (e) => { if (e.target.closest('button')) closeMenu(); });
+    item('#newBtn', () => this.newProject());
+    item('#loadShellBtn', () => this.openGallery());
+    item('#saveShellBtn', () => this.saveProject());
+    item('#importShellBtn', () => this.importFile());
+    item('#exportShellBtn', () => this.openExport());
+    $('#importShellFile').addEventListener('change', async (e) => {
+      const f = e.target.files && e.target.files[0];
+      e.target.value = '';
+      if (!f) return;
+      let data = null;
+      try { data = JSON.parse(await f.text()); } catch { app.toast('That file could not be read as a composition.'); return; }
+      if (app.space !== 'solids') app.setSpace('solids');
+      ws.importProject(data, f.name);
+    });
+    on('#galleryClose', () => { $('#galleryDialog').hidden = true; });
+    on('#galleryImport', () => { $('#galleryDialog').hidden = true; this.importFile(); });
+    on('#newCancel', () => { $('#newDialog').hidden = true; });
+    on('#saveCancel', () => { $('#saveDialog').hidden = true; this.afterSave = null; });
+    on('#saveConfirm', () => this.confirmSave());
+    $('#saveName').addEventListener('keydown', (e) => { if (e.key === 'Enter') this.confirmSave(); });
+    on('#confirmCancel', () => this.answerConfirm('cancel'));
+    on('#confirmDiscard', () => this.answerConfirm('discard'));
+    on('#confirmSave', () => this.answerConfirm('save'));
+    const grid = $('#presetGrid');
+    for (const [k, p] of Object.entries(PRESETS)) {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.textContent = p.label;
+      b.dataset.preset = k;
+      b.addEventListener('click', () => { $('#newDialog').hidden = true; this.protect(() => { if (app.space !== 'solids') app.setSpace('solids'); ws.newProject(k); app.toast(`New project: ${p.label}.`); }); });
+      grid.appendChild(b);
+    }
+    window.addEventListener('beforeunload', (e) => { if (ws.isDirty() && ws.changes > 0) { e.preventDefault(); e.returnValue = ''; } });
+
+    // Diagnostics chips: collapsed by default.
+    on('#infoChip', () => this.toggleDrop('info'));
+    on('#errChip', () => this.toggleDrop('errors'));
+
+    // Phone: tools in an expandable sheet.
+    on('#sheetToggle', () => { this.sheetOpen = !this.sheetOpen; this.render(); app.layoutChanged?.(); });
+    // Crossing the phone width (rotating a tablet, resizing a window):
+    // the sheet starts collapsed on a phone and is always open on desktop.
+    let wasPhone = window.innerWidth <= 640;
+    window.addEventListener('resize', () => {
+      const phone = window.innerWidth <= 640;
+      if (phone !== wasPhone) { wasPhone = phone; this.sheetOpen = false; this.renderSheet(); app.layoutChanged?.(); }
+    });
+  }
+
+  store(k, v) { try { localStorage.setItem(`pfs.ui.${k}`, v); } catch { /* ignore */ } }
+  load(k) { try { return localStorage.getItem(`pfs.ui.${k}`); } catch { return null; } }
+
+  // On phones, choosing a tab or a Net sub-tool opens its tools.
+  sheetFor(b) {
+    if (window.innerWidth > 640) return;
+    if (b.closest('#solidTabs') || b.closest('.subtools')) { this.sheetOpen = true; this.render(); this.app.layoutChanged?.(); }
+  }
+
+  toggleDrop(which) { this.drop = this.drop === which ? null : which; this.render(); this.app.layoutChanged?.(); }
+  openDrop(which) { this.drop = which; this.render(); this.app.layoutChanged?.(); }
+  closeDrops() { if (this.drop) { this.drop = null; this.render(); this.app.layoutChanged?.(); } }
+
+  // ------------------------------------------------------------- projects
+
+  // Run `fn` once unsaved changes are dealt with (Save / Don't save / Cancel).
+  protect(fn) {
+    const ws = this.ws;
+    if (this.app.space !== 'solids' || !ws.isDirty() || !ws.changes) { fn(); return; }
+    const info = ws.projectInfo();
+    $('#confirmText').textContent = `“${info.name}” has changes that are not saved. Save them before replacing it?`;
+    $('#confirmDialog').hidden = false;
+    this.pendingConfirm = fn;
+    $('#confirmSave').focus();
+  }
+
+  answerConfirm(choice) {
+    const fn = this.pendingConfirm;
+    this.pendingConfirm = null;
+    $('#confirmDialog').hidden = true;
+    if (!fn || choice === 'cancel') return;
+    if (choice === 'discard') { fn(); return; }
+    this.saveProject(fn);
+  }
+
+  saveProject(after = null) {
+    const ws = this.ws;
+    if (this.app.space !== 'solids') { this.app.toast('Projects are saved from Solids. Paper sheets are kept while this page is open.'); return; }
+    if (ws.projectInfo().id) { if (ws.saveProject() && after) after(); return; }
+    this.afterSave = after;
+    const inp = $('#saveName');
+    inp.value = ws.projectInfo().name === 'Untitled' ? ws.autoName() : ws.projectInfo().name;
+    $('#saveDialog').hidden = false;
+    inp.focus(); inp.select();
+  }
+
+  confirmSave() {
+    const name = $('#saveName').value.trim() || this.ws.autoName();
+    $('#saveDialog').hidden = true;
+    const ok = this.ws.saveProject(name);
+    const after = this.afterSave;
+    this.afterSave = null;
+    if (ok && after) after();
+  }
+
+  newProject() {
+    if (this.app.space !== 'solids') { this.app.ui?.openSheet?.(); $('#paperBtn')?.click(); return; }
+    $('#newDialog').hidden = false;
+  }
+
+  importFile() { this.protect(() => $('#importShellFile').click()); }
+
+  openGallery() {
+    const ws = this.ws;
+    const cards = $('#galleryCards');
+    cards.replaceChildren();
+    const list = ws.projectList();
+    if (!list.length) {
+      const p = document.createElement('p');
+      p.className = 'empty';
+      p.textContent = 'No saved projects yet. Save puts the current project here.';
+      cards.appendChild(p);
+    }
+    for (const e of list) {
+      const card = document.createElement('div');
+      card.className = 'card';
+      card.dataset.id = e.id;
+      const th = document.createElement('div');
+      th.className = 'thumb';
+      if (e.thumb) th.style.backgroundImage = `url(${e.thumb})`;
+      const b = document.createElement('b'); b.textContent = e.name;
+      const sm = document.createElement('small'); sm.textContent = `${new Date(e.savedAt).toLocaleString()}${e.summary ? ` · ${e.summary}` : ''}`;
+      const row = document.createElement('div'); row.className = 'row';
+      const open = document.createElement('button'); open.type = 'button'; open.className = 'primary'; open.textContent = 'Open';
+      open.addEventListener('click', () => { $('#galleryDialog').hidden = true; this.protect(() => { if (this.app.space !== 'solids') this.app.setSpace('solids'); ws.openProject(e.id); }); });
+      const del = document.createElement('button'); del.type = 'button'; del.textContent = 'Delete';
+      del.addEventListener('click', () => { if (window.confirm(`Delete “${e.name}” from this browser? This cannot be undone.`)) { ws.deleteProject(e.id); this.openGallery(); } });
+      row.append(open, del);
+      card.append(th, b, sm, row);
+      cards.appendChild(card);
+    }
+    $('#galleryDialog').hidden = false;
   }
 
   openExport() {
@@ -121,7 +253,7 @@ export class SolidsUI {
     const ex = check.exportable;
     const closed = ws.shell.isClosed();
     let t;
-    if (closed) t = 'The form is closed: unfold it (Layout, Lay net on surface) to export the net.';
+    if (closed) t = 'The form is closed: unfold it (Net → Arrange, Arrange net on surface) to export the net.';
     else if (ex.length === n) t = `All ${n} piece${n > 1 ? 's' : ''} will be exported${check.allOnTable ? '' : ' (tilted or raised pieces are drawn from their own plane)'}.`;
     else if (ex.length) t = `${ex.length} of ${n} pieces will be exported. Left out: ${check.excluded.map((pc) => `piece ${pc.index} (${pc.valid ? 'not flat' : 'invalid panels'})`).join(', ')}.`;
     else t = `Nothing can be exported yet. ${refusalText(check)}`;
@@ -136,12 +268,19 @@ export class SolidsUI {
   renderIssues() {
     const ws = this.ws;
     const card = $('#issueCard');
-    const tool = ws.state.tool;
-    const show = this.app.space === 'solids' && (tool === 'layout' || tool === 'shape') && !ws.shell.isClosed() && !ws.anim;
+    const show = this.app.space === 'solids' && this.drop === 'errors';
     card.hidden = !show;
     if (!show) return;
+    if (ws.shell.isClosed() || ws.anim) {
+      $('#issueSummary').textContent = ws.anim ? 'checking…' : `${ws.overlapPairs || 0} intersecting pair${ws.overlapPairs === 1 ? '' : 's'}`;
+      $('#issueText').textContent = ws.anim ? 'Waiting for the movement to finish.' : `The form is closed. ${ws.overlapPairs ? 'Panels that pass through each other are red. ' : 'No panels pass through each other. '}The layout check (folds, overlaps, flatness) applies once the net is unfolded.`;
+      $('#issueCard .iacts').hidden = true;
+      $('#issueList').hidden = true;
+      this.issueSig = null;
+      return;
+    }
     const check = ws.layoutCheck();
-    if (this.listOpen === undefined) this.listOpen = window.innerWidth > 640;
+    this.listOpen = true;
     $('#issueSummary').textContent = ws.issueSummary(check);
     card.classList.toggle('ok', !check.errors && !check.warnings);
     const cur = ws.focusedIssue();
@@ -152,6 +291,7 @@ export class SolidsUI {
       : has ? `${check.issues.length} item${check.issues.length > 1 ? 's' : ''} to look at. Focus issue highlights the first one.` : 'Nothing to fix: every piece is flat, valid and clear of the others.';
     $('#issueCard .iacts').hidden = !has;
     $('#focusIssueBtn').disabled = !has;
+    $('#focusIssueBtn').textContent = cur ? 'Focus' : 'Highlight first';
     $('#nextIssueBtn').disabled = !has || (check.issues.length < 2 && !!cur);
     $('#clearIssueBtn').hidden = !cur;
     const btn = $('#issueListBtn');
@@ -173,7 +313,8 @@ export class SolidsUI {
       sev.textContent = sevName[is.severity];
       b.append(sev, document.createTextNode(is.text));
       b.setAttribute('aria-current', String(!!cur && i === ws.issueIdx));
-      b.addEventListener('click', () => ws.focusIssue(i));
+      // Highlight its panels, edges or corners; Focus brings it into view.
+      b.addEventListener('click', () => ws.focusIssue(i, { camera: false }));
       li.appendChild(b);
       ol.appendChild(li);
     });
@@ -254,12 +395,13 @@ export class SolidsUI {
     const card = $('#altCard');
     card.hidden = !a || this.app.space !== 'solids';
     if (!a) { this.altSig = null; return; }
+    if (this.drop) { this.drop = null; }
     const res = a.result;
     $('#altSummary').textContent = a.searching ? `trying ${a.level} cut${a.level === 1 ? '' : 's'}… ${a.nodes} checked` : res ? `${res.pairs.length} overlapping pair${res.pairs.length === 1 ? '' : 's'} · ${a.list.length} option${a.list.length === 1 ? '' : 's'} · ${(res.ms / 1000).toFixed(1)} s` : '';
     $('#altNote').textContent = a.searching ? 'Keeping your hinges and cuts: one additional cut is tried first, then two, and so on.' : res ? res.note : '';
     const cur = a.idx >= 0 ? a.list[a.idx] : null;
     $('#altApplyBtn').disabled = a.searching || !cur || !cur.valid;
-    $('#altApplyBtn').textContent = cur && !cur.valid ? 'Not valid' : 'Apply';
+    $('#altApplyBtn').textContent = cur && !cur.valid ? 'Not valid' : 'Accept';
     const sig = `${a.searching}|${a.idx}|${a.list.length}`;
     if (sig === this.altSig) return;
     this.altSig = sig;
@@ -326,42 +468,72 @@ export class SolidsUI {
     $$('[data-space]').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.space === app.space)));
     $$('[data-nav-solids]').forEach((b) => { b.hidden = !solids; });
     $('#navFocus').hidden = !solids;
-    if (!solids) { $('#issueCard').hidden = true; return; }
+    const labelled = $('#navBar').classList.contains('labelled');
+    $('#navLabels').setAttribute('aria-pressed', String(labelled));
+    $('#navLabels .nl').textContent = labelled ? 'Hide labels' : 'Show labels';
+    // Undo / Redo for the active workspace.
+    $('#undoBtn').disabled = solids ? ws.history.length === 0 : !app.history.canUndo;
+    $('#redoBtn').disabled = solids ? !ws.canRedo() : !app.history.canRedo;
+    // Project title.
+    const info = ws.projectInfo();
+    $('#projectName').textContent = solids ? info.name : 'Paper sheet';
+    const st = $('#projectState');
+    const dirty = solids && info.dirty && !!ws.changes;
+    st.textContent = !solids ? `${(app.paper.W * 100).toFixed(0)} × ${(app.paper.H * 100).toFixed(0)} cm` : dirty ? 'Unsaved changes' : info.savedAt ? `Saved ${new Date(info.savedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}` : 'Not saved yet';
+    st.classList.toggle('dirty', dirty);
+    $('#menuTitle').textContent = `${$('#projectName').textContent} · ${st.textContent}`;
+    $('#saveShellBtn').disabled = !solids;
+    $('#diagChips').hidden = !solids;
+    if (!solids) { $('#issueCard').hidden = true; $('#infoPanel').hidden = true; $('#altCard').hidden = true; this.renderSheet(); return; }
     const tool = ws.state.tool;
-    const netTool = tool === 'layout' || tool === 'shape';
-    $$('[data-stool]').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.stool === tool || (b.dataset.stool === 'net' && netTool) || (b.dataset.stool === 'build' && tool === 'inspect'))));
-    $$('[data-netmode]').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.netmode === tool)));
+    const netTools = ['open', 'edges', 'join', 'tri', 'layout'];
+    const tab = tool === 'build' || tool === 'inspect' ? 'solid' : tool === 'shape' ? 'surface' : netTools.includes(tool) ? 'net' : 'solid';
+    const sub = tab === 'net' ? (tool === 'layout' && ws.state.netSub === 'alts' ? 'alts' : tool) : null;
+    $$('#solidTabs [data-tab]').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.tab === tab)));
+    $$('.subtools [data-stool]').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.stool === sub)));
+    $$('[data-tabfor]').forEach((g) => { g.hidden = g.dataset.tabfor !== tab; });
+    const ctx = tab === 'net' ? sub : tool === 'inspect' ? 'build' : tool;
+    $$('[data-sfor]').forEach((c) => { c.hidden = c.dataset.sfor !== ctx; });
+    const subName = { open: 'Open', edges: 'Edit edge', join: 'Join edge', tri: 'Triangulate', layout: 'Arrange', alts: 'Alternate nets' };
+    $('#sheetTitle').textContent = tab === 'solid' ? 'Solid Modeling' : tab === 'surface' ? 'Surface Modeling · Modify' : `Net · ${subName[sub] || ''}`;
     $('#navTurn').setAttribute('aria-pressed', String(!!ws.navTurn));
-    $$('[data-sfor]').forEach((c) => { c.hidden = c.dataset.sfor !== ws.state.tool; });
     $$('[data-omode]').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.omode === ws.state.openMode)));
-    $('#solidsStats').textContent = ws.statusLine();
-    $('#undoBtn').disabled = ws.history.length === 0;
-    $('#sheetLabel').textContent = `${ws.solidsText()} · ${ws.shell.panels.length} panels`;
+    $$('[data-addtype]').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.addtype === ws.addType)));
     if ($('#addTypeSel').value !== ws.addType) $('#addTypeSel').value = ws.addType;
     $('#labelsBtn').setAttribute('aria-pressed', String(!!ws.state.showLabels));
-    const smode = ws.shapeEdit.mode;
-    $$('[data-smode]').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.smode === smode)));
-    $$('[data-smode-for]').forEach((g) => { g.hidden = g.dataset.smodeFor !== smode; });
-    $$('[data-tapmode]').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.tapmode === ws.shapeEdit.tapMode)));
-    if (ws.state.tool === 'shape') {
-      // Refill the size boxes only when the size itself changed, so numbers
-      // being typed are never overwritten by an unrelated refresh.
-      const size = ws.shapeSize();
-      const key = size.toArray().map((v) => v.toFixed(6)).join();
-      if (key !== this.sizeKey) {
-        this.sizeKey = key;
-        for (const [id, v] of [['#shapeW', size.x], ['#shapeH', size.y], ['#shapeD', size.z]]) {
-          const el = $(id);
-          if (document.activeElement !== el) el.value = (Math.round(v * 10000) / 10).toString();
-        }
-      }
-    } else this.sizeKey = null;
     $('#idsBtn').setAttribute('aria-pressed', String(!!ws.state.showIds));
+    $$('[data-etap]').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.etap === (ws.state.edgeTap || 'switch'))));
     this.syncSolidAngle();
+    // Diagnostics: Info and Errors chips, collapsed by default.
+    const closed = ws.shell.isClosed();
+    const check = !closed && !ws.anim ? ws.layoutCheck() : null;
+    const nErr = check ? check.errors : (ws.overlapPairs || 0);
+    const nWarn = check ? check.warnings : 0;
+    const badge = $('#errCount');
+    badge.textContent = String(nErr + nWarn);
+    badge.className = `n${nErr ? ' bad' : nWarn ? ' warn' : ''}`;
+    $('#errChip .cl').textContent = nErr || nWarn ? (nErr ? 'Errors' : 'Warnings') : 'No errors';
+    $('#infoChip').setAttribute('aria-expanded', String(this.drop === 'info'));
+    $('#errChip').setAttribute('aria-expanded', String(this.drop === 'errors'));
+    const ip = $('#infoPanel');
+    ip.hidden = this.drop !== 'info';
+    if (!ip.hidden) {
+      $('#infoText').textContent = ws.infoText();
+      $('#infoNet').textContent = [ws.netSentence ? ws.netSentence() : '', ws.viewText ? ws.viewText() : ''].filter(Boolean).join(' ');
+    }
     this.renderAlternatives();
     this.renderIssues();
-    if (ws.alt) $('#issueCard').hidden = true;
-    $$('[data-etap]').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.etap === (ws.state.edgeTap || 'switch'))));
+    if (ws.alt) { $('#issueCard').hidden = true; $('#infoPanel').hidden = true; }
     if (!$('#exportDialog').hidden) this.renderExportCheck();
+    this.renderSheet();
+  }
+
+  // Phone: the tools sheet opens and closes; desktop: always open.
+  renderSheet() {
+    const phone = window.innerWidth <= 640;
+    $('#toolSheet').classList.toggle('open', !phone || !!this.sheetOpen);
+    document.body.classList.toggle('sheet-open', phone && !!this.sheetOpen);
+    $('#sheetToggle').setAttribute('aria-expanded', String(!!this.sheetOpen));
+    $('#sheetToggleLabel').textContent = this.sheetOpen ? 'Hide tools' : 'Show tools';
   }
 }

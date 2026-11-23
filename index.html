@@ -241,6 +241,182 @@
   @media (prefers-reduced-motion: reduce) {
     *, *::before, *::after { transition: none !important; }
   }
+
+  /* ------------------------------------------------------------------
+     Floating glass panels (v0.14). Tinted enough to read over any scene;
+     blur where supported, plain tint otherwise. */
+  :root {
+    --glass: rgba(24, 28, 56, 0.72);
+    --glass-strong: rgba(24, 28, 56, 0.86);
+    --glass-edge: rgba(255, 255, 255, 0.13);
+    --glass-shadow: 0 10px 28px rgba(10, 12, 30, 0.22);
+    --magenta: #ff3df0;
+    --ease: cubic-bezier(.2, .7, .2, 1);
+    --gap: max(12px, env(safe-area-inset-left, 0px));
+  }
+  .glass {
+    background: var(--glass); color: var(--washi);
+    border: 1px solid var(--glass-edge); border-radius: 16px; box-shadow: var(--glass-shadow);
+    -webkit-backdrop-filter: blur(18px) saturate(140%); backdrop-filter: blur(18px) saturate(140%);
+  }
+  @supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) { .glass { background: var(--glass-strong); } }
+  .glass button { background: transparent; }
+  .glass button:hover { background: rgba(255, 255, 255, 0.09); }
+  .glass button[aria-pressed="true"] { background: var(--saffron); color: var(--ink); font-weight: 700; }
+  .glass button.primary, .primary { background: var(--saffron); color: var(--ink); font-weight: 700; }
+  .glass button.primary:hover { background: #f5c46b; }
+  .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+  .iconbtn { min-width: 44px; padding: 0; }
+  .pop { transform-origin: top left; animation: pop-in 160ms var(--ease); }
+  @keyframes pop-in { from { opacity: 0; transform: translateY(-4px) scale(0.98); } to { opacity: 1; transform: none; } }
+
+  /* top-left project bar and menu */
+  .tl { position: fixed; z-index: 7; left: var(--gap); top: calc(env(safe-area-inset-top, 0px) + 12px); display: flex; align-items: center; gap: 6px; padding: 5px; max-width: calc(100vw - 2 * var(--gap) - 170px); }
+  .ptitle { min-width: 0; padding: 0 4px; line-height: 1.2; }
+  .ptitle b { display: block; font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 220px; }
+  .ptitle small { display: block; font-size: 11.5px; color: var(--muted); white-space: nowrap; }
+  .ptitle small.dirty { color: var(--saffron); }
+  .seg { display: flex; gap: 2px; padding: 3px; border-radius: 12px; background: rgba(255, 255, 255, 0.08); flex: none; }
+  .seg button { min-height: 34px; padding: 0 11px; font-size: 13px; border-radius: 9px; }
+  .menu { position: fixed; z-index: 9; left: var(--gap); top: calc(env(safe-area-inset-top, 0px) + 70px); width: 248px; padding: 6px; display: grid; gap: 2px; }
+  .menu button { justify-content: flex-start; width: 100%; min-height: 42px; }
+  .menu .mk { margin-left: auto; padding-left: 12px; font-size: 11.5px; font-weight: 500; opacity: 0.7; }
+  .menu .k { margin-left: auto; color: var(--muted); font-size: 11.5px; font-weight: 500; }
+  .menu .mhead { padding: 6px 10px 4px; font-size: 12px; color: var(--muted); display: none; }
+  .menu hr { border: 0; border-top: 1px solid var(--glass-edge); margin: 3px 6px; width: calc(100% - 12px); }
+
+  /* top-right session bar */
+  .tr { position: fixed; z-index: 7; right: var(--gap); top: calc(env(safe-area-inset-top, 0px) + 12px); display: flex; gap: 4px; padding: 5px; }
+  .tr button { min-height: 40px; padding: 0 12px; }
+  #vrBtn { background: var(--saffron); color: var(--ink); font-weight: 700; }
+  #vrBtn.unavailable { background: rgba(255, 255, 255, 0.08); color: var(--muted); }
+  #arBtn { background: var(--washi); color: var(--ink); font-weight: 700; }
+
+  /* diagnostics */
+  .chips { position: fixed; z-index: 6; left: var(--gap); top: calc(env(safe-area-inset-top, 0px) + 72px); display: flex; gap: 6px; }
+  .chip { min-height: 34px; padding: 0 12px; border-radius: 999px; font-size: 12.5px; gap: 6px; }
+  .chip .n { min-width: 22px; padding: 1px 7px; border-radius: 999px; font-weight: 800; font-size: 11.5px; background: #7be3a8; color: #0b3a22; }
+  .chip .n.bad { background: #ff7ab8; color: #3a0c26; }
+  .chip .n.warn { background: #ffc65a; color: #3a2a00; }
+  .chip[aria-expanded="true"] { box-shadow: inset 0 0 0 2px var(--saffron), var(--glass-shadow); }
+  .drop { position: fixed; z-index: 6; left: var(--gap); top: calc(env(safe-area-inset-top, 0px) + 114px); width: min(370px, calc(100vw - 2 * var(--gap))); max-height: min(52vh, 460px); overflow: auto; padding: 12px 14px; font-size: 13px; }
+  .drop p { margin: 0 0 6px; text-wrap: pretty; }
+  .drop p.sub { color: var(--muted); font-size: 12.5px; }
+
+  /* issue / alternates lists (inside .drop) */
+  .issues .ihead { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+  .issues .ihead strong { font-size: 12px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--saffron); }
+  .issues .isum { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+  .issues.ok .isum { color: #7be3a8; }
+  .issues p.itext { margin: 8px 0; }
+  .issues .iacts { display: flex; gap: 6px; flex-wrap: wrap; }
+  .issues .iacts button { min-height: 38px; padding: 0 12px; font-size: 13px; background: rgba(255, 255, 255, 0.08); }
+  .issues .iacts button.primary { background: var(--saffron); }
+  .issues ol { margin: 8px 0 0; padding: 0; list-style: none; display: grid; gap: 5px; }
+  .issues li button { width: 100%; text-align: left; justify-content: flex-start; min-height: 34px; padding: 7px 9px; font-size: 12.5px; line-height: 1.35; font-weight: 500; background: rgba(255, 255, 255, 0.06); border-radius: 10px; white-space: normal; }
+  .issues li button[aria-current="true"] { box-shadow: inset 0 0 0 2px var(--magenta); }
+  .sev { display: inline-block; min-width: 54px; font-weight: 800; font-size: 10.5px; letter-spacing: 0.06em; text-transform: uppercase; margin-right: 6px; }
+  .sev-error { color: #ff7ab8; } .sev-warning { color: #ffc65a; } .sev-info { color: #7cc4ff; }
+  .alt .k { display: block; font-weight: 700; color: var(--washi); margin-bottom: 2px; }
+  .alt .s { color: var(--muted); font-variant-numeric: tabular-nums; }
+  .legend-alt { font-size: 12px; color: var(--muted); margin: 2px 0 4px; }
+  .legend-alt i { display: inline-block; width: 16px; height: 4px; border-radius: 2px; margin: 0 4px 2px 6px; vertical-align: middle; }
+
+  /* view toolbar (right) */
+  .navbar { position: fixed; z-index: 6; right: var(--gap); top: 50%; transform: translateY(-50%); display: flex; flex-direction: column; gap: 2px; padding: 5px; }
+  .navbar button { justify-content: flex-start; min-width: 44px; min-height: 44px; padding: 0 11px; gap: 10px; font-size: 12.5px; }
+  .navbar .nl { display: none; }
+  .navbar.labelled .nl { display: inline; }
+  .navbar.labelled button { min-width: 150px; }
+  .navbar .nsep { height: 1px; background: var(--glass-edge); margin: 2px 6px; }
+  .navmore { display: grid; gap: 2px; }
+
+  /* undo / redo (bottom-left, just above the tool panel) */
+  .ur { position: fixed; z-index: 6; left: var(--gap); bottom: calc(var(--dock-h, 120px) + 14px + env(safe-area-inset-bottom, 0px)); display: flex; gap: 2px; padding: 5px; }
+
+  /* bottom tool panel */
+  .bar.bottom { padding-bottom: calc(env(safe-area-inset-bottom, 0px) + 12px); }
+  .dock.glass { background: var(--glass); border: 1px solid var(--glass-edge); padding: 6px; max-width: 980px; }
+  .dock.glass .context { flex-wrap: wrap; overflow: visible; border-bottom: 1px solid var(--glass-edge); padding: 6px; gap: 6px; }
+  .dock.glass .context button, .subtools button { min-height: 40px; padding: 0 12px; }
+  .dock.glass .context .hint { white-space: normal; width: 100%; font-size: 12.5px; padding: 2px 4px 0; }
+  .dock.glass .tools { padding: 6px 2px 2px; }
+  .subtools { display: flex; flex-wrap: wrap; gap: 4px; padding: 4px 4px 6px; border-bottom: 1px solid var(--glass-edge); }
+  .subtools .sep { width: 1px; align-self: stretch; background: var(--glass-edge); margin: 4px 2px; }
+  .chipset button { border-radius: 999px; }
+  .tabs { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; padding: 8px 2px 2px; }
+  .tabs button { min-height: 50px; font-weight: 700; font-size: 13.5px; gap: 8px; }
+  .tabs .tl2 { display: none; }
+  .sheethead { display: none; }
+  .toolsheet { overflow: hidden; }
+
+  /* dialogs on glass */
+  .glass-sheet { background: var(--glass-strong); border: 1px solid var(--glass-edge); -webkit-backdrop-filter: blur(20px); backdrop-filter: blur(20px); }
+  .sheet.wide { width: min(880px, 100%); }
+  .field { display: grid; gap: 6px; font-size: 12px; color: var(--muted); margin-bottom: 14px; }
+  .field input { min-height: 44px; border-radius: 10px; border: 1px solid var(--line); background: var(--ink-2); color: var(--washi); padding: 0 12px; font-size: 15px; }
+  .presets { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 8px; margin: 8px 0 14px; }
+  .presets button { justify-content: flex-start; min-height: 46px; background: var(--ink-2); white-space: normal; text-align: left; line-height: 1.25; padding: 6px 12px; }
+  .ghead { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+  .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 12px; margin: 12px 0; }
+  .card { border-radius: 14px; background: rgba(255, 255, 255, 0.07); padding: 10px; display: grid; gap: 6px; }
+  .card .thumb { height: 116px; border-radius: 10px; background: #2b3160 center / cover no-repeat; }
+  .card b { font-size: 13.5px; overflow-wrap: anywhere; }
+  .card small { color: var(--muted); font-size: 11.5px; }
+  .card .row { display: flex; gap: 6px; }
+  .card .row button { min-height: 38px; flex: 1; }
+  .gnote { font-size: 12.5px; color: var(--muted); }
+  .empty { color: var(--muted); padding: 18px 4px; }
+
+  /* edge flash (Edit edge feedback) is drawn in 3D; this is the toast */
+  #toast { background: var(--glass-strong); border: 1px solid var(--glass-edge); -webkit-backdrop-filter: blur(14px); backdrop-filter: blur(14px); }
+
+  /* phones: tabs always visible, tools in an expandable sheet */
+  @media (max-width: 640px) {
+    .ptitle b { max-width: 120px; font-size: 13px; }
+    .ptitle { display: none; }
+    .menu .mhead { display: block; }
+    .tl .spaces button { padding: 0 8px; font-size: 12px; }
+    .tr .t { display: none; }
+    .tr button { padding: 0 10px; min-width: 40px; }
+    .chips { top: calc(env(safe-area-inset-top, 0px) + 66px); }
+    .chip .cl { display: none; }
+    .drop { top: calc(env(safe-area-inset-top, 0px) + 106px); max-height: 38vh; }
+    .navbar { right: 6px; top: 42%; }
+    .navbar.labelled button { min-width: 44px; }
+    .navbar.labelled .nl { display: none; }
+    .sheethead { display: flex; align-items: center; justify-content: space-between; padding: 2px 4px 4px 8px; }
+    .sheethead b { font-size: 13px; }
+    .sheethead button { min-height: 34px; padding: 0 10px; font-size: 12.5px; background: rgba(255, 255, 255, 0.07); }
+    .sheethead button[aria-expanded="true"] svg { transform: rotate(180deg); }
+    .toolsheet { max-height: 0; transition: max-height 180ms var(--ease); }
+    .toolsheet.open { max-height: 40vh; overflow: auto; overscroll-behavior: contain; }
+    .subtools, .dock.glass .context { display: grid; grid-template-columns: 1fr 1fr; }
+    .subtools { grid-template-columns: 1fr 1fr 1fr; }
+    .subtools button { font-size: 12px; padding: 4px 8px; }
+    .dock.glass .context[hidden], .subtools[hidden] { display: none !important; }
+    .subtools .sep, .dock.glass .context .sep { display: none; }
+    .dock.glass .context .label, .dock.glass .context .hint, .dock.glass .context .legend, .dock.glass .context .seg, .dock.glass .context .size { grid-column: 1 / -1; }
+    .dock.glass .context button, .subtools button { justify-content: flex-start; background: rgba(255, 255, 255, 0.07); white-space: normal; text-align: left; line-height: 1.2; min-height: 44px; }
+    .dock.glass .context .seg { display: flex; flex-wrap: wrap; }
+    .dock.glass .context button[aria-pressed="true"], .subtools button[aria-pressed="true"] { background: var(--saffron); color: var(--ink); }
+    .tabs button { flex-direction: column; gap: 2px; min-height: 52px; font-size: 12px; }
+    .tabs .tl1 { display: none; }
+    .tabs .tl2 { display: inline; }
+  }
+  /* The toast sits just above the tool panel and Undo / Redo. */
+  body[data-space="solids"] #toast, #toast { bottom: calc(var(--dock-h, 120px) + 76px + env(safe-area-inset-bottom, 0px)); }
+  @media (max-width: 640px) {
+    /* Sheet open: the View toolbar becomes a row above the sheet (right),
+       next to Undo / Redo (left), so it stays available in every tab. */
+    body.sheet-open .navbar { top: auto; right: 6px; bottom: calc(var(--dock-h, 120px) + 14px + env(safe-area-inset-bottom, 0px)); transform: none; flex-direction: row; }
+    body.sheet-open .navbar .nsep, body.sheet-open #navMore, body.sheet-open #navMorePanel, body.sheet-open #navLabels { display: none; }
+    body[data-space="solids"] #toast, #toast { bottom: calc(var(--dock-h, 120px) + 70px + env(safe-area-inset-bottom, 0px)); max-width: calc(100vw - 24px); }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .pop { animation: none; }
+    .toolsheet { transition: none; }
+  }
 </style>
 <script type="importmap">
 {
@@ -254,64 +430,122 @@
 <body>
 <div id="stage"></div>
 
-<header class="bar top">
-  <div class="brand">
-    <svg viewBox="0 0 32 32" aria-hidden="true"><path d="M3 3h26v26z" fill="#fbfaf6"/><path d="M3 3v26h26z" fill="#bcd3ee"/><path d="M3 3l26 26" stroke="#181c38" stroke-width="1.2" stroke-dasharray="2 2"/></svg>
-    <div class="titles"><h1>Paper Fold Studio</h1><p id="sheetLabel">30 × 30 cm sheet</p></div>
-    <div class="spaces" role="group" aria-label="Workspace">
-      <button data-space="paper" aria-pressed="true">Paper</button>
-      <button data-space="solids" aria-pressed="false">Solids</button>
-    </div>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <symbol id="i-menu" viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h16"/></symbol>
+  <symbol id="i-new" viewBox="0 0 24 24"><path d="M6 3h8l4 4v14H6z"/><path d="M12 10v6M9 13h6"/></symbol>
+  <symbol id="i-open" viewBox="0 0 24 24"><path d="M3 7h6l2 2h10v10H3z"/></symbol>
+  <symbol id="i-save" viewBox="0 0 24 24"><path d="M5 4h11l3 3v13H5z"/><path d="M8 4v5h7V4M8 20v-6h8v6"/></symbol>
+  <symbol id="i-import" viewBox="0 0 24 24"><path d="M12 3v11M8 10l4 4 4-4"/><path d="M4 17v3h16v-3"/></symbol>
+  <symbol id="i-export" viewBox="0 0 24 24"><path d="M12 14V3M8 7l4-4 4 4"/><path d="M4 17v3h16v-3"/></symbol>
+  <symbol id="i-help" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M9.6 9.2a2.5 2.5 0 1 1 3.4 2.4c-.7.3-1 .9-1 1.6v.6"/><path d="M12 17h.01"/></symbol>
+  <symbol id="i-sheet" viewBox="0 0 24 24"><rect x="5" y="3" width="14" height="18" rx="1.5"/><path d="M8 8h8M8 12h8M8 16h5"/></symbol>
+  <symbol id="i-scene" viewBox="0 0 24 24"><path d="M3 19 9.5 9l4 6 2.5-3.5L21 19z"/><circle cx="16.5" cy="6.5" r="2"/></symbol>
+  <symbol id="i-vr" viewBox="0 0 24 24"><path d="M3 8.5h18v7a1.5 1.5 0 0 1-1.5 1.5h-4.2l-2-2.6h-2.6l-2 2.6H4.5A1.5 1.5 0 0 1 3 15.5z"/></symbol>
+  <symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7.5h.01"/></symbol>
+  <symbol id="i-warn" viewBox="0 0 24 24"><path d="M12 4 2.8 20h18.4z"/><path d="M12 10v4.5M12 17.3h.01"/></symbol>
+  <symbol id="i-undo" viewBox="0 0 24 24"><path d="M9 7H4V2"/><path d="M4.6 7A8 8 0 1 1 4 13"/></symbol>
+  <symbol id="i-redo" viewBox="0 0 24 24"><path d="M15 7h5V2"/><path d="M19.4 7A8 8 0 1 0 20 13"/></symbol>
+  <symbol id="i-fit" viewBox="0 0 24 24"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/><rect x="8" y="8" width="8" height="8" rx="1"/></symbol>
+  <symbol id="i-focus" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 3v3M12 18v3M3 12h3M18 12h3"/><circle cx="12" cy="12" r="7.5"/></symbol>
+  <symbol id="i-rotate" viewBox="0 0 24 24"><path d="M12 7 7.5 9.5v5L12 17l4.5-2.5v-5z"/><path d="M4.5 9a8 8 0 0 1 13.6-3.4L20 7.5"/><path d="M20 4v3.5h-3.5"/><path d="M19.5 15a8 8 0 0 1-13.6 3.4L4 16.5"/><path d="M4 20v-3.5h3.5"/></symbol>
+  <symbol id="i-reset" viewBox="0 0 24 24"><path d="M4.5 12a7.5 7.5 0 1 0 2.2-5.3"/><path d="M4 4v4h4"/></symbol>
+  <symbol id="i-turn" viewBox="0 0 24 24"><path d="M19 12a7 7 0 1 1-2.1-5"/><path d="M19 4v4h-4"/></symbol>
+  <symbol id="i-tip" viewBox="0 0 24 24"><path d="M12 19a7 7 0 1 1 5-2.1"/><path d="M20 19h-4v-4"/></symbol>
+  <symbol id="i-more" viewBox="0 0 24 24"><circle cx="6" cy="12" r="1.3"/><circle cx="12" cy="12" r="1.3"/><circle cx="18" cy="12" r="1.3"/></symbol>
+  <symbol id="i-labels" viewBox="0 0 24 24"><path d="m9 6-6 6 6 6M15 6l6 6-6 6"/></symbol>
+  <symbol id="i-solid" viewBox="0 0 24 24"><path d="M12 3 4 7.5v9L12 21l8-4.5v-9z"/><path d="M4 7.5 12 12l8-4.5M12 12v9"/></symbol>
+  <symbol id="i-surface" viewBox="0 0 24 24"><path d="M4 17 9 6l6 4 5-3v10z"/><circle cx="9" cy="6" r="1.6"/><circle cx="15" cy="10" r="1.6"/></symbol>
+  <symbol id="i-net" viewBox="0 0 24 24"><path d="M3 14h6v6H3zM9 14h6v6H9zM9 8h6v6H9zM15 8h6v6h-6z"/></symbol>
+  <symbol id="i-chev" viewBox="0 0 24 24"><path d="m7 14 5-5 5 5"/></symbol>
+</svg>
+
+<div class="glass tl" id="projectBar">
+  <button type="button" class="iconbtn" id="menuBtn" aria-haspopup="menu" aria-expanded="false" aria-controls="projectMenu" title="Project menu"><svg class="i"><use href="#i-menu"/></svg><span class="sr">Project menu</span></button>
+  <div class="ptitle"><b id="projectName">Untitled</b><small id="projectState">Not saved yet</small></div>
+  <div class="spaces seg" role="group" aria-label="Workspace">
+    <button data-space="paper" aria-pressed="true">Paper</button>
+    <button data-space="solids" aria-pressed="false">Solids</button>
   </div>
-  <div class="session">
-    <button id="undoBtn" title="Undo (Ctrl+Z)"><svg class="i" viewBox="0 0 24 24"><path d="M9 7H4V2"/><path d="M4.6 7A8 8 0 1 1 4 13"/></svg><span class="t">Undo</span></button>
-    <button id="paperBtn" title="Sheet size and colours"><svg class="i" viewBox="0 0 24 24"><rect x="5" y="3" width="14" height="18" rx="1.5"/><path d="M8 8h8M8 12h8M8 16h5"/></svg><span class="t">Sheet</span></button>
-    <button id="sceneBtn" title="Work surface and view"><svg class="i" viewBox="0 0 24 24"><path d="M3 19 9.5 9l4 6 2.5-3.5L21 19z"/><circle cx="16.5" cy="6.5" r="2"/></svg><span class="t">Scene</span></button>
-    <button id="helpBtn" title="How to use"><svg class="i" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M9.6 9.2a2.5 2.5 0 1 1 3.4 2.4c-.7.3-1 .9-1 1.6v.6"/><path d="M12 17h.01"/></svg><span class="t">Help</span></button>
-    <button id="arBtn" hidden><span class="t">Enter&nbsp;</span>AR</button>
-    <button id="vrBtn"><svg class="i" viewBox="0 0 24 24"><path d="M3 8.5h18v7a1.5 1.5 0 0 1-1.5 1.5h-4.2l-2-2.6h-2.6l-2 2.6H4.5A1.5 1.5 0 0 1 3 15.5z"/></svg><span><span class="t">Enter&nbsp;</span>VR</span></button>
+</div>
+
+<div class="glass menu pop" id="projectMenu" role="menu" hidden>
+  <div class="mhead" id="menuTitle"></div>
+  <button role="menuitem" id="newBtn"><svg class="i"><use href="#i-new"/></svg>New…<span class="k">Ctrl Alt N</span></button>
+  <button role="menuitem" id="loadShellBtn" title="The saved-project gallery"><svg class="i"><use href="#i-open"/></svg>Open…<span class="k">Ctrl O</span></button>
+  <button role="menuitem" id="saveShellBtn"><svg class="i"><use href="#i-save"/></svg>Save<span class="k">Ctrl S</span></button>
+  <hr>
+  <button role="menuitem" id="importShellBtn" title="Open a composition file from this device"><svg class="i"><use href="#i-import"/></svg>Import file…</button>
+  <button role="menuitem" id="exportShellBtn" title="Save a file: the composition, the flat net as SVG, the 3D model or an image of the view"><svg class="i"><use href="#i-export"/></svg>Export…</button>
+  <hr>
+  <button role="menuitem" id="paperBtn" title="Sheet size and colours"><svg class="i"><use href="#i-sheet"/></svg>Sheet…<span class="mk" id="sheetLabel"></span></button>
+  <button role="menuitem" id="helpBtn"><svg class="i"><use href="#i-help"/></svg>Help</button>
+  <input id="importShellFile" type="file" accept=".json,application/json" hidden>
+</div>
+
+<div class="chips" id="diagChips" hidden>
+  <button type="button" class="chip glass" id="infoChip" aria-expanded="false" aria-controls="infoPanel" title="Composition counts"><svg class="i"><use href="#i-info"/></svg><span class="cl">Info</span></button>
+  <button type="button" class="chip glass" id="errChip" aria-expanded="false" aria-controls="issueCard" title="Layout check: errors and warnings"><svg class="i"><use href="#i-warn"/></svg><span class="cl">Errors</span><span class="n" id="errCount">0</span></button>
+</div>
+
+<section class="glass drop pop" id="infoPanel" hidden aria-label="Composition">
+  <p id="infoText"></p>
+  <p class="sub" id="infoNet"></p>
+</section>
+
+<section class="glass drop pop issues" id="issueCard" hidden aria-label="Layout check">
+  <div class="ihead">
+    <strong>Layout check</strong>
+    <span class="isum" id="issueSummary"></span>
   </div>
-</header>
+  <p class="itext" id="issueText"></p>
+  <div class="iacts">
+    <button type="button" id="focusIssueBtn" title="Bring the highlighted issue into view">Focus</button>
+    <button type="button" id="nextIssueBtn" title="Highlight the next issue">Next issue</button>
+    <button type="button" id="clearIssueBtn" title="Remove the highlight">Clear highlight</button>
+    <button type="button" id="issueListBtn" aria-expanded="true" hidden>List</button>
+  </div>
+  <ol id="issueList"></ol>
+</section>
 
-<div id="toast" role="status" aria-live="polite"></div>
-
-<nav class="navbar" id="navBar" aria-label="View">
-  <button type="button" id="navFit" title="Fit all: everything in view (F)"><svg class="i" viewBox="0 0 24 24"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/><rect x="8" y="8" width="8" height="8" rx="1"/></svg><span>Fit all</span></button>
-  <button type="button" id="navFocus" title="Focus selected: zoom toward what is selected (.)"><svg class="i" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 3v3M12 18v3M3 12h3M18 12h3"/><circle cx="12" cy="12" r="7.5"/></svg><span>Focus</span></button>
-  <button type="button" id="navReset" title="Reset view: resting orientation, real size, camera fitted (0)"><svg class="i" viewBox="0 0 24 24"><path d="M4.5 12a7.5 7.5 0 1 0 2.2-5.3"/><path d="M4 4v4h4"/></svg><span>Reset</span></button>
-  <div class="nsep" data-nav-solids></div>
-  <button type="button" id="navTurn" aria-pressed="false" data-nav-solids title="Turn view: drag the form to turn it, in any tool (I). Alt+drag turns it any time."><svg class="i" viewBox="0 0 24 24"><path d="M12 7 7.5 9.5v5L12 17l4.5-2.5v-5z"/><path d="M4.5 9a8 8 0 0 1 13.6-3.4L20 7.5"/><path d="M20 4v3.5h-3.5"/><path d="M19.5 15a8 8 0 0 1-13.6 3.4L4 16.5"/><path d="M4 20v-3.5h3.5"/></svg><span>Turn</span></button>
-  <button type="button" id="navTurn90" data-nav-solids title="Turn the view a quarter turn about the vertical (arrow keys: 15°)"><svg class="i" viewBox="0 0 24 24"><path d="M19 12a7 7 0 1 1-2.1-5"/><path d="M19 4v4h-4"/></svg><span>90°</span></button>
-  <button type="button" id="navTip90" data-nav-solids title="Tip the view toward you by a quarter turn"><svg class="i" viewBox="0 0 24 24"><path d="M12 19a7 7 0 1 1 5-2.1"/><path d="M20 19h-4v-4"/></svg><span>Tip</span></button>
-</nav>
-
-<section class="issues" id="altCard" hidden aria-label="Layouts compared">
-  <div class="ihead"><strong>Layouts</strong><span class="isum" id="altSummary"></span></div>
+<section class="glass drop pop issues" id="altCard" hidden aria-label="Alternate nets">
+  <div class="ihead"><strong>Alternate nets</strong><span class="isum" id="altSummary"></span></div>
   <p class="itext" id="altNote"></p>
   <div class="iacts">
-    <button type="button" id="altApplyBtn" class="primary" title="Keep the option shown (only a valid one; Undo returns to your layout)">Apply</button>
+    <button type="button" id="altApplyBtn" class="primary" title="Keep the option shown (only a valid one; Undo returns to your layout)">Accept</button>
     <button type="button" id="altMineBtn" title="Close and keep your own layout">Keep my layout</button>
   </div>
   <ol id="altList"></ol>
 </section>
 
-<section class="issues" id="issueCard" hidden aria-label="Layout check">
-  <div class="ihead">
-    <strong>Layout check</strong>
-    <span class="isum" id="issueSummary"></span>
-    <button type="button" id="issueListBtn" aria-expanded="true" title="Show or hide every issue">List</button>
-  </div>
-  <p class="itext" id="issueText"></p>
-  <div class="iacts">
-    <button type="button" id="focusIssueBtn" title="Highlight this issue and bring it into view">Focus issue</button>
-    <button type="button" id="nextIssueBtn" title="Go to the next issue">Next issue</button>
-    <button type="button" id="clearIssueBtn" title="Remove the highlight">Clear highlight</button>
-  </div>
-  <ol id="issueList"></ol>
-</section>
+<div class="glass tr" id="sessionBar">
+  <button type="button" id="sceneBtn" title="Scene: surroundings and work surface"><svg class="i"><use href="#i-scene"/></svg><span class="t">Scene</span></button>
+  <button type="button" id="arBtn" hidden><span class="t">Enter&nbsp;</span>AR</button>
+  <button type="button" id="vrBtn"><svg class="i"><use href="#i-vr"/></svg><span><span class="t">Enter&nbsp;</span>VR</span></button>
+</div>
 
-<footer class="bar bottom">
-  <div class="dock" id="paperDock">
+<div id="toast" role="status" aria-live="polite"></div>
+
+<nav class="glass navbar" id="navBar" aria-label="View">
+  <button type="button" id="navFit" title="Fit all: everything in view (F)" aria-label="Fit all"><svg class="i"><use href="#i-fit"/></svg><span class="nl">Fit all</span></button>
+  <button type="button" id="navFocus" title="Focus selected: zoom toward what is selected (.)" aria-label="Focus selected"><svg class="i"><use href="#i-focus"/></svg><span class="nl">Focus selected</span></button>
+  <button type="button" id="navTurn" aria-pressed="false" data-nav-solids title="Rotate: drag the form to turn it, in any tab (I). Alt+drag turns it any time." aria-label="Rotate"><svg class="i"><use href="#i-rotate"/></svg><span class="nl">Rotate</span></button>
+  <button type="button" id="navReset" title="Reset view: resting orientation, real size, camera fitted (0)" aria-label="Reset view"><svg class="i"><use href="#i-reset"/></svg><span class="nl">Reset view</span></button>
+  <div class="nsep" data-nav-solids></div>
+  <button type="button" id="navMore" aria-expanded="false" data-nav-solids title="More: quarter turns" aria-label="More view controls"><svg class="i"><use href="#i-more"/></svg><span class="nl">More</span></button>
+  <div class="navmore" id="navMorePanel" hidden>
+    <button type="button" id="navTurn90" title="Turn the view a quarter turn about the vertical (arrow keys: 15°)" aria-label="Turn 90°"><svg class="i"><use href="#i-turn"/></svg><span class="nl">Turn 90°</span></button>
+    <button type="button" id="navTip90" title="Tip the view toward you by a quarter turn" aria-label="Tip 90°"><svg class="i"><use href="#i-tip"/></svg><span class="nl">Tip 90°</span></button>
+  </div>
+  <button type="button" id="navLabels" aria-pressed="false" title="Show or hide labels" aria-label="Show labels"><svg class="i"><use href="#i-labels"/></svg><span class="nl">Hide labels</span></button>
+</nav>
+
+<div class="glass ur" id="undoBar">
+  <button type="button" class="iconbtn" id="undoBtn" title="Undo (Ctrl+Z)" aria-label="Undo"><svg class="i"><use href="#i-undo"/></svg></button>
+  <button type="button" class="iconbtn" id="redoBtn" title="Redo (Ctrl+Shift+Z)" aria-label="Redo"><svg class="i"><use href="#i-redo"/></svg></button>
+</div>
+
+<footer class="bar bottom" id="bottomBar">
+  <div class="dock glass" id="paperDock">
     <div class="context" data-for="paint">
       <div class="group" id="swatches"></div>
       <label class="colorpick" title="Custom colour"><input id="customColor" type="color" value="#d8452f" aria-label="Custom colour"></label>
@@ -367,123 +601,154 @@
       <button data-tool="fold" aria-pressed="false"><svg class="i" viewBox="0 0 24 24"><path d="M3.5 20.5v-17h17v9l-8 8z"/><path d="M20.5 12.5h-8v8"/></svg>Fold</button>
       <button data-tool="move" aria-pressed="false"><svg class="i" viewBox="0 0 24 24"><path d="M12 3v18M3 12h18M12 3 9.5 5.5M12 3l2.5 2.5M12 21l-2.5-2.5M12 21l2.5-2.5M3 12l2.5-2.5M3 12l2.5 2.5M21 12l-2.5-2.5M21 12l-2.5 2.5"/></svg>Move</button>
     </nav>
+  
   </div>
 
-  <div class="dock" id="solidsDock" hidden>
-    <div class="context actions-row">
-      <button id="unfoldAllBtn">Unfold all</button>
-      <button id="refoldAllBtn">Refold all</button>
-      <button id="resetShellBtn">Reset</button>
-      <span class="sep"></span>
-      <button id="saveShellBtn">Save</button>
-      <button id="loadShellBtn">Load</button>
-      <button id="exportShellBtn" title="Save a file: the composition, the flat net as SVG, or an image of the view">Export…</button>
-      <button id="importShellBtn" title="Open a composition file">Import</button>
-      <input id="importShellFile" type="file" accept=".json,application/json" hidden>
-      <span class="hint" id="solidsStats"></span>
+  <div class="dock glass" id="solidsDock" hidden>
+    <div class="sheethead" id="sheetHead">
+      <b id="sheetTitle">Solid Modeling</b>
+      <button type="button" id="sheetToggle" aria-expanded="false" aria-controls="toolSheet"><span id="sheetToggleLabel">Show tools</span><svg class="i"><use href="#i-chev"/></svg></button>
     </div>
-
-    <div class="context" data-sfor="build">
-      <label class="label" for="addTypeSel">Solid</label>
-      <select id="addTypeSel" aria-label="Solid to add">
-        <option value="cube">Cube</option>
-        <option value="tetra">Tetrahedron</option>
-        <option value="octa">Octahedron</option>
-        <option value="cubocta">Cuboctahedron</option>
-      </select>
-      <button id="addCubeBtn">Add</button>
-      <button id="dupCubeBtn">Duplicate</button>
-      <button id="rotCubeBtn">Rotate</button>
-      <button id="delCubeBtn">Remove</button>
-      <span class="sep"></span>
-      <label class="label" for="presetSel">Start from</label>
-      <select id="presetSel" aria-label="Start from a preset"></select>
-      <button id="tipBtn">Tip over</button>
-      <span class="hint">Tap a face, choose a solid, then Add. Drag a solid to move it; it snaps to a matching face. Navigate any time: drag empty space to orbit, right-drag to pan, wheel to zoom, Turn (or Alt+drag) to turn the form.</span>
-    </div>
-
-    <div class="context" data-sfor="open" hidden>
-      <span class="label">Swing</span>
-      <button data-omode="group" aria-pressed="true" title="The panel and every panel hinged beyond it">Group</button>
-      <button data-omode="one" aria-pressed="false" title="Only this panel; its other edges are released">One panel</button>
-      <span class="sep"></span>
-      <button id="openFlatBtn">Open flat</button>
-      <button id="closePanelBtn">Close</button>
-      <div class="size angle">
-        <input id="hingeAngle" type="range" min="-180" max="180" step="1" value="0" disabled aria-label="Hinge angle in degrees">
-        <span class="value" id="hingeAngleLabel">—</span>
+    <div class="toolsheet" id="toolSheet">
+      <div class="subtools" data-tabfor="net" hidden>
+        <button type="button" id="unfoldAllBtn" title="Unfold every hinge flat">Unfold all</button>
+        <button type="button" id="refoldAllBtn" title="Fold everything back to the assembled form">Refold all</button>
+        <button type="button" id="resetShellBtn" title="Back to the default net, closed">Reset net</button>
+        <span class="sep"></span>
+        <button type="button" data-stool="open" aria-pressed="false" title="Open a single panel or a connected group along a hinge">Open</button>
+        <button type="button" data-stool="edges" aria-pressed="false" title="Tap an edge to switch it between hinge and cut">Edit edge</button>
+        <button type="button" data-stool="join" aria-pressed="false" title="Tap a cut edge to join it">Join edge</button>
+        <button type="button" data-stool="tri" aria-pressed="false" title="Split a face into triangles with new fold lines">Triangulate</button>
+        <button type="button" data-stool="layout" aria-pressed="false" title="Move and turn the pieces of the flat net; nothing is cut">Arrange</button>
+        <button type="button" data-stool="alts" aria-pressed="false" title="Preview other nets, including the fewest additional cuts, before accepting one">Alternate nets</button>
       </div>
-      <button id="setBaseBtn">Set as base</button>
-      <span class="sep"></span>
-      <span class="legend"><i class="lg lg-sel"></i>selected <i class="lg lg-chosen"></i>hinge in use <i class="lg lg-option"></i>other hinges</span>
-    </div>
 
-    <div class="context" data-sfor="layout" hidden>
-      <span class="seg" role="group" aria-label="Net mode"><button data-netmode="layout" aria-pressed="true" title="Move, turn, cut and join the pieces of the net">Arrange</button><button data-netmode="shape" aria-pressed="false" title="Change the shape: Resize boxes or Edit vertices; the net follows">Reshape</button></span>
-      <span class="sep"></span>
-      <button id="layFlatBtn" title="Lay every piece flat on the surface and check that each piece is coplanar">Lay net on surface</button>
-      <button id="arrangeBtn" title="Place all pieces side by side without overlapping">Arrange pieces</button>
-      <button id="otherNetsBtn" title="Try different overlap-free nets before splitting">Other nets</button>
-      <button id="suggestBtn" title="Keep your hinges and cuts; find the fewest additional cuts that separate every overlapping pair, then move only the freed parts">Resolve overlaps</button>
-      <span class="sep"></span>
-      <button id="rotLeftBtn" title="Turn the selected piece 15° anticlockwise">⟲ 15°</button>
-      <button id="rotRightBtn" title="Turn the selected piece 15° clockwise">⟳ 15°</button>
-      <span class="sep"></span>
-      <button id="labelsBtn" aria-pressed="true" title="Matching numbers on the two sides of each cut edge">Edge numbers</button>
-      <button id="idsBtn" aria-pressed="false" title="A number for each panel">Panel IDs</button>
-      <span class="hint">Drag a piece to move it. Tap a hinge to cut it; tap a cut whose sides meet to join it. Refold all goes back to the 3D form.</span>
-    </div>
+      <div class="context" data-sfor="build">
+        <span class="label">Add / Remove</span>
+        <span class="seg chipset" role="group" aria-label="Module">
+          <button type="button" data-addtype="cube" aria-pressed="true">Cube</button>
+          <button type="button" data-addtype="tetra" aria-pressed="false">Tetrahedron</button>
+          <button type="button" data-addtype="octa" aria-pressed="false">Octahedron</button>
+          <button type="button" data-addtype="cubocta" aria-pressed="false">Cuboctahedron</button>
+        </span>
+        <select id="addTypeSel" aria-label="Module to add" hidden>
+          <option value="cube">Cube</option>
+          <option value="tetra">Tetrahedron</option>
+          <option value="octa">Octahedron</option>
+          <option value="cubocta">Cuboctahedron</option>
+        </select>
+        <button type="button" id="addCubeBtn" class="primary" title="Add the chosen module on the selected face">Add on face</button>
+        <button type="button" id="delCubeBtn" title="Remove the selected module">Remove</button>
+        <span class="sep"></span>
+        <button type="button" id="dupCubeBtn">Duplicate</button>
+        <button type="button" id="rotCubeBtn" title="Turn the selected module in place">Rotate module</button>
+        <button type="button" id="tipBtn" title="Tip the whole composition onto another face">Tip over</button>
+        <span class="hint">Tap a face to target it, choose a module and Add on face. Drag a module to move it; it snaps to a matching face.</span>
+      </div>
 
-    <div class="context" data-sfor="shape" hidden>
-      <span class="seg" role="group" aria-label="Net mode"><button data-netmode="layout" aria-pressed="false" title="Move, turn, cut and join the pieces of the net">Arrange</button><button data-netmode="shape" aria-pressed="true" title="Change the shape: Resize boxes or Edit vertices; the net follows">Reshape</button></span>
-      <span class="sep"></span>
-      <button data-smode="resize" aria-pressed="true" title="Change box sizes on the net; angles stay square">Resize</button>
-      <button data-smode="edit" aria-pressed="false" title="Move corners and edges of the assembled form freely">Edit vertices</button>
-      <span class="sep"></span>
-      <span class="group" data-smode-for="edit" hidden>
+      <div class="context" data-sfor="shape" hidden>
+        <span class="label">Modify</span>
+        <button type="button" id="clearSelBtn" title="Deselect every corner and edge">Clear selection</button>
+        <button type="button" id="resetEditsBtn" title="Back to the regular solids">Reset edits</button>
+        <span class="hint">Drag a corner or an edge of the floating form to push or pull it (Shift: slide level). Tap corners, edges or faces to select a group; drag one of them to move the group, or the ring to scale it in its plane. Neighbouring corners that must move to keep faces flat turn orange; at a geometric limit the move stops and says why. The net below follows.</span>
+      </div>
+
+      <div class="context" data-sfor="open" hidden>
+        <span class="label">Swing</span>
+        <span class="seg" role="group" aria-label="Swing">
+          <button type="button" data-omode="group" aria-pressed="true" title="The panel and every panel hinged beyond it">Connected group</button>
+          <button type="button" data-omode="one" aria-pressed="false" title="Only this panel; its other edges are released">Single panel</button>
+        </span>
+        <button type="button" id="openFlatBtn">Open flat</button>
+        <button type="button" id="closePanelBtn">Close</button>
+        <div class="size angle">
+          <input id="hingeAngle" type="range" min="-180" max="180" step="1" value="0" disabled aria-label="Hinge angle in degrees">
+          <span class="value" id="hingeAngleLabel">—</span>
+        </div>
+        <button type="button" id="setBaseBtn">Set as base</button>
+        <span class="hint">Tap a panel, then tap one of its green hinges (or drag the panel) to swing it on that hinge.</span>
+      </div>
+
+      <div class="context" data-sfor="edges" hidden>
         <span class="label">Tap</span>
-        <button data-tapmode="pin" aria-pressed="true" title="Taps pin corners, edges or faces (blue)">Pins</button>
-        <button data-tapmode="select" aria-pressed="false" title="Taps add corners, edges or faces to the group (amber)">Selects</button>
-        <button id="pinBaseBtn">Pin base</button>
-        <button id="clearPinsBtn">Clear pins</button>
-        <button id="clearSelBtn">Clear selection</button>
-        <button id="shrinkBtn" title="Scale the selected corners 10% smaller in their plane">Shrink 10%</button>
-        <button id="growBtn" title="Scale the selected corners 10% larger in their plane">Grow 10%</button>
-        <button id="triBtn" title="Split the faces at the last corner you pointed at into triangles, adding fold lines">Triangulate at corner</button>
-        <button id="resetEditsBtn">Reset edits</button>
-        <span class="hint">Drag a corner or edge of the floating form (left/right, up/down; Shift: level). Blue = pinned, amber = selected, orange = moved to keep faces flat. Drag a selected corner to move the group; drag the ring to scale it in its plane.</span>
-      </span>
-      <span class="group" data-smode-for="resize">
-      <label class="dim"><span style="color:#e0452b">X</span> width <input id="shapeW" type="number" min="10" max="900" step="1" inputmode="decimal" aria-label="Width in millimetres"></label>
-      <label class="dim"><span style="color:#2fa35a">Y</span> height <input id="shapeH" type="number" min="10" max="900" step="1" inputmode="decimal" aria-label="Height in millimetres"></label>
-      <label class="dim"><span style="color:#3a78e0">Z</span> depth <input id="shapeD" type="number" min="10" max="900" step="1" inputmode="decimal" aria-label="Depth in millimetres"></label>
-      <span class="dim">mm</span>
-      <button id="shapeApplyBtn">Set sizes</button>
-      <button id="shapeUnpinBtn">Unpin</button>
-      <button id="shapeResetBtn">Reset shape</button>
-      <span class="hint">Resize: panel sizes change, angles stay square. Drag a side or corner of the net (boxes); tap one first to pin it. Release keeps the change; Undo takes it back. Typing sizes is optional.</span>
-      </span>
+        <span class="seg" role="group" aria-label="Edge tap"><button type="button" data-etap="switch" aria-pressed="true" title="Each tap switches an edge between hinge and cut">Hinge ↔ cut</button><button type="button" data-etap="lock" aria-pressed="false" title="Taps lock an edge as it is, so suggestions keep it">Lock</button></span>
+        <button type="button" id="defaultNetBtn">Find net</button>
+        <button type="button" id="checkNetBtn">Check net</button>
+        <span class="legend"><i class="lg lg-hinge"></i>hinge <i class="lg lg-cut"></i>cut <i class="lg lg-overlap"></i>intersecting</span>
+        <span class="hint">Each deliberate tap switches the edge you tap between hinge and cut; it flashes to confirm.</span>
+      </div>
+
+      <div class="context" data-sfor="join" hidden>
+        <span class="label">Join as</span>
+        <span class="seg" role="group" aria-label="Join as"><button type="button" data-jmode="hinge" aria-pressed="true" title="Connect the two edges with a fold">Hinge</button></span>
+        <span class="hint">Tap a cut edge whose two sides meet to join it with a hinge (it keeps its fold). In a flat net, move a piece in Arrange until the matching numbered edges meet first.</span>
+      </div>
+
+      <div class="context" data-sfor="tri" hidden>
+        <button type="button" id="triBtn" title="Split the faces at the last corner you pointed at into triangles">Triangulate at corner</button>
+        <span class="hint">Point at a corner of the floating form, then press Triangulate at corner (or tap the corner): the faces meeting there are split into triangles and the new fold lines show in the form and the net.</span>
+      </div>
+
+      <div class="context" data-sfor="layout" hidden>
+        <button type="button" id="layFlatBtn" title="Lay every piece flat on the surface and check that each piece is coplanar">Arrange net on surface</button>
+        <button type="button" id="arrangeBtn" title="Place all pieces side by side without overlapping (no cuts)">Arrange pieces</button>
+        <button type="button" id="rotLeftBtn" title="Turn the selected piece 15° anticlockwise">⟲ 15°</button>
+        <button type="button" id="rotRightBtn" title="Turn the selected piece 15° clockwise">⟳ 15°</button>
+        <button type="button" id="labelsBtn" aria-pressed="true" title="Matching numbers on the two sides of each cut edge">Edge numbers</button>
+        <button type="button" id="idsBtn" aria-pressed="false" title="A number for each panel">Panel IDs</button>
+        <span class="hint">Drag a piece to move it, ⟲ ⟳ to turn it. Arranging never cuts: use Edit edge to cut and Join edge to join.</span>
+      </div>
+
+      <div class="context" data-sfor="alts" hidden>
+        <button type="button" id="suggestBtn" class="primary" title="Keep your hinges and cuts; find the fewest additional cuts that separate every overlapping pair">Fewest additional cuts</button>
+        <button type="button" id="otherNetsBtn" title="Different hinge layouts (a separate search)">Other hinge layouts</button>
+        <span class="hint">Previews never replace your arrangement until you Accept. Undo returns to it.</span>
+      </div>
     </div>
 
-    <div class="context" data-sfor="edges" hidden>
-      <button id="defaultNetBtn">Find net</button>
-      <button id="checkNetBtn">Check net</button>
-      <span class="sep"></span>
-      <span class="label">Tap</span>
-      <span class="seg" role="group" aria-label="Edge tap"><button data-etap="switch" aria-pressed="true" title="Taps switch an edge between hinge and cut">Switch</button><button data-etap="lock" aria-pressed="false" title="Taps lock an edge as it is, so suggestions keep it">Lock</button></span>
-      <span class="sep"></span>
-      <span class="legend"><i class="lg lg-hinge"></i>hinge <i class="lg lg-cut"></i>cut <i class="lg lg-overlap"></i>intersecting</span>
-      <span class="hint">Tap an edge to switch it between hinge and cut.</span>
-    </div>
-
-    <nav class="tools tools-4" aria-label="Solid tools">
-      <button data-stool="build" aria-pressed="false"><svg class="i" viewBox="0 0 24 24"><path d="M12 3 4 7.5v9L12 21l8-4.5v-9z"/><path d="M4 7.5 12 12l8-4.5M12 12v9"/></svg>Build</button>
-      <button data-stool="open" aria-pressed="true"><svg class="i" viewBox="0 0 24 24"><path d="M4 20h16"/><path d="M4 20V9h9v11"/><path d="m13 9 6-4v11l-6 4"/></svg>Open</button>
-      <button data-stool="edges" aria-pressed="false"><svg class="i" viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="1.5"/><path d="M4 12h16" stroke-dasharray="2.4 2.4"/></svg>Edges</button>
-      <button data-stool="net" aria-pressed="false" title="The flat net and the assembled ghost: Arrange pieces or Reshape the form"><svg class="i" viewBox="0 0 24 24"><path d="M3 14h6v6H3zM9 14h6v6H9zM9 8h6v6H9z"/><path d="m17.5 4 3.5 3.5-3.5 3.5-3.5-3.5z"/></svg>Net</button>
+    <nav class="tabs" id="solidTabs" aria-label="Modeling">
+      <button type="button" data-stool="build" data-tab="solid" aria-pressed="false"><svg class="i"><use href="#i-solid"/></svg><span class="tl1">Solid Modeling</span><span class="tl2">Solid</span></button>
+      <button type="button" data-stool="shape" data-tab="surface" aria-pressed="false"><svg class="i"><use href="#i-surface"/></svg><span class="tl1">Surface Modeling</span><span class="tl2">Surface</span></button>
+      <button type="button" data-stool="net" data-tab="net" aria-pressed="false"><svg class="i"><use href="#i-net"/></svg><span class="tl1">Net</span><span class="tl2">Net</span></button>
     </nav>
   </div>
 </footer>
+
+<div class="overlay" id="confirmDialog" hidden>
+  <div class="sheet glass-sheet" role="alertdialog" aria-labelledby="confirmTitle" aria-describedby="confirmText">
+    <h2 id="confirmTitle">Unsaved changes</h2>
+    <p id="confirmText"></p>
+    <div class="actions"><button type="button" id="confirmCancel">Cancel</button><button type="button" id="confirmDiscard">Don't save</button><button type="button" class="primary" id="confirmSave">Save</button></div>
+  </div>
+</div>
+
+<div class="overlay" id="saveDialog" hidden>
+  <div class="sheet glass-sheet" role="dialog" aria-labelledby="saveTitle">
+    <h2 id="saveTitle">Save project</h2>
+    <p>Projects are kept in this browser. Export… saves a file you can keep elsewhere.</p>
+    <label class="field">Name <input id="saveName" type="text" maxlength="60" autocomplete="off"></label>
+    <div class="actions"><button type="button" id="saveCancel">Cancel</button><button type="button" class="primary" id="saveConfirm">Save</button></div>
+  </div>
+</div>
+
+<div class="overlay" id="newDialog" hidden>
+  <div class="sheet glass-sheet wide" role="dialog" aria-labelledby="newTitle">
+    <h2 id="newTitle">New project</h2>
+    <p>Start from one module or a ready-made composition.</p>
+    <div class="presets" id="presetGrid"></div>
+    <div class="actions"><button type="button" id="newCancel">Cancel</button></div>
+  </div>
+</div>
+
+<div class="overlay" id="galleryDialog" hidden>
+  <div class="sheet glass-sheet wide" role="dialog" aria-labelledby="galleryTitle">
+    <div class="ghead"><h2 id="galleryTitle">Open a saved project</h2><button type="button" id="galleryImport">Import file…</button></div>
+    <div class="cards" id="galleryCards"></div>
+    <p class="gnote">Opening replaces the current project. If it has unsaved changes you are asked first.</p>
+    <div class="actions"><button type="button" id="galleryClose">Close</button></div>
+  </div>
+</div>
+
 
 <div class="overlay" id="sheetDialog" hidden>
   <form class="sheet" id="sheetForm" aria-labelledby="sheetTitle">
@@ -585,8 +850,20 @@
       <dd>Touch the sheet with your index finger to paint or draw creases. Pinch near a flap and move your hand to fold it. Pinch from a distance to use the ray. Poke panel buttons with a fingertip.</dd>
       <dt>Cutting</dt>
       <dd>Cut follows crease lines. Tap a segment between two crossings to cut it, or drag along a crease to cut just part of it. Cuts go through every layer under them. Once a piece is cut free, the Move tool carries that piece on its own.</dd>
-      <dt>Solid → Unfold</dt>
-      <dd>Switch to Solids in the header. Open: tap a panel to select it; its usable hinges glow green and the one in use is yellow. Drag the panel (or use the slider) to swing it. Group swings everything hinged beyond it; One panel keeps only the chosen hinge. Unfold all lays the default net flat; Refold all closes it. Build: tap a face, choose cube, tetrahedron, octahedron or cuboctahedron, and Add; only faces of the same shape join, and joined faces disappear so the inside stays hollow. Edges: tap an edge to switch hinge and cut; Find net searches for an overlap-free net and Check net tells you honestly whether the current layout is a verified net, overlaps, or could not be resolved. Panels that pass through each other turn red. Navigate in any tool with the bar on the right: Fit all (F), Focus selected (.), Reset view (0), Turn (I: drag the form to turn it; Alt+drag works any time), 90° and Tip. Drag empty space to orbit, right-drag to pan, wheel to zoom toward the pointer. In VR the panel's bottom row has Move view, Closer, Zoom −/+, Focus, Fit all and Reset; magnifying never changes real sizes or exports. Net has two modes that keep the ghost, pins, selection, cuts and piece positions: Arrange (the net lies flat; drag pieces, ⟲ ⟳ to turn them, tap a hinge to cut it apart, tap a cut whose sides meet to join it; equal numbers mark edges that join; Other nets tries different overlap-free nets; Resolve overlaps keeps your hinges and cuts and finds the fewest additional cuts that separate every overlapping pair (one cut first, then two…), moves only the freed parts, and shows each cut with the reason; Apply keeps a valid option, undoably; Arrange pieces only moves pieces) and Reshape (Resize box sizes on the net, or Edit vertices of the floating form; Pin base, tap to pin; faces stay flat unless you Triangulate). The Layout check card lists every issue (folds left, overlaps, warped panels, tilted pieces) with Focus issue and Next issue; the SVG export uses the same check. Edges: Tap: Lock locks an edge as it is (thick); Resolve overlaps never cuts a locked hinge. Export… saves the composition, the net as a full-size SVG, the 3D model (GLB in metres, or OBJ in millimetres with its MTL; assembled or current pose), or a PNG of the view.</dd>
+      <dt>Projects (☰)</dt>
+      <dd>The menu at the top left: New starts from a preset, Open shows your saved projects (with pictures), Save keeps the current one in this browser, Import reads a .json composition from a file, and Export saves the composition, the net as SVG, the 3D model (GLB in metres, or OBJ + MTL in millimetres) or a PNG of the view. Unsaved changes are named under the project title; New, Open and Import ask before discarding them. Projects saved by earlier versions are listed too.</dd>
+      <dt>Solid Modeling</dt>
+      <dd>Tap a face to target it, choose cube, tetrahedron, octahedron or cuboctahedron and Add on face; only faces of the same shape join, and joined faces disappear so the inside stays hollow. Remove, Duplicate, Rotate module and Tip over act on the targeted module; drag a module to move it, and it snaps to a matching face.</dd>
+      <dt>Surface Modeling</dt>
+      <dd>Push and pull the floating form directly: drag a corner or an edge. Tap to select a group of corners (a face selects its corners). Corners that must move to keep every face flat are shown in orange; when a move reaches a limit (a face would fold or turn inside out) it stops and the status line says why. Triangulate a face (Net → Triangulate) to let it fold.</dd>
+      <dt>Net</dt>
+      <dd>Unfold all lays the net flat; Refold all closes it; Reset net puts back the default cuts. Open: tap a panel and swing it on its hinge (Group swings everything hinged beyond it, Single just that panel). Edit edge: each deliberate tap switches an edge between hinge and cut, with a brief flash; Lock keeps an edge as it is. Join edge: tap a cut edge whose two sides meet to join it with a hinge. Triangulate: point at a corner to split its faces into triangles. Arrange: drag pieces and turn them with ⟲ ⟳; Arrange never cuts, and equal numbers mark the edges that join. Alternate nets: Fewest additional cuts keeps your hinges and cuts and finds the fewest extra cuts that separate every overlapping pair (one cut first, then two…), with the reason for each; Other hinge layouts searches different nets. Previews never replace your arrangement until you Accept, and Undo returns to it.</dd>
+      <dt>View</dt>
+      <dd>The toolbar on the right works in every tab: Fit all (F), Focus selected (.), Rotate (I: drag the form to turn it; Alt+drag any time) and Reset view (0); More has quarter turns, and the last button shows or hides the labels. Drag empty space to orbit, right-drag to pan, wheel to zoom toward the pointer. The view is framed in the part of the screen no panel covers. Undo and Redo sit above the tools (Ctrl+Z, Ctrl+Shift+Z).</dd>
+      <dt>Info and Errors</dt>
+      <dd>ⓘ Info lists the composition (modules, panels, internal faces removed, hinges, cuts). Errors counts the layout issues (folds left, overlaps, warped panels, tilted pieces); open it to see the list, tap an issue to highlight it, then Focus to bring it into view. The SVG export uses the same check.</dd>
+      <dt>VR panel</dt>
+      <dd>The same tabs and names: Solid Modeling, Surface Modeling, Net with its sub-tools, then Undo, Redo, Info, Errors and Focus issue, and a view row (Rotate, Closer, Zoom −/+, Focus selected, Fit all, Reset view). ☰ Project saves, starts new projects and opens saved ones. Magnifying never changes real sizes or exports.</dd>
       <dt>Layers</dt>
       <dd>“All” folds every layer on the side you grab. “Top flap” folds only the piece you grab.</dd>
     </dl>

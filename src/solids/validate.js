@@ -46,7 +46,7 @@ export function validateLayout(shell, tol = TOL) {
     p.verts.forEach((v, i) => { const d = Math.abs(v.clone().sub(p.verts[0]).dot(p.normal)); if (d > dev) { dev = d; worst = i; } });
     if (dev > tol.dist) {
       badPanels.add(p);
-      add({ kind: 'invalid', severity: 'error', panels: [p], edges: [], verts: [{ panel: p, i: worst }], text: `Panel P${p.no} is warped (a corner is ${(dev * 1000).toFixed(2)} mm out of its plane), so it cannot be cut from flat paper. Fix the shape (Reshape) or triangulate that face.` });
+      add({ kind: 'invalid', severity: 'error', panels: [p], edges: [], verts: [{ panel: p, i: worst }], text: `Panel P${p.no} is warped (a corner is ${(dev * 1000).toFixed(2)} mm out of its plane), so it cannot be cut from flat paper. Fix the shape (Surface Modeling) or triangulate that face.` });
     }
     let area = 0;
     for (let i = 1; i < p.verts.length - 1; i++) area += new THREE.Vector3().crossVectors(p.verts[i].clone().sub(p.verts[0]), p.verts[i + 1].clone().sub(p.verts[0])).length() / 2;
@@ -111,7 +111,7 @@ export function validateLayout(shell, tol = TOL) {
   for (const pc of pieces) {
     for (const r of pc.residual) {
       const a = Math.abs(r.deg);
-      add({ kind: 'fold', severity: 'error', piece: pc, panels: [r.P, r.Q], edges: [r.e], text: `Piece ${pc.index}: hinge ${r.e.no} is still folded ${a < 0.01 ? a.toFixed(4) : a.toFixed(2)}° from flat (between P${r.P.no} and P${r.Q.no}), lifting the panels beyond it by up to ${(r.lift * 1000).toFixed(2)} mm. This is a real residual fold, not rounding. It is not exported until it lies flat: press Lay net on surface, or open that hinge fully.` });
+      add({ kind: 'fold', severity: 'error', piece: pc, panels: [r.P, r.Q], edges: [r.e], text: `Piece ${pc.index}: hinge ${r.e.no} is still folded ${a < 0.01 ? a.toFixed(4) : a.toFixed(2)}° from flat (between P${r.P.no} and P${r.Q.no}), lifting the panels beyond it by up to ${(r.lift * 1000).toFixed(2)} mm. This is a real residual fold, not rounding. It is not exported until it lies flat: press Arrange net on surface (Net → Arrange), or open that hinge fully.` });
     }
     if (!pc.residual.length && !pc.planar && pc.valid) {
       add({ kind: 'fold', severity: 'error', piece: pc, panels: pc.panels, edges: [], text: `Piece ${pc.index} is not flat (up to ${(pc.maxDev * 1000).toFixed(2)} mm out of its plane), and no single hinge fold or warped panel explains it (hinge seams up to ${(pc.seam * 1000).toFixed(3)} mm apart). It is not exported until it lies flat: press Arrange pieces to lay it out again from its hinges.` });
@@ -126,7 +126,7 @@ export function validateLayout(shell, tol = TOL) {
   for (const pc of pieces) {
     if (pc.planar && !pc.onTable && pc.valid) {
       const raised = Math.max(Math.abs(pc.minY), Math.abs(pc.maxY));
-      add({ kind: 'placement', severity: 'info', piece: pc, panels: pc.panels, edges: [], text: `Piece ${pc.index} is flat but ${pc.tilt > deg(tol.angle) ? `tilted ${pc.tilt.toFixed(1)}°` : ''}${pc.tilt > deg(tol.angle) && raised > tol.dist ? ' and ' : ''}${raised > tol.dist ? `up to ${(raised * 1000).toFixed(1)} mm off the table` : ''}${pc.faceUp ? ' (face up)' : ''}. That is fine: it exports from its own plane. Lay net on surface puts it on the table.` });
+      add({ kind: 'placement', severity: 'info', piece: pc, panels: pc.panels, edges: [], text: `Piece ${pc.index} is flat but ${pc.tilt > deg(tol.angle) ? `tilted ${pc.tilt.toFixed(1)}°` : ''}${pc.tilt > deg(tol.angle) && raised > tol.dist ? ' and ' : ''}${raised > tol.dist ? `up to ${(raised * 1000).toFixed(1)} mm off the table` : ''}${pc.faceUp ? ' (face up)' : ''}. That is fine: it exports from its own plane. Arrange net on surface puts it on the table.` });
     }
   }
   const order = { error: 0, warning: 1, info: 2 };
@@ -172,7 +172,7 @@ export function refusalText(check) {
     } else parts.push(`Piece ${pc.index} is not flat (up to ${(pc.maxDev * 1000).toFixed(2)} mm out of its plane).`);
   }
   const folded = check.excluded.filter((pc) => pc.valid).reduce((n, pc) => n + pc.residual.length, 0);
-  if (check.excluded.some((pc) => pc.valid)) parts.push(`A piece is exported once it lies flat: press Lay net on surface (Net → Arrange), or open ${folded === 1 ? 'that hinge' : 'those hinges'} fully.`);
+  if (check.excluded.some((pc) => pc.valid)) parts.push(`A piece is exported once it lies flat: press Arrange net on surface (Net → Arrange), or open ${folded === 1 ? 'that hinge' : 'those hinges'} fully.`);
   return parts.join(' ');
 }
 

@@ -838,7 +838,7 @@ export class ShapeEditor {
   startScale() {
     const ws = this.ws;
     const keys = [...this.selected].filter((k) => !this.pins.has(k));
-    if (keys.length < 2) { ws.app.toast('Select at least two corners first (tap a face or corners with Tap: Select), then scale them.'); return null; }
+    if (keys.length < 2) { ws.app.toast('Select at least two corners first (tap a face or its corners), then scale them.'); return null; }
     ws.stopAnim();
     const model = editModel(ws.shell);
     ws.pushHistory();
@@ -882,11 +882,21 @@ export class ShapeEditor {
     const b = this.closedBox().translate(off);
     const L = this.L0 || this.shell.edgeLen;
     // In Arrange the ghost is only shown; editing happens in Reshape.
-    if (this.ws.state.tool !== 'shape') text = 'Assembled form · Reshape to edit';
-    const sp = new THREE.Sprite(this.labelMat(text, text.startsWith('Edit')));
+    if (this.ws.state.tool !== 'shape') text = 'Assembled form · edit in Surface Modeling';
+    const base = this.labelMat(text, text.startsWith('Edit'));
+    // On a screen the label keeps a constant size however close you zoom;
+    // in VR it stays a real-size label beside the form.
+    const vr = this.ws.app.renderer?.xr?.isPresenting;
+    let mat = base;
+    if (!vr) {
+      this._badgeMats = this._badgeMats || new Map();
+      if (!this._badgeMats.has(base)) { const m = base.clone(); m.sizeAttenuation = false; m.userData = { ...base.userData }; this._badgeMats.set(base, m); }
+      mat = this._badgeMats.get(base);
+    }
+    const sp = new THREE.Sprite(mat);
     sp.position.set((b.min.x + b.max.x) / 2, b.max.y + L * 0.3, (b.min.z + b.max.z) / 2);
-    const h = L * 0.2;
-    sp.scale.set(h * sp.material.userData.aspect, h, 1);
+    const h = vr ? L * 0.2 : (typeof window !== 'undefined' && window.innerWidth < 640 ? 0.022 : 0.03);
+    sp.scale.set(h * base.userData.aspect, h, 1);
     sp.renderOrder = 4;
     this.ghost.add(sp);
   }

@@ -9,6 +9,7 @@ import { ShapeEditor } from './shapeedit.js';
 import { captureLayout, applyLayout, anchorTo, elPos } from './resize.js';
 import { validateLayout } from './validate.js';
 import { resolveOverlaps as resolveOverlapsSearch, edgeLength } from './suggest.js';
+import { projects, describe as describeData } from './projects.js';
 
 // "Solid → Unfold" workspace: build a composition of solids, then open its
 // exterior shell panel by panel along hinges.
@@ -355,35 +356,134 @@ export class SolidsWorkspace {
     this.shapeEdit.refresh();
   }
 
-  pushHistory() {
-    this.history.push(this.snapshot());
+  pushHistory(snap = this.snapshot()) {
+    this.history.push(snap);
     if (this.history.length > 80) this.history.shift();
+    this.future = [];
+    this.changes = (this.changes || 0) + 1;
     this.app.notify?.();
   }
 
   undo() {
     this.tools.finishAll();
     this.stopAnim();
+    if (this.alt) this.endAlternatives();
     const s = this.history.pop();
     if (!s) { this.app.toast('Nothing to undo.'); return; }
+    (this.future || (this.future = [])).push(this.snapshot());
+    this.changes = (this.changes || 0) + 1;
     this.restoreSnapshot(s);
     this.app.toast('Undone.');
   }
 
-  save() {
-    try {
-      localStorage.setItem(STORE_KEY, JSON.stringify({ v: 3, ...this.fullSnapshot() }));
-      this.app.toast(`Saved: ${this.describe()}.`);
-    } catch {
-      this.app.toast('Saving is blocked in this browser view.');
-    }
+  redo() {
+    this.tools.finishAll();
+    this.stopAnim();
+    if (this.alt) this.endAlternatives();
+    const s = this.future && this.future.pop();
+    if (!s) { this.app.toast('Nothing to redo.'); return; }
+    this.history.push(this.snapshot());
+    this.changes = (this.changes || 0) + 1;
+    this.restoreSnapshot(s);
+    this.app.toast('Redone.');
   }
 
+  canRedo() { return !!(this.future && this.future.length); }
+
+  // ------------------------------------------------------------- projects
+  // A project is the composition plus a name; it is saved in the browser's
+  // project gallery (projects.js). Changes since the last save make it
+  // "unsaved", and replacing it (New, Open, Import) asks first.
+
+  isDirty() { return (this.changes || 0) !== (this.project?.savedChanges || 0); }
+
+  projectInfo() {
+    const p = this.project || { name: 'Untitled' };
+    return { id: p.id || null, name: p.name || 'Untitled', savedAt: p.savedAt || null, dirty: this.isDirty() };
+  }
+
+  thumbnail() {
+    const app = this.app, r = app.renderer;
+    if (typeof document === 'undefined' || !r || r.xr?.isPresenting) return null;
+    try {
+      r.render(app.scene, app.camera);
+      const src = r.domElement;
+      const c = document.createElement('canvas');
+      c.width = 240; c.height = 150;
+      const s = Math.max(c.width / src.width, c.height / src.height);
+      const w = src.width * s, h = src.height * s;
+      c.getContext('2d').drawImage(src, (c.width - w) / 2, (c.height - h) / 2, w, h);
+      return c.toDataURL('image/jpeg', 0.72);
+    } catch { return null; }
+  }
+
+  // Save to the gallery: the current project, or a new one named `name`.
+  saveProject(name) {
+    const data = { v: 3, ...this.fullSnapshot() };
+    const p = this.project || {};
+    const entry = projects.save({ id: name ? null : p.id, name: name || p.name || this.autoName(), data, summary: `${describeData(data)} · ${this.shell.panels.length} panels`, thumb: this.thumbnail() });
+    if (!entry) { this.app.toast('Saving is blocked or the browser storage is full. Use Export… to save a file instead.', 6000); return null; }
+    this.project = { id: entry.id, name: entry.name, savedAt: entry.savedAt, savedChanges: this.changes || 0 };
+    this.app.toast(`Saved “${entry.name}”: ${this.describe()}.`);
+    this.app.notify?.();
+    return entry;
+  }
+
+  projectList() { return projects.list(); }
+
+  deleteProject(id) {
+    projects.remove(id);
+    if (this.project && this.project.id === id) this.project = { id: null, name: this.project.name, savedAt: null, savedChanges: -1 };
+    this.app.notify?.();
+  }
+
+  autoName() {
+    const n = projects.list().length + 1;
+    return `Project ${n}`;
+  }
+
+  // Replace the current project (the caller has already asked about unsaved
+  // changes). Undo history starts afresh.
+  openProject(id) {
+    const e = projects.get(id);
+    if (!e) { this.app.toast('That project is no longer in this browser.'); return false; }
+    if (!this.loadData(e.data, `Opened “${e.name}”`)) return false;
+    this.history = []; this.future = [];
+    this.project = { id: e.id, name: e.name, savedAt: e.savedAt, savedChanges: this.changes || 0 };
+    this.app.notify?.();
+    return true;
+  }
+
+  newProject(presetKey = 'one') {
+    this.preset(presetKey);
+    this.history = []; this.future = [];
+    this.project = { id: null, name: 'Untitled', savedAt: null, savedChanges: this.changes || 0 };
+    this.app.notify?.();
+  }
+
+  importProject(data, fileName = 'Imported') {
+    if (!this.loadData(data, 'Imported')) return false;
+    this.history = []; this.future = [];
+    // Imported but not yet saved in this browser.
+    this.project = { id: null, name: fileName.replace(/\.json$/i, ''), savedAt: null, savedChanges: -1 };
+    this.app.notify?.();
+    return true;
+  }
+
+  // Older entry points (VR panel, tests): Save keeps the current project,
+  // Load opens the most recently saved one.
+  save() { return this.saveProject(); }
+
   load() {
-    let data = null;
-    try { data = JSON.parse(localStorage.getItem(STORE_KEY) || 'null'); } catch { data = null; }
-    if (!data) { this.app.toast('Nothing saved yet.'); return; }
-    this.loadData(data, 'Loaded');
+    const e = projects.latest();
+    if (!e) {
+      let data = null;
+      try { data = JSON.parse(localStorage.getItem(STORE_KEY) || 'null'); } catch { data = null; }
+      if (!data) { this.app.toast('Nothing saved yet.'); return; }
+      this.loadData(data, 'Loaded');
+      return;
+    }
+    this.openProject(e.id);
   }
 
   // Works for saves from earlier versions too (cube-only, no net status).
@@ -524,6 +624,7 @@ export class SolidsWorkspace {
       if (!e.shared || e.locked) return { color: COLORS.locked, w, dashed: true };
       return e.type === 'hinge' ? { color: COLORS.hinge, w } : { color: COLORS.cut, w, dashed: true };
     }
+    if (this.edgeFlash && this.edgeFlash.e === e) return { color: '#ffffff', w: w * 3.4 };
     if (this.hoverEdge === e) return { color: '#ffffff', w: w * 2.6 };
     const fi = this.focusedIssue();
     if (fi && fi.edges.includes(e)) return { color: COLORS.issue, w: w * 3 };
@@ -600,7 +701,7 @@ export class SolidsWorkspace {
     const hits = this.raycaster.intersectObjects(this.pickables || [], false);
     const lift = this.liftHit(ray);
     if (lift && (!hits.length || lift.distance < hits[0].distance)) return lift;
-    if (this.shapeEdit.active && this.state.tool === 'shape') {
+    if (this.shapeEdit.active && (this.state.tool === 'shape' || this.state.tool === 'tri')) {
       const g = this.shapeEdit.pickGhost(ray);
       if (g && (!hits.length || g.distance < hits[0].distance)) return g;
     }
@@ -628,7 +729,7 @@ export class SolidsWorkspace {
     const lh = !!(hit && hit.lift);
     if (lh !== this.liftHover) { this.liftHover = lh; this.styleLift(); }
     if (lh) hit = null;
-    if (this.state.tool === 'shape' && this.shapeEdit.active && !this.navTurn) { this.shapeEdit.setHover(hit, ptr); return; }
+    if ((this.state.tool === 'shape' || this.state.tool === 'tri') && this.shapeEdit.active && !this.navTurn) { this.shapeEdit.setHover(hit, ptr); return; }
     if (this.navTurn || this.state.tool === 'inspect') {
       const h = !!hit;
       if (h !== this.inspectHover) { this.inspectHover = h; this.refreshMaterials(); }
@@ -1217,12 +1318,17 @@ export class SolidsWorkspace {
   setTool(t) {
     // Inspect is now part of every tool: Build with Turn view on.
     if (t === 'inspect') { this.setTool('build'); this.setNavTurn(true); return; }
-    // Net is one workspace with two modes: Arrange (layout) and Reshape (shape).
-    if (t === 'net') t = this.state.netMode || 'layout';
+    // Tabs: Solid Modeling (build), Surface Modeling (shape) and Net, whose
+    // sub-tools are open, edges, join, tri, layout (Arrange) and alts
+    // (Alternate nets: the Arrange tool with the comparison).
+    if (t === 'net') t = this.state.netSub || 'layout';
+    const netSubs = ['open', 'edges', 'join', 'tri', 'layout', 'alts'];
+    if (netSubs.includes(t)) this.state.netSub = t;
+    if (t === 'alts') t = 'layout';
     this.tools.finishAll();
     const prev = this.state.tool;
-    const inNet = (x) => x === 'layout' || x === 'shape';
-    if (inNet(t)) this.state.netMode = t;
+    const inNet = (x) => x === 'layout' || x === 'shape' || x === 'tri' || x === 'join';
+    if (t === 'layout' || t === 'shape') this.state.netMode = t;
     this.state.tool = t;
     this.hoverPanel = this.hoverEdge = this.hoverHinge = null;
     this.inspectHover = false;
@@ -1230,7 +1336,7 @@ export class SolidsWorkspace {
     if (t !== 'build') this.sel.solidId = this.sel.fi = null;
     if (!inNet(t)) this.sel.piece = null;
     if (!inNet(t) && this.issueKey) this.clearIssueFocus(false);
-    if (t !== 'layout' && this.alt) this.endAlternatives();
+    if ((t !== 'layout' || this.state.netSub !== 'alts') && this.alt) this.endAlternatives();
     this.loopEdges.clear();
     this.refreshStyles();
     const hints = {
@@ -1238,8 +1344,10 @@ export class SolidsWorkspace {
       build: 'Tap a face to pick it, then Add. Drag a solid to move it; it snaps to a matching face.',
       open: 'Fold mode (panels stay rigid): touch or point near an edge to see the flap and its hinge, then pinch, pull the trigger or grip to hold it and lift. To move the whole form, grab the blue Move puck.',
       edges: 'Tap an edge to switch it between hinge (green) and cut (red, dashed).',
-      layout: 'Flat layout: drag a piece to move it, turn it with ⟲ ⟳, tap a hinge to cut it apart, tap a cut whose sides meet to join it. Matching numbers mark edges that join.',
-      shape: 'Shape: stretch the whole composition along its X (red), Y (green) and Z (blue) axes, or type its width, height and depth. Joined faces stay joined; fold angles and the net are worked out again. Single edges cannot be edited yet.',
+      layout: 'Arrange: drag a piece to move it, turn it with ⟲ ⟳. Arranging never cuts; matching numbers mark edges that join (Join edge).',
+      join: 'Join edge: tap a cut edge whose two sides meet to join it with a hinge.',
+      tri: 'Triangulate: point at a corner of the floating form and tap it (or press Triangulate at corner); the faces there split into triangles with new fold lines.',
+      shape: 'Surface Modeling: drag a corner or edge of the floating form to push or pull it.',
     };
     let msg = hints[t];
     // The view turn and magnification stay as they are: navigation is
@@ -1249,27 +1357,31 @@ export class SolidsWorkspace {
       msg += ` (View ${v}; Reset view puts it back.)`;
     }
     this.app.toast(msg, t === 'inspect' || t === 'layout' ? 6000 : undefined);
-    if (t === 'layout' && prev !== 'layout' && prev !== 'shape' && !this.shell.flatReport().ok) this.layFlat({ intro: true });
+    if ((t === 'layout' || t === 'join' || t === 'tri') && !inNet(prev) && !this.shell.flatReport().ok && t === 'layout') this.layFlat({ intro: true });
     if (t === 'layout' && prev === 'shape') {
       // Arrange keeps the reshaped net, the ghost, pins and selection.
-      this.app.toast('Net → Arrange: move, turn, cut and join pieces. The ghost, pins and selection are kept for Reshape.', 6000);
+      this.app.toast('Net → Arrange: move and turn pieces (Arrange never cuts). Your Surface Modeling selection is kept.', 6000);
     }
-    if (t === 'shape' && prev === 'layout' && this.shapeEdit.active) {
+    // Surface Modeling: direct push/pull of corners and edges; taps select.
+    // (Pins and box Resize remain only for older saved states and tests.)
+    if (t === 'shape' && inNet(prev) && this.shapeEdit.active) {
       this.shapeEdit.resume();
-      this.app.toast(this.shapeEdit.mode === 'resize'
-        ? 'Net → Reshape (Resize): pins, cuts and piece positions are kept. Tap a side or corner of the net to pin it, drag another.'
-        : 'Net → Reshape (Edit vertices): pins, selection, cuts and piece positions are kept. Drag a corner or edge of the floating form.', 7000);
+      this.shapeEdit.mode = 'edit';
+      this.shapeEdit.tapMode = 'select';
+      this.shapeEdit.refresh();
+      this.app.toast('Surface Modeling: drag a corner or edge of the floating form to push or pull it; tap to select a group. Your cuts, piece positions and selection are kept.', 7000);
     } else if (t === 'shape' && prev !== 'shape') {
       this.shapeEdit.enter();
-      msg = this.shapeEdit.mode === 'resize'
-        ? 'Shape: the net lies on the surface and the assembled form floats above it. Resize (panel sizes change, angles stay): tap a side or corner of the net to pin it, drag another. Edit vertices: move corners and edges of the floating form freely.'
-        : 'Shape → Edit vertices: drag a corner or edge of the floating form; the net below is redrawn as you go. Tap to pin; Pin base pins the bottom. Faces stay flat unless you triangulate.';
-      this.app.toast(msg, 8000);
+      this.shapeEdit.mode = 'edit';
+      this.shapeEdit.tapMode = 'select';
+      this.shapeEdit.frozen = this.shapeEdit.ghostOffset();
+      this.shapeEdit.refresh();
+      this.app.toast('Surface Modeling: drag a corner or edge of the floating form to push or pull it (Shift: slide level); tap corners, edges or faces to select a group. Neighbours that must move turn orange; the net below follows.', 8000);
       this.frameView();
     }
     // The linked ghost stays up across the Net workspace; it shows the
     // assembled form above the net in Arrange too.
-    if (t === 'layout' && !this.shapeEdit.active && prev !== 'shape') this.shapeEdit.enter({ quiet: true });
+    if ((t === 'layout' || t === 'tri' || t === 'join') && !this.shapeEdit.active && prev !== 'shape') this.shapeEdit.enter({ quiet: true });
     if (!inNet(t)) this.shapeEdit.exit();
     else this.shapeEdit.refresh();
     this.updateAxes();
@@ -1772,7 +1884,7 @@ export class SolidsWorkspace {
 
   // Focus an issue: highlight its panels, edges and corners, frame it on
   // screen, and say what is wrong.
-  focusIssue(i) {
+  focusIssue(i, { camera = true } = {}) {
     const check = this.layoutCheck();
     if (!Number.isInteger(i)) i = this.issueKey && this.issueIdx >= 0 ? this.issueIdx : 0;
     if (!check.issues.length) {
@@ -1786,7 +1898,7 @@ export class SolidsWorkspace {
     this.issueKey = is.key;
     this.showIssueMarks(is);
     this.refreshStyles();
-    if (!is.box.isEmpty()) {
+    if (camera && !is.box.isEmpty()) {
       this.root.updateMatrixWorld(true);
       this.shellGroup.updateMatrixWorld(true);
       const world = is.box.clone().applyMatrix4(this.shellGroup.matrixWorld);
@@ -1929,7 +2041,7 @@ export class SolidsWorkspace {
       if (all.length === 1) piece = all[0];
       else { this.app.toast('Tap a piece first, then turn it.'); return; }
     }
-    if (!this.shell.flatReport().ok) { this.app.toast('Lay the net on the surface first, then turn its pieces.'); return; }
+    if (!this.shell.flatReport().ok) { this.app.toast('Lay the net flat first (Arrange net on surface), then turn its pieces.'); return; }
     this.pushHistory();
     const m = planarMove(0, 0, rad(degrees), pieceCentre(this.shell, piece));
     this.animatePoses(piece.map((p) => [p, p.M.clone(), m.clone().multiply(p.M)]), 'piece', `Piece turned ${degrees > 0 ? '⟲' : '⟳'} ${Math.abs(degrees)}°.`);
@@ -1970,7 +2082,7 @@ export class SolidsWorkspace {
     this.sel.piece = null;
     this.refreshStyles();
     if (!this.shell.flatReport().ok) {
-      this.app.toast(`Cut edge ${e.no}. Lay the net on the surface to separate the pieces.`);
+      this.app.toast(`Cut edge ${e.no}. Arrange net on surface (Net → Arrange) separates the pieces.`);
       this.app.notify?.();
       return;
     }
@@ -2034,8 +2146,8 @@ export class SolidsWorkspace {
   setEdgeTap(m) {
     this.state.edgeTap = m === 'lock' ? 'lock' : 'switch';
     this.app.toast(m === 'lock'
-      ? 'Tap: Lock. Tapping an edge locks it as it is (thick line): a locked hinge stays a hinge and a locked cut stays a cut, also in Suggest split layout. Tap again to unlock.'
-      : 'Tap: Switch. Tapping an edge switches it between hinge and cut.');
+      ? 'Lock: tapping an edge locks it as it is (thick line): a locked hinge stays a hinge and a locked cut stays a cut, also in Alternate nets. Tap again to unlock.'
+      : 'Hinge ↔ cut: each deliberate tap switches an edge between hinge and cut.');
     this.app.notify?.();
   }
 
@@ -2044,17 +2156,54 @@ export class SolidsWorkspace {
     this.pushHistory();
     e.userLock = e.userLock ? undefined : e.type;
     this.refreshStyles();
-    this.app.toast(e.userLock ? `Edge ${e.no} locked as a ${e.type}. Suggest split layout will keep it.` : `Edge ${e.no} unlocked.`);
+    this.app.toast(e.userLock ? `Edge ${e.no} locked as a ${e.type}. Alternate nets will keep it.` : `Edge ${e.no} unlocked.`);
     this.app.notify?.();
   }
 
+  // Join edge: make a cut edge a hinge again when its two sides meet.
+  joinEdge(e) {
+    if (!e || !e.shared || e.locked) { this.app.toast('This edge is not shared by two panels, so it cannot be joined.'); return false; }
+    if (e.userLock) { this.app.toast(this.lockRefusal(e), 5000); return false; }
+    if (e.type === 'hinge') { this.flashEdge(e); this.app.toast(`Edge ${e.no} is already a hinge.`); return false; }
+    if (!this.shell.intact(e)) {
+      this.app.toast(`Edge ${e.no} is cut and its two sides are apart. Use Arrange to move a piece until the two edges numbered ${e.no} meet (they snap), then join.`, 6000);
+      return false;
+    }
+    const [P, Q] = [e.uses[0].panel, e.uses[1].panel];
+    if (!this.shell.isClosed()) {
+      const rootOf = this.shell.pieceRoots();
+      if (rootOf.get(P) === rootOf.get(Q)) { this.app.toast(`Joining edge ${e.no} would close a loop of hinges inside this piece, so it stays cut.`); return false; }
+    }
+    this.pushHistory();
+    e.type = 'hinge';
+    this.shell.classify();
+    this.netCycle = null;
+    this.flashEdge(e);
+    this.app.toast(`Edge ${e.no} joined as a hinge (it keeps its fold). ${this.netSentence()}`, 5000);
+    this.app.notify?.();
+    return true;
+  }
+
   lockRefusal(e) {
-    return `Edge ${e.no} is locked as a ${e.userLock}. In Edges, choose Tap: Lock and tap it to unlock it first.`;
+    return `Edge ${e.no} is locked as a ${e.userLock}. In Edit edge, choose Lock and tap it to unlock it first.`;
+  }
+
+  // Brief bright outline on an edge that just changed (Edit edge, Join edge).
+  flashEdge(e) {
+    this.edgeFlash = { e, until: performance.now() + 450 };
+    this.refreshStyles();
+    clearTimeout(this.edgeFlashTimer);
+    this.edgeFlashTimer = setTimeout(() => { this.edgeFlash = null; this.refreshStyles(); }, 470);
   }
 
   toggleEdge(e) {
     if (!e.shared || e.locked) { this.app.toast('More than two panels meet at this edge, so it stays cut.'); return; }
     if (e.userLock) { this.app.toast(this.lockRefusal(e), 5000); return; }
+    // Deliberate taps: a second toggle of the same edge within 0.3 s is a
+    // bounce (a double-registered tap), not a decision.
+    const now = performance.now();
+    if (this.lastToggle && this.lastToggle.e === e && now - this.lastToggle.t < 300) return;
+    this.lastToggle = { e, t: now };
     if (e.type === 'cut' && !this.shell.intact(e)) { this.app.toast('These panels are apart. Refold them before joining this edge with a hinge.'); return; }
     this.pushHistory();
     e.type = e.type === 'hinge' ? 'cut' : 'hinge';
@@ -2062,8 +2211,8 @@ export class SolidsWorkspace {
     this.loopEdges.clear();
     // Re-check the layout straight away so its status is always current.
     this.shell.classify();
-    const msg = `${e.type === 'hinge' ? 'Edge is now a hinge.' : 'Edge is now a cut.'} ${this.netSentence()}`;
-    this.refreshStyles();
+    const msg = `${e.type === 'hinge' ? `Edge ${e.no} is now a hinge.` : `Edge ${e.no} is now a cut.`} ${this.netSentence()}`;
+    this.flashEdge(e);
     this.app.toast(msg, 4500);
     this.app.notify?.();
   }
@@ -2442,163 +2591,121 @@ export class SolidsWorkspace {
 
   // Rows for the VR control panel.
   panelRows(row, B, M, W, y0) {
+    // Same names and hierarchy as the screen: three tabs, the Net
+    // sub-tools, the tool's own row, Undo/Redo with Info/Errors, and the
+    // navigation row. Project commands are on the panel's Project page.
     const s = this.state;
     const a = this;
-    row(y0, 84, [
-      { label: 'Build', action: () => a.setTool('build'), active: s.tool === 'build' || s.tool === 'inspect' },
-      { label: 'Open', action: () => a.setTool('open'), active: s.tool === 'open' },
-      { label: 'Edges', action: () => a.setTool('edges'), active: s.tool === 'edges' },
-      { label: 'Net: Arrange', w: 1.45, action: () => a.setTool('layout'), active: s.tool === 'layout' },
-      { label: 'Net: Reshape', w: 1.45, action: () => a.setTool('shape'), active: s.tool === 'shape' },
+    const tab = s.tool === 'build' || s.tool === 'inspect' ? 'solid' : s.tool === 'shape' ? 'surface' : 'net';
+    const sub = s.netSub || 'layout';
+    row(y0, 76, [
+      { label: 'Solid Modeling', action: () => a.setTool('build'), active: tab === 'solid' },
+      { label: 'Surface Modeling', w: 1.1, action: () => a.setTool('shape'), active: tab === 'surface' },
+      { label: 'Net', w: 0.7, action: () => a.setTool('net'), active: tab === 'net' },
     ], 8);
-    // Navigation, in every tool.
-    row(y0 + 460, 70, [
-      { label: 'Move view', w: 1.25, action: () => a.setNavTurn(), active: a.navTurn },
-      { label: 'Closer', action: () => { a.bringCloser(); a.app.toast('Brought closer. Fit all puts it back on the table.'); } },
-      { label: 'Zoom −', action: () => a.zoomView(1 / 1.25) },
-      { label: 'Zoom +', action: () => a.zoomView(1.25) },
-      { label: 'Focus', action: () => a.focusSelected() },
-      { label: 'Fit all', action: () => a.fitAll() },
-      { label: 'Reset view', w: 1.25, action: () => a.resetView() },
-    ], 6);
-    const y1 = y0 + 100, y2 = y0 + 190;
-    if (s.tool === 'inspect') {
-      row(y1, 78, [
-        { label: 'Reset orientation', w: 1.5, action: () => a.resetOrientation() },
-        { label: 'Fit view', action: () => a.fitView() },
-        { label: 'Turn 90°', action: () => a.stepView('up', 90) },
-        { label: 'Tip 90°', action: () => a.stepView('tip', 90) },
-      ], 8);
-      B.push({ kind: 'text', x: M, y: y2, w: W, h: 78, label: 'Pinch or pull the trigger on the form and turn your wrist; with both hands, move them around each other. Only the view turns.' });
-    } else if (s.tool === 'shape' && a.shapeEdit.mode === 'edit') {
-      const ed = a.shapeEdit;
-      row(y1, 78, [
-        { label: 'Resize', action: () => ed.setMode('resize'), active: false },
-        { label: 'Edit vertices', w: 1.3, action: () => ed.setMode('edit'), active: true },
-        { label: 'Tap: pin', action: () => ed.setTapMode('pin'), active: ed.tapMode === 'pin' },
-        { label: 'Tap: select', action: () => ed.setTapMode('select'), active: ed.tapMode === 'select' },
-        { label: 'Pin base', action: () => ed.pinBase() },
-        { label: 'Clear pins', action: () => ed.clearPins() },
-      ], 6);
-      row(y2, 78, [
-        { label: 'Shrink 10%', action: () => ed.stepScale(0.9) },
-        { label: 'Grow 10%', action: () => ed.stepScale(1.1) },
-        { label: 'Clear sel.', action: () => ed.clearSelection() },
-        { label: 'Triangulate', action: () => ed.triangulateAt() },
-        { label: 'Reset edits', action: () => ed.resetEdits() },
-      ], 6);
-    } else if (s.tool === 'shape') {
-      row(y1, 78, [
-        { label: 'Resize', action: () => a.shapeEdit.setMode('resize'), active: true },
-        { label: 'Edit', action: () => a.shapeEdit.setMode('edit'), active: false },
-        { label: 'X −10%', action: () => a.stretchBy('x', 1 / 1.1) },
-        { label: 'X +10%', action: () => a.stretchBy('x', 1.1) },
-        { label: 'Y −10%', action: () => a.stretchBy('y', 1 / 1.1) },
-        { label: 'Y +10%', action: () => a.stretchBy('y', 1.1) },
-        { label: 'Z −10%', action: () => a.stretchBy('z', 1 / 1.1) },
-        { label: 'Z +10%', action: () => a.stretchBy('z', 1.1) },
-      ], 4);
-      row(y2, 78, [
-        { label: 'Reset shape', action: () => a.resetShape() },
-        { label: 'Unpin', action: () => (a.shapeEdit.pin ? a.shapeEdit.togglePin(a.shapeEdit.pin) : a.app.toast('Nothing is pinned. Tap a side or corner of the net to pin it.')) },
-        { label: a.sizeText().replace(' (width × height × depth)', ''), w: 2.2, kind: 'label' },
-      ], 8);
-    } else if (s.tool === 'layout') {
-      row(y1, 78, [
-        { label: 'Lay flat', action: () => a.layFlat() },
-        { label: 'Arrange', action: () => a.arrangePieces() },
-        { label: 'Other nets', action: () => a.otherNets() },
-        { label: 'Resolve', action: () => a.resolveOverlaps(), active: !!a.alt },
-        { label: '⟲ 15°', action: () => a.rotatePiece(15) },
-        { label: '⟳ 15°', action: () => a.rotatePiece(-15) },
-      ], 8);
-      if (a.alt) {
+    let y = y0 + 88;
+    const R = (items, gap = 8, h = 70) => { row(y, h, items, gap); y += h + 10; };
+    const text = (label, h = 70) => { B.push({ kind: 'text', x: M, y, w: W, h, label }); y += h + 10; };
+    if (tab === 'solid') {
+      const short = { cube: 'Cube', tetra: 'Tetra', octa: 'Octa', cubocta: 'Cubocta' };
+      R(SOLID_TYPES.map((t) => ({ label: short[t] || t, action: () => a.setAddType(t), active: a.addType === t })));
+      R([
+        { label: 'Add on face', w: 1.3, action: () => a.addSolid() },
+        { label: 'Remove', action: () => a.removeSolid() },
+        { label: 'Duplicate', action: () => a.duplicate() },
+        { label: 'Rotate module', w: 1.35, action: () => a.rotateSolid() },
+        { label: 'Tip over', action: () => a.turnAll('x') },
+      ]);
+      text('Point at a face and pull the trigger to target it, choose a module and Add on face. Grab a module to move it; it snaps to a matching face.');
+    } else if (tab === 'surface') {
+      R([
+        { label: 'Clear selection', action: () => a.shapeEdit.clearSelection() },
+        { label: 'Reset edits', action: () => a.shapeEdit.resetEdits() },
+      ]);
+      text('Grab a corner or edge of the floating form and move it to push or pull it. Tap to select a group. Orange corners move to keep faces flat; at a limit the move stops and says why.', 150);
+    } else {
+      const subBtn = (label, key, w) => ({ label, w, action: () => a.setTool(key), active: sub === key });
+      R([
+        { label: 'Unfold all', action: () => a.unfoldAll() },
+        { label: 'Refold all', action: () => a.refoldAll() },
+        { label: 'Reset net', action: () => a.resetLayout() },
+        subBtn('Open', 'open', 0.8), subBtn('Edit edge', 'edges'),
+      ], 6, 64);
+      R([subBtn('Join edge', 'join'), subBtn('Triangulate', 'tri', 1.1), subBtn('Arrange', 'layout', 0.9), subBtn('Alternate nets', 'alts', 1.3)], 6, 64);
+      if (sub === 'open') {
+        const ang = this.selectedAngle();
+        R([
+          { label: 'Group', action: () => a.setOpenMode('group'), active: s.openMode === 'group' },
+          { label: 'Single', action: () => a.setOpenMode('one'), active: s.openMode === 'one' },
+          { label: 'Open flat', action: () => a.openFlat() },
+          { label: 'Close', action: () => a.close() },
+          { label: '−15°', w: 0.8, action: () => a.turnBy(-rad(15)) },
+          { label: ang === null ? '—' : `${Math.round(ang)}°`, w: 0.7, kind: 'label' },
+          { label: '+15°', w: 0.8, action: () => a.turnBy(rad(15)) },
+        ], 6);
+      } else if (sub === 'edges') {
+        R([
+          { label: 'Hinge ↔ cut', action: () => a.setEdgeTap('switch'), active: s.edgeTap !== 'lock' },
+          { label: 'Lock', action: () => a.setEdgeTap('lock'), active: s.edgeTap === 'lock' },
+          { label: 'Find net', action: () => a.defaultNet() },
+          { label: 'Check net', action: () => a.checkNet() },
+        ]);
+      } else if (sub === 'join') {
+        text('Point at a cut edge whose two sides meet and pull the trigger to join it with a hinge.');
+      } else if (sub === 'tri') {
+        R([{ label: 'Triangulate at corner', action: () => a.shapeEdit.triangulateAt() }]);
+      } else if (sub === 'alts' && a.alt) {
         const al = a.alt;
         const lab = al.searching ? `Trying ${al.level} cut${al.level === 1 ? '' : 's'}…` : al.idx < 0 ? `My layout (1 of ${al.list.length + 1})` : `Option ${al.idx + 1} of ${al.list.length}`;
-        row(y2, 78, [
+        R([
           { label: '◀', w: 0.5, action: () => a.previewAlternative(al.idx - 1), disabled: al.searching },
           { label: lab, w: 2.2, kind: 'label' },
           { label: '▶', w: 0.5, action: () => a.previewAlternative(al.idx + 1), disabled: al.searching },
-          { label: 'Apply', action: () => a.applyAlternative(), disabled: al.searching || al.idx < 0 || !al.list[al.idx].valid },
+          { label: 'Accept', action: () => a.applyAlternative(), disabled: al.searching || al.idx < 0 || !al.list[al.idx].valid },
           { label: 'Keep mine', w: 1.2, action: () => { a.endAlternatives(); a.app.toast('Kept my layout.'); } },
-        ], 8);
+        ]);
+      } else if (sub === 'alts') {
+        R([
+          { label: 'Fewest additional cuts', w: 1.6, action: () => a.resolveOverlaps() },
+          { label: 'Other hinge layouts', w: 1.4, action: () => a.otherNets() },
+        ]);
       } else {
-      const check = a.shell.isClosed() ? null : a.layoutCheck();
-      const fi = a.focusedIssue();
-      const n = check ? check.issues.length : 0;
-      const head = !check ? 'Closed form' : !n ? 'No issues ✓'
-        : fi ? `Issue ${a.issueIdx + 1} of ${n}` : `${check.errors ? `${check.errors} error${check.errors > 1 ? 's' : ''}` : ''}${check.errors && n - check.errors ? ' · ' : ''}${n - check.errors ? `${n - check.errors} other` : ''}`;
-      row(y2, 78, [
-        { label: head, w: 1.6, kind: 'label' },
-        { label: 'Focus issue', action: () => a.focusIssue(), disabled: !n },
-        { label: 'Next issue', action: () => a.nextIssue(), disabled: n < 2 && !!fi || !n },
-        { label: 'Clear', action: () => a.clearIssueFocus(), disabled: !fi },
-      ], 8);
+        R([
+          { label: 'Arrange on surface', w: 1.5, action: () => a.layFlat() },
+          { label: 'Arrange pieces', w: 1.3, action: () => a.arrangePieces() },
+          { label: '⟲ 15°', action: () => a.rotatePiece(15) },
+          { label: '⟳ 15°', action: () => a.rotatePiece(-15) },
+          { label: 'Numbers', action: () => a.toggleLabels(), active: s.showLabels },
+        ], 6);
       }
-    } else if (s.tool === 'build') {
-      const short = { cube: 'Cube', tetra: 'Tetra', octa: 'Octa', cubocta: 'Cubocta' };
-      row(y1, 78, SOLID_TYPES.map((t) => ({ label: short[t], action: () => a.setAddType(t), active: a.addType === t })), 10);
-      row(y2, 78, [
-        { label: `Add ${short[a.addType].toLowerCase()}`, w: 1.2, action: () => a.addSolid() },
-        { label: 'Duplicate', action: () => a.duplicate() },
-        { label: 'Rotate', action: () => a.rotateSolid() },
-        { label: 'Remove', action: () => a.removeSolid() },
-        { label: 'Tip over', action: () => a.turnAll('x') },
-      ], 8);
-    } else if (s.tool === 'open') {
-      row(y1, 78, [
-        { label: 'Group', action: () => a.setOpenMode('group'), active: s.openMode === 'group' },
-        { label: 'One panel', action: () => a.setOpenMode('one'), active: s.openMode === 'one' },
-        { label: 'Open flat', action: () => a.openFlat() },
-        { label: 'Close', action: () => a.close() },
-      ]);
-      const ang = this.selectedAngle();
-      row(y2, 78, [
-        { label: '−15°', action: () => a.turnBy(-rad(15)) },
-        { label: ang === null ? 'No panel' : `Hinge ${Math.round(ang)}°`, w: 1.6, kind: 'label' },
-        { label: '+15°', action: () => a.turnBy(rad(15)) },
-        { label: 'Set base', action: () => a.setBase() },
-      ]);
-    } else {
-      row(y1, 78, [
-        { label: 'Find net', action: () => a.defaultNet() },
-        { label: 'Check net', action: () => a.checkNet() },
-        { label: 'Tap: switch', action: () => a.setEdgeTap('switch'), active: s.edgeTap !== 'lock' },
-        { label: 'Tap: lock', action: () => a.setEdgeTap('lock'), active: s.edgeTap === 'lock' },
-      ]);
-      B.push({ kind: 'text', x: M, y: y2, w: W, h: 78, label: s.edgeTap === 'lock' ? 'Point at an edge and pull the trigger to lock it as it is (thick line) or unlock it.' : 'Point at an edge and pull the trigger (or pinch / touch it) to switch hinge ↔ cut. Green = hinge, red dashed = cut, thick = locked.' });
     }
-    row(y0 + 280, 78, [
-      { label: 'Undo', action: () => a.undo() },
-      { label: 'Unfold all', action: () => a.unfoldAll() },
-      { label: 'Refold all', action: () => a.refoldAll() },
-      { label: 'Reset', action: () => a.resetLayout() },
-    ]);
-    if (s.tool === 'build') {
-      const keys = Object.keys(PRESETS);
-      const k = a.state.presetPick || 'tetra';
-      row(y0 + 370, 78, [
-        { label: '◀', w: 0.5, action: () => { a.state.presetPick = keys[(keys.indexOf(k) + keys.length - 1) % keys.length]; a.app.notify(); } },
-        { label: PRESETS[k].label, w: 2.6, action: () => a.preset(k) },
-        { label: '▶', w: 0.5, action: () => { a.state.presetPick = keys[(keys.indexOf(k) + 1) % keys.length]; a.app.notify(); } },
-        { label: 'Save', action: () => a.save() },
-        { label: 'Load', action: () => a.load() },
-      ], 8);
-    } else if (s.tool === 'layout') {
-      row(y0 + 370, 78, [
-        { label: 'Save', action: () => a.save() },
-        { label: 'Load', action: () => a.load() },
-        { label: 'Recenter', action: () => a.app.actions.recenter() },
-        { label: 'Numbers', action: () => a.toggleLabels(), active: s.showLabels },
-        { label: 'Panel IDs', action: () => a.toggleIds(), active: s.showIds },
-      ], 8);
-    } else {
-      row(y0 + 370, 78, [
-        { label: 'Save', action: () => a.save() },
-        { label: 'Load', action: () => a.load() },
-        { label: 'Recenter', action: () => a.app.actions.recenter() },
-      ]);
-    }
+    // Undo / Redo and the diagnostics, on every tab.
+    const check = !a.shell.isClosed() ? a.layoutCheck() : null;
+    const nErr = check ? check.errors + check.warnings : (a.overlapPairs || 0);
+    const fi = a.focusedIssue();
+    row(y0 + 370, 70, [
+      { label: 'Undo', action: () => a.undo(), disabled: !a.history.length },
+      { label: 'Redo', action: () => a.redo(), disabled: !a.canRedo() },
+      { label: 'Info', action: () => a.app.toast(a.infoText(), 8000) },
+      { label: nErr ? `Errors ${nErr}` : 'No errors', w: 1.2, action: () => (nErr ? a.nextIssue() : a.app.toast(check ? `No issues: ${a.issueSummary(check)}.` : 'The form is closed; the layout check applies to the unfolded net.')) },
+      { label: 'Focus issue', w: 1.2, action: () => a.focusIssue(), disabled: !check || !check.issues.length || !fi },
+    ], 8);
+    // Navigation, in every tab.
+    row(y0 + 460, 70, [
+      { label: 'Rotate', w: 0.9, action: () => a.setNavTurn(), active: a.navTurn },
+      { label: 'Closer', w: 0.9, action: () => { a.bringCloser(); a.app.toast('Brought closer. Fit all puts it back on the table.'); } },
+      { label: 'Zoom −', w: 0.85, action: () => a.zoomView(1 / 1.25) },
+      { label: 'Zoom +', w: 0.85, action: () => a.zoomView(1.25) },
+      { label: 'Focus selected', w: 1.6, action: () => a.focusSelected() },
+      { label: 'Fit all', w: 0.85, action: () => a.fitAll() },
+      { label: 'Reset view', w: 1.3, action: () => a.resetView() },
+    ], 6);
+  }
+
+  // The Info line: composition counts.
+  infoText() {
+    const st = this.shell.stats();
+    return `${this.solidsText()} · ${st.panels} panels · ${st.removed} internal faces removed · ${st.hinges} hinges · ${st.cuts} cuts${st.locked ? ` · ${st.locked} locked edges` : ''}`;
   }
 
   // Box around the panels as they are now (folded or flat), in the
@@ -2690,6 +2797,22 @@ class SolidsTools {
       const end = t.end;
       t.end = (p) => { end(p); this.ws.altTurn = false; };
       this.active.set(ptr.id, t);
+      return true;
+    }
+    if (tool === 'tri' && hit.ghost) {
+      const gh = hit.ghost;
+      const ed = this.ws.shapeEdit;
+      const g = { move: () => {}, end: () => {
+        if (gh.kind === 'vertex') { ed.focusKey = gh.vid !== undefined ? this.ws.shell.vkeys[gh.vid] : ed.focusKey; ed.triangulateAt(); }
+        else this.ws.app.toast('Tap a corner of the floating form: the faces meeting there are split into triangles.');
+      } };
+      this.active.set(ptr.id, g);
+      return true;
+    }
+    if (tool === 'join' && hit.panel) {
+      const e = this.ws.edgeNear(hit.panel, hit.local, ptr.kind === 'ray' && !hit.near ? 0.32 : 0.25);
+      const g = { move: () => {}, end: () => { if (e) this.ws.joinEdge(e); else if (ptr.kind !== 'touch') this.ws.app.toast('Tap closer to a cut edge.'); } };
+      this.active.set(ptr.id, g);
       return true;
     }
     if (!hit.panel && tool !== 'inspect' && !(tool === 'shape' && hit.ghost)) return false;
@@ -3290,8 +3413,9 @@ class SolidsTools {
       },
       end: () => {
         if (!started) {
-          if (tapEdge) ws.layoutEdge(tapEdge, P);
-          else ws.selectPiece(P);
+          // Arrange never cuts or joins: a tap selects the piece.
+          void tapEdge;
+          ws.selectPiece(P);
           return;
         }
         if (drag) this.endPieceDrag(drag);
@@ -3319,7 +3443,7 @@ class SolidsTools {
 
   startPieceDrag(ptr, hit) {
     const ws = this.ws;
-    if (!ws.shell.flatReport().ok) { ws.app.toast('Lay the net on the surface first (Lay net on surface).'); return null; }
+    if (!ws.shell.flatReport().ok) { ws.app.toast('Lay the net flat first: Net → Arrange → Arrange net on surface.'); return null; }
     ws.stopAnim();
     const piece = ws.pieceOf(hit.panel);
     ws.pushHistory();

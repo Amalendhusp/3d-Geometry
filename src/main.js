@@ -76,6 +76,11 @@ class App {
     this.controls.addEventListener('start', () => { this.camAnim = null; });
     this.ui = new UI(this);
     this.solidsUI = new SolidsUI(this);
+    // Re-frame when floating panels open, close or change size.
+    if (typeof ResizeObserver !== 'undefined') {
+      const ro = new ResizeObserver(() => this.layoutChanged());
+      for (const id of ['solidsDock', 'paperDock', 'issueCard', 'infoPanel', 'altCard', 'navBar', 'undoBar', 'diagChips', 'projectBar']) { const el = document.getElementById(id); if (el) ro.observe(el); }
+    }
     this.applySpace();
     this.environments.set('terrace');
     this.environments.align(new THREE.Vector3(0, 0, 0.5), 0);
@@ -374,14 +379,111 @@ class App {
     const app = this;
     return {
       stack: [],
+      redoStack: [],
       push(e) {
         this.stack.push(e);
         if (this.stack.length > 60) this.stack.shift();
+        this.redoStack = [];
         app.notify();
       },
-      clear() { this.stack = []; app.notify(); },
+      clear() { this.stack = []; this.redoStack = []; app.notify(); },
       get canUndo() { return this.stack.length > 0; },
+      get canRedo() { return this.redoStack.length > 0; },
+      // The record that puts back what applying `rec` is about to replace.
+      inverse(rec) {
+        if (rec.type === 'paint') {
+          const side = app.paint[rec.side];
+          return { type: 'paint', side: rec.side, x: rec.x, y: rec.y, data: side.ctx.getImageData(rec.x, rec.y, rec.data.width, rec.data.height) };
+        }
+        if (rec.type === 'geom') return { type: 'geom', state: app.paper.serialize() };
+        if (rec.type === 'group') return { type: 'group', items: rec.items.slice().reverse().map((r) => this.inverse(r)).reverse() };
+        return rec;
+      },
     };
+  }
+
+  // Put back a recorded paper state (undo and redo both use this).
+  applyRecord(rec) {
+    if (rec.type === 'paint') this.paint.undo(rec);
+    else if (rec.type === 'geom') this.paper.restore(rec.state);
+    else if (rec.type === 'group') rec.items.slice().reverse().forEach((r) => this.applyRecord(r));
+  }
+
+  // The part of the window not covered by floating panels: where the
+  // geometry is framed. The camera's principal point is moved to its
+  // centre (a view offset), so the view also orbits about that point.
+  freeRect() {
+    const W = window.innerWidth, H = window.innerHeight;
+    let top = 0, bottom = H, left = 0, right = W;
+    // (offsetParent is always null for fixed elements, so use client rects.)
+    const vis = (el) => el && !el.hidden && el.getClientRects().length > 0 && getComputedStyle(el).visibility !== 'hidden';
+    const r = (sel) => { const el = document.querySelector(sel); return vis(el) ? el.getBoundingClientRect() : null; };
+    for (const sel of ['#projectBar', '#sessionBar', '#diagChips']) { const b = r(sel); if (b) top = Math.max(top, b.bottom + 8); }
+    for (const sel of this.space === 'solids' ? ['#solidsDock'] : ['#paperDock']) { const b = r(sel); if (b) bottom = Math.min(bottom, b.top - 8); }
+    const ur = r('#undoBar'); if (ur) bottom = Math.min(bottom, ur.top - 4);
+    // The View toolbar is a column at the right, or (phone, tool sheet open)
+    // a row just above the sheet.
+    const nb = r('#navBar');
+    if (nb) { if (nb.width > nb.height) bottom = Math.min(bottom, nb.top - 4); else right = Math.min(right, nb.left - 8); }
+    // An open drop panel on the left keeps geometry out from under it.
+    for (const sel of ['#issueCard', '#infoPanel', '#altCard']) { const b = r(sel); if (b) left = Math.max(left, Math.min(b.right + 8, W * 0.45)); }
+    if (bottom - top < H * 0.15) { top = 0; bottom = H; }
+    if (right - left < W * 0.35) { left = 0; right = W; }
+    return { left, top, right, bottom, width: right - left, height: bottom - top, cx: (left + right) / 2, cy: (top + bottom) / 2, W, H };
+  }
+
+  // Called when panels open, close or resize.
+  layoutChanged() {
+    const dock = document.querySelector(this.space === 'solids' ? '#solidsDock' : '#paperDock');
+    if (dock && !dock.hidden) document.documentElement.style.setProperty('--dock-h', `${Math.round(dock.getBoundingClientRect().height)}px`);
+    this.updateViewOffset();
+  }
+
+  // On-screen size (pixels) of what is on the table, for the current camera.
+  contentExtent() {
+    if (this.space !== 'solids' || !this.solids) return null;
+    const ws = this.solids;
+    ws.root.updateMatrixWorld(true);
+    const b = ws.bounds();
+    if (b.isEmpty()) return null;
+    this.camera.updateMatrixWorld();
+    const W = window.innerWidth, H = window.innerHeight, v = new THREE.Vector3();
+    let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
+    for (let i = 0; i < 8; i++) {
+      v.set(i & 1 ? b.max.x : b.min.x, i & 2 ? b.max.y : b.min.y, i & 4 ? b.max.z : b.min.z);
+      ws.root.localToWorld(v).project(this.camera);
+      if (v.z > 1) return null;
+      const x = (v.x + 1) / 2 * W, y = (1 - v.y) / 2 * H;
+      x0 = Math.min(x0, x); x1 = Math.max(x1, x); y0 = Math.min(y0, y); y1 = Math.max(y1, y);
+    }
+    return x1 > x0 && y1 > y0 ? { x: x1 - x0, y: y1 - y0 } : null;
+  }
+
+  updateViewOffset() {
+    if (!this.camera || this.renderer?.xr?.isPresenting) return;
+    const f = this.freeRect();
+    // Keep what was framed framed: when panels open or close (the phone
+    // tool sheet above all), dolly so the geometry keeps the same share of
+    // the free canvas. Zoom and turn chosen by the user are otherwise kept.
+    const prev = this.viewRect;
+    if (prev && this.controls && !this.camAnim) {
+      // Pixel sizes scale with the window height and inversely with the
+      // camera distance; the content's on-screen shape decides which side
+      // of the free area limits it.
+      const ext = this.contentExtent() || { x: 1, y: 1 };
+      const need = (r, s) => Math.max((ext.y * s) / r.height, (ext.x * s) / r.width);
+      const k = need(f, f.H / prev.H) / need(prev, 1);
+      if (Number.isFinite(k) && k > 0 && Math.abs(k - 1) > 0.01) {
+        const t = this.controls.target, off = this.camera.position.clone().sub(t);
+        const d = THREE.MathUtils.clamp(off.length() * k, this.controls.minDistance, this.controls.maxDistance);
+        this.camera.position.copy(t).addScaledVector(off.normalize(), d);
+      }
+    }
+    const dx = f.cx - f.W / 2, dy = f.cy - f.H / 2;
+    if (Math.abs(dx) < 0.5 && Math.abs(dy) < 0.5) this.camera.clearViewOffset();
+    else this.camera.setViewOffset(f.W, f.H, -dx, -dy, f.W, f.H);
+    this.camera.updateProjectionMatrix();
+    this.viewRect = f;
   }
 
   notify() {
@@ -440,11 +542,13 @@ class App {
     this.handTools.updateVisibility();
     try { history.replaceState(null, '', space === 'solids' ? '#solids' : '#paper'); } catch { /* ignore */ }
     this.layoutTable();
-    if (!this.renderer.xr.isPresenting) this.fitCamera();
     this.toast(space === 'solids'
-      ? 'Solid → Unfold: tap a panel to see its hinges, then swing it open. Build adds and joins solids.'
+      ? 'Solids: Solid Modeling adds and joins modules, Surface Modeling pushes and pulls corners and edges, Net unfolds and arranges.'
       : 'Paper folding: paint, crease, cut and fold a sheet.');
+    // Render the space's own panels first, so the camera is fitted to the
+    // canvas they leave free.
     this.notify();
+    if (!this.renderer.xr.isPresenting) { this.layoutChanged(); this.viewRect = null; this.fitCamera(); }
   }
 
   pickPaper(ray) {
@@ -489,13 +593,15 @@ class App {
 
   fitCamera() {
     const s = this.space === 'solids' ? Math.max(0.3, this.solids.extent() * 0.75) : this.paper.size;
-    const aspect = window.innerWidth / window.innerHeight;
+    this.updateViewOffset();
+    const f = this.viewRect || this.freeRect();
+    // Fit into the part of the canvas no panel covers.
+    const aspect = f.width / f.height;
     const vfov = THREE.MathUtils.degToRad(this.camera.fov);
-    const visible = 2 * Math.tan(vfov / 2);
-    // Keep the sheet in the middle half of the screen, clear of the tool dock.
-    const d = s / (0.5 * visible * Math.min(1, aspect)) + 0.05;
+    const visible = 2 * Math.tan(vfov / 2) * (f.height / f.H);
+    const d = s / (0.62 * visible * Math.min(1, aspect)) + 0.05;
     const el = THREE.MathUtils.degToRad(60);
-    const target = new THREE.Vector3(0, this.tableTop + (this.space === 'solids' ? 0.04 : 0), 0.16 * s);
+    const target = new THREE.Vector3(0, this.tableTop + (this.space === 'solids' ? 0.04 : 0), 0.04 * s);
     if (this.space === 'solids') {
       // Aim at the middle of what is on the table (a tall stack, or a net
       // spread off to one side).
@@ -503,7 +609,7 @@ class App {
       if (!box.isEmpty()) {
         this.solids.root.updateMatrixWorld(true);
         const c = this.solids.root.localToWorld(box.getCenter(new THREE.Vector3()));
-        target.set(c.x, Math.max(this.tableTop + 0.04, c.y), c.z + 0.16 * s);
+        target.set(c.x, Math.max(this.tableTop + 0.04, c.y), c.z);
       }
     }
     this.camera.position.set(0, target.y + Math.sin(el) * d, target.z + Math.cos(el) * d);
@@ -528,16 +634,18 @@ class App {
     if (this.renderer.xr.isPresenting || box.isEmpty()) return false;
     const c = box.getCenter(new THREE.Vector3());
     const r = Math.max(minRadius, box.getSize(new THREE.Vector3()).length() / 2);
+    this.updateViewOffset();
+    const f = this.viewRect || this.freeRect();
     const vfov = THREE.MathUtils.degToRad(this.camera.fov);
-    const aspect = window.innerWidth / window.innerHeight;
-    const half = Math.min(vfov / 2, Math.atan(Math.tan(vfov / 2) * aspect));
+    const aspect = f.width / f.height;
+    const halfV = Math.atan(Math.tan(vfov / 2) * f.height / f.H);
+    const half = Math.min(halfV, Math.atan(Math.tan(halfV) * aspect));
     const d = THREE.MathUtils.clamp((r * margin) / Math.sin(half), this.controls.minDistance, this.controls.maxDistance);
     const dir = this.camera.position.clone().sub(this.controls.target);
     if (dir.lengthSq() < 1e-8) dir.set(0, 1, 1);
     dir.normalize();
-    // Aim a little below the box so it sits above the tool dock.
-    const up = this.camera.up.clone().addScaledVector(dir, -this.camera.up.dot(dir)).normalize();
-    const aim = c.clone().addScaledVector(up, -d * Math.tan(half) * 0.22);
+    // The view offset already centres the free area on the target.
+    const aim = c.clone();
     this.camAnim = {
       fromPos: this.camera.position.clone(), fromTarget: this.controls.target.clone(),
       toPos: aim.clone().addScaledVector(dir, d), toTarget: aim, t: 0, dur: 0.45,
@@ -559,6 +667,7 @@ class App {
     this.camera.aspect = window.innerWidth / window.innerHeight;
     this.camera.updateProjectionMatrix();
     this.renderer.setSize(window.innerWidth, window.innerHeight);
+    this.layoutChanged();
   }
 
   // ------------------------------------------------------------ actions
@@ -627,13 +736,20 @@ class App {
         const e = app.history.stack.pop();
         if (!e) { app.toast('Nothing to undo.'); return; }
         app.tools.clearSelection();
-        const apply = (rec) => {
-          if (rec.type === 'paint') app.paint.undo(rec);
-          else if (rec.type === 'geom') app.paper.restore(rec.state);
-          else if (rec.type === 'group') rec.items.slice().reverse().forEach(apply);
-        };
-        apply(e);
+        app.history.redoStack.push(app.history.inverse(e));
+        app.applyRecord(e);
         app.toast('Undone.');
+        app.geometryChanged();
+      },
+      redo() {
+        if (app.space === 'solids') { app.solids.redo(); return; }
+        app.tools.finishAll();
+        const e = app.history.redoStack.pop();
+        if (!e) { app.toast('Nothing to redo.'); return; }
+        app.tools.clearSelection();
+        app.history.stack.push(app.history.inverse(e));
+        app.applyRecord(e);
+        app.toast('Redone.');
         app.geometryChanged();
       },
       unfoldAll() {
@@ -784,9 +900,14 @@ class App {
     window.addEventListener('keydown', (e) => {
       if (e.target && (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT')) return;
       const k = e.key.toLowerCase();
+      if ((e.ctrlKey || e.metaKey) && ((k === 'z' && e.shiftKey) || k === 'y')) { e.preventDefault(); this.actions.redo(); return; }
       if ((e.ctrlKey || e.metaKey) && k === 'z') { e.preventDefault(); this.actions.undo(); return; }
+      if ((e.ctrlKey || e.metaKey) && k === 's') { e.preventDefault(); this.solidsUI?.saveProject(); return; }
+      if ((e.ctrlKey || e.metaKey) && k === 'o') { e.preventDefault(); this.solidsUI?.openGallery(); return; }
+      if ((e.ctrlKey || e.metaKey) && e.altKey && k === 'n') { e.preventDefault(); this.solidsUI?.newProject(); return; }
+      if (e.ctrlKey || e.metaKey || e.altKey) return;
       if (this.space === 'solids') {
-        const sm = { 1: 'build', 2: 'open', 3: 'edges', 4: 'net', b: 'build', o: 'open', e: 'edges', n: 'net', l: 'layout', s: 'shape' };
+        const sm = { 1: 'build', 2: 'shape', 3: 'net', b: 'build', s: 'shape', n: 'net', o: 'open', e: 'edges', j: 'join', l: 'layout' };
         if (sm[k]) this.solids.setTool(sm[k]);
         else if (k === 'i' || k === 't') this.solids.setNavTurn();
         else if (k === 'f') this.solids.fitAll();

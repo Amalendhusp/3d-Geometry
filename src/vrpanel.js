@@ -6,7 +6,8 @@ import { BUILD_TEXT } from './version.js';
 
 const PX_W = 1024, PX_H = 900;
 const C = {
-  bg: 'rgba(24, 28, 56, 0.94)',
+  // Lightly tinted glass, still opaque enough to read over any scene.
+  bg: 'rgba(24, 28, 56, 0.88)',
   btn: '#2d3468',
   btnHover: '#3d478a',
   active: '#f0b44c',
@@ -81,7 +82,15 @@ export class VRPanel {
       { label: 'Paper', action: () => { this.app.panelPage = 'work'; a.setSpace('paper'); this.invalidate(); }, active: page === 'work' && space === 'paper' },
       { label: 'Solids', action: () => { this.app.panelPage = 'work'; a.setSpace('solids'); this.invalidate(); }, active: page === 'work' && space === 'solids' },
       { label: 'Place & view', action: () => { this.app.panelPage = 'place'; this.invalidate(); }, active: page === 'place' },
+      { label: '☰ Project', action: () => { this.app.panelPage = 'project'; this.projectPage = 0; this.invalidate(); }, active: page === 'project' },
     ]);
+    if (page === 'project') {
+      this.projectRows(row, B, M, W);
+      B.push({ kind: 'text', x: M, y: 704, w: W - 210, h: 150, label: this.app.statusText || '', status: true });
+      btn(PX_W - M - 196, 752, 196, 70, 'Exit VR', () => a.exitXR());
+      this.buttons = B;
+      return;
+    }
     if (page === 'place') {
       this.placeRows(row, B, M, W);
       B.push({ kind: 'text', x: M, y: 672, w: W - 210, h: 170, label: this.app.statusText || '', status: true });
@@ -169,6 +178,49 @@ export class VRPanel {
     this.buttons = B;
   }
 
+  // Project: New (from a preset), Open (saved projects), Save. Replacing a
+  // project with unsaved changes asks first. Import and Export use files,
+  // which belong on the screen.
+  projectRows(row, B, M, W) {
+    const ws = this.app.solids;
+    const info = ws.projectInfo();
+    const go = (fn) => {
+      if (this.app.space !== 'solids') this.app.actions.setSpace('solids');
+      if (ws.isDirty()) { this.pending = fn; this.invalidate(); return; }
+      fn(); this.app.panelPage = 'work'; this.invalidate();
+    };
+    B.push({ kind: 'label', x: M, y: 160, w: W, h: 50, label: `${info.name}${info.dirty ? ' · unsaved changes' : info.savedAt ? ' · saved' : ''}` });
+    if (this.pending) {
+      B.push({ kind: 'text', x: M, y: 220, w: W, h: 70, label: `“${info.name}” has unsaved changes. Save them before replacing it?` });
+      row(300, 78, [
+        { label: 'Save', action: () => { if (ws.saveProject()) { const f = this.pending; this.pending = null; f(); this.app.panelPage = 'work'; } this.invalidate(); } },
+        { label: "Don't save", action: () => { const f = this.pending; this.pending = null; f(); this.app.panelPage = 'work'; this.invalidate(); } },
+        { label: 'Cancel', action: () => { this.pending = null; this.invalidate(); } },
+      ]);
+      return;
+    }
+    const keys = Object.keys(this.app.solidsPresets || {});
+    const k = this.presetPick && keys.includes(this.presetPick) ? this.presetPick : keys[0];
+    const P = this.app.solidsPresets || {};
+    row(220, 76, [
+      { label: 'Save', action: () => { ws.saveProject(); this.invalidate(); } },
+      { label: '◀', w: 0.45, action: () => { this.presetPick = keys[(keys.indexOf(k) + keys.length - 1) % keys.length]; this.invalidate(); } },
+      { label: k ? `New: ${P[k].label}` : 'New', w: 2.6, action: () => go(() => ws.newProject(k)) },
+      { label: '▶', w: 0.45, action: () => { this.presetPick = keys[(keys.indexOf(k) + 1) % keys.length]; this.invalidate(); } },
+    ], 8);
+    const list = ws.projectList();
+    const per = 4, pages = Math.max(1, Math.ceil(list.length / per));
+    const pg = Math.min(this.projectPage || 0, pages - 1);
+    B.push({ kind: 'label', x: M, y: 306, w: W, h: 40, label: list.length ? `Open a saved project (${pg + 1} of ${pages})` : 'No saved projects yet' });
+    list.slice(pg * per, pg * per + per).forEach((e, i) => {
+      row(350 + i * 70, 62, [{ label: `${e.name} · ${e.summary || ''}`.slice(0, 46), w: 4, action: () => go(() => ws.openProject(e.id)) }], 8);
+    });
+    if (pages > 1) row(632, 60, [
+      { label: '◀ Newer', action: () => { this.projectPage = Math.max(0, pg - 1); this.invalidate(); }, disabled: pg === 0 },
+      { label: 'Older ▶', action: () => { this.projectPage = Math.min(pages - 1, pg + 1); this.invalidate(); }, disabled: pg >= pages - 1 },
+    ]);
+  }
+
   // Workspace placement and surface options.
   placeRows(row, B, M, W) {
     const pl = this.app.placement;
@@ -228,7 +280,7 @@ export class VRPanel {
       }
       if (b.kind === 'label') {
         ctx.fillStyle = C.text;
-        ctx.font = `600 28px ${this.font}`;
+        this.fitFont(ctx, b.label, b.w - 16, 28);
         ctx.textAlign = 'center';
         ctx.fillText(b.label, b.x + b.w / 2, b.y + b.h / 2);
         continue;
@@ -238,7 +290,7 @@ export class VRPanel {
         ctx.fillStyle = 'rgba(45, 52, 104, 0.45)';
         ctx.fill();
         ctx.fillStyle = C.muted;
-        ctx.font = `600 30px ${this.font}`;
+        this.fitFont(ctx, b.label, b.w - 16, 30);
         ctx.textAlign = 'center';
         ctx.fillText(b.label, b.x + b.w / 2, b.y + b.h / 2 + 1);
         continue;
@@ -268,12 +320,19 @@ export class VRPanel {
         continue;
       }
       ctx.fillStyle = b.active || isFlash ? C.activeText : C.text;
-      ctx.font = `600 30px ${this.font}`;
+      this.fitFont(ctx, b.label, b.w - 16, 30);
       ctx.textAlign = 'center';
       ctx.fillText(b.label, b.x + b.w / 2, b.y + b.h / 2 + 1);
     }
     this.texture.needsUpdate = true;
     this.dirty = false;
+  }
+
+  // Largest font (down to 20 px) at which a button label fits its button.
+  fitFont(ctx, text, maxW, size) {
+    let px = size;
+    ctx.font = `600 ${px}px ${this.font}`;
+    while (px > 20 && ctx.measureText(text).width > maxW) { px -= 1; ctx.font = `600 ${px}px ${this.font}`; }
   }
 
   update() {
