@@ -64,7 +64,22 @@ export class ShapeEditor {
 
   // ----------------------------------------------------------- lifecycle
 
-  enter() {
+  // Back to Reshape from Arrange: everything (pins, selection, mode, the
+  // ghost) is kept; only a net that is no longer flat is laid flat again.
+  resume() {
+    const ws = this.ws;
+    this.active = true;
+    this.hover = null;
+    this.hoverE = null;
+    if (ws.anim) ws.stopAnim();
+    if (!this.shell.flatReport().ok) ws.layFlat({ record: false, prefix: 'The net is laid on the surface for reshaping.' });
+    this.placeGhost(this.netBox());
+    if (this.mode === 'edit') this.frozen = this.ghostOffset();
+    this.refresh();
+    return true;
+  }
+
+  enter({ quiet = false } = {}) {
     const ws = this.ws;
     this.active = true;
     this.pin = null;
@@ -86,8 +101,9 @@ export class ShapeEditor {
       sh.applyForest(t.F, t.angles, t.roots);
       box = this.netBox();
       sh.panels.forEach((p, i) => p.M.copy(saved[i]));
-      // Laying the net out for editing is not an edit, so it is not an undo step.
-      ws.layFlat({ record: false, prefix: 'Shape: the net is laid on the surface; the assembled form floats above it.' });
+      // Laying the net out for editing is not an edit, so it is not an undo
+      // step. (Entering Arrange already started laying it flat.)
+      if (!(quiet && ws.anim)) ws.layFlat({ record: false, prefix: quiet ? '' : 'Shape: the net is laid on the surface; the assembled form floats above it.' });
     } else box = this.netBox();
     this.placeGhost(box);
     // Drawing scale for Edit: steady while edges get shorter or longer.
@@ -139,6 +155,15 @@ export class ShapeEditor {
   }
 
   // Ghost box in the shell frame (for framing the view).
+  // Box (shell frame) around ghost corners given by vertex key.
+  keysBox(keys) {
+    const m = editModel(this.shell);
+    const off = this.ghostOffset();
+    const b = new THREE.Box3();
+    for (const k of keys) if (m.pos.has(k)) b.expandByPoint(m.pos.get(k).clone().add(off));
+    return b;
+  }
+
   ghostBox() {
     const b = this.closedBox();
     return b.translate(this.ghostOffset());
@@ -848,7 +873,7 @@ export class ShapeEditor {
     const r = this.ringInfo();
     if (!r) return null;
     const M = this.ws.shellGroup.matrixWorld;
-    return { c: r.c.clone().add(this.ghostOffset()).applyMatrix4(M), n: r.n.clone().transformDirection(M), R: r.R };
+    return { c: r.c.clone().add(this.ghostOffset()).applyMatrix4(M), n: r.n.clone().transformDirection(M), R: r.R * new THREE.Vector3().setFromMatrixScale(M).x };
   }
 
   // Small floating label naming the Shape mode, above the ghost.

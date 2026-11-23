@@ -31,11 +31,11 @@ export function validateLayout(shell, tol = TOL) {
   // Invalid geometry or connectivity.
   const badPanels = new Set();
   for (const p of shell.panels) {
-    let dev = 0;
-    for (const v of p.verts) dev = Math.max(dev, Math.abs(v.clone().sub(p.verts[0]).dot(p.normal)));
+    let dev = 0, worst = 0;
+    p.verts.forEach((v, i) => { const d = Math.abs(v.clone().sub(p.verts[0]).dot(p.normal)); if (d > dev) { dev = d; worst = i; } });
     if (dev > tol.dist) {
       badPanels.add(p);
-      add({ kind: 'invalid', severity: 'error', panels: [p], edges: [], text: `Panel P${p.no} is warped (a corner is ${(dev * 1000).toFixed(2)} mm out of its plane), so it cannot be cut from flat paper. Fix the shape (Reshape) or triangulate that face.` });
+      add({ kind: 'invalid', severity: 'error', panels: [p], edges: [], verts: [{ panel: p, i: worst }], text: `Panel P${p.no} is warped (a corner is ${(dev * 1000).toFixed(2)} mm out of its plane), so it cannot be cut from flat paper. Fix the shape (Reshape) or triangulate that face.` });
     }
     let area = 0;
     for (let i = 1; i < p.verts.length - 1; i++) area += new THREE.Vector3().crossVectors(p.verts[i].clone().sub(p.verts[0]), p.verts[i + 1].clone().sub(p.verts[0])).length() / 2;
@@ -102,6 +102,8 @@ export function validateLayout(shell, tol = TOL) {
   const order = { error: 0, warning: 1, info: 2 };
   issues.sort((a, b) => order[a.severity] - order[b.severity]);
   for (const is of issues) {
+    is.verts = is.verts || [];
+    is.key = `${is.kind}|${is.panels.map((p) => p.id).join(',')}|${is.edges.map((e) => e.key).join(',')}`;
     const pts = [];
     for (const p of is.panels) pts.push(...shell.worldPoly(p));
     for (const e of is.edges) { const u = e.uses[0]; const w = shell.worldPoly(u.panel); pts.push(w[u.i], w[(u.i + 1) % w.length]); }
@@ -119,6 +121,28 @@ export function validateLayout(shell, tol = TOL) {
     warnings: issues.filter((i) => i.severity === 'warning').length,
     allOnTable: pieces.every((pc) => pc.onTable),
   };
+}
+
+// Why nothing (or not everything) can be exported, one sentence per piece
+// left out: a piece with many folded hinges is summarised, not listed.
+export function refusalText(check) {
+  const parts = [];
+  for (const is of check.issues) {
+    if (is.kind === 'invalid' && is.severity === 'error' && !is.panels.length) parts.push(is.text);
+  }
+  for (const pc of check.excluded) {
+    if (!pc.valid) { parts.push(`Piece ${pc.index} has invalid panels (see the issue list).`); continue; }
+    const r = pc.residual;
+    if (r.length === 1) {
+      const x = r[0];
+      parts.push(`Piece ${pc.index}: hinge ${x.e.no} is still folded ${Math.abs(x.deg).toFixed(2)}° from flat (between P${x.P.no} and P${x.Q.no}).`);
+    } else if (r.length > 1) {
+      const worst = Math.max(...r.map((x) => Math.abs(x.deg)));
+      parts.push(`Piece ${pc.index}: ${r.length} hinges are still folded (hinges ${r.slice(0, 4).map((x) => x.e.no).join(', ')}${r.length > 4 ? ', …' : ''}; up to ${worst.toFixed(2)}° from flat).`);
+    } else parts.push(`Piece ${pc.index} is not flat (up to ${(pc.maxDev * 1000).toFixed(2)} mm out of its plane).`);
+  }
+  if (check.excluded.some((pc) => pc.valid)) parts.push('A piece is exported once it lies flat: press Lay net on surface (Net → Arrange), or open those hinges fully.');
+  return parts.join(' ');
 }
 
 // Rigid move that lays a planar piece face down at its own centre (for

@@ -68,8 +68,12 @@ class App {
     this.controls.enableDamping = true;
     this.controls.dampingFactor = 0.12;
     this.controls.maxPolarAngle = Math.PI * 0.49;
-    this.controls.minDistance = 0.12;
+    this.controls.minDistance = 0.05;
     this.controls.maxDistance = 6;
+    // The wheel (and pinch) zooms toward the point under the pointer.
+    this.controls.zoomToCursor = true;
+    // A drag or wheel takes over from a Focus / Fit glide.
+    this.controls.addEventListener('start', () => { this.camAnim = null; });
     this.ui = new UI(this);
     this.solidsUI = new SolidsUI(this);
     this.applySpace();
@@ -507,6 +511,50 @@ class App {
     this.controls.update();
   }
 
+  // View navigation shared by the screen bar and the keyboard. In Solids
+  // the workspace decides what "selected" means; Paper fits the sheet.
+  get nav() {
+    const app = this;
+    return {
+      fitAll() { if (app.space === 'solids') app.solids.fitAll(); else { app.camAnim = null; if (app.renderer.xr.isPresenting) app.actions.recenter(); else app.fitCamera(); app.toast('Fit all: the whole sheet in view.'); } },
+      focusSelected() { if (app.space === 'solids') app.solids.focusSelected(); else this.fitAll(); },
+      resetView() { if (app.space === 'solids') app.solids.resetView(); else { app.camAnim = null; app.fitCamera(); app.toast('View reset.'); } },
+    };
+  }
+
+  // Glide the screen camera so `box` (world) fills the middle of the view,
+  // keeping the current viewing direction. Only the camera moves.
+  focusBox(box, { margin = 2, minRadius = 0.04 } = {}) {
+    if (this.renderer.xr.isPresenting || box.isEmpty()) return false;
+    const c = box.getCenter(new THREE.Vector3());
+    const r = Math.max(minRadius, box.getSize(new THREE.Vector3()).length() / 2);
+    const vfov = THREE.MathUtils.degToRad(this.camera.fov);
+    const aspect = window.innerWidth / window.innerHeight;
+    const half = Math.min(vfov / 2, Math.atan(Math.tan(vfov / 2) * aspect));
+    const d = THREE.MathUtils.clamp((r * margin) / Math.sin(half), this.controls.minDistance, this.controls.maxDistance);
+    const dir = this.camera.position.clone().sub(this.controls.target);
+    if (dir.lengthSq() < 1e-8) dir.set(0, 1, 1);
+    dir.normalize();
+    // Aim a little below the box so it sits above the tool dock.
+    const up = this.camera.up.clone().addScaledVector(dir, -this.camera.up.dot(dir)).normalize();
+    const aim = c.clone().addScaledVector(up, -d * Math.tan(half) * 0.22);
+    this.camAnim = {
+      fromPos: this.camera.position.clone(), fromTarget: this.controls.target.clone(),
+      toPos: aim.clone().addScaledVector(dir, d), toTarget: aim, t: 0, dur: 0.45,
+    };
+    return true;
+  }
+
+  stepCamera(dt) {
+    const a = this.camAnim;
+    if (!a) return;
+    a.t = Math.min(1, a.t + dt / a.dur);
+    const k = a.t * a.t * (3 - 2 * a.t);
+    this.controls.target.lerpVectors(a.fromTarget, a.toTarget, k);
+    this.camera.position.lerpVectors(a.fromPos, a.toPos, k);
+    if (a.t >= 1) this.camAnim = null;
+  }
+
   onResize() {
     this.camera.aspect = window.innerWidth / window.innerHeight;
     this.camera.updateProjectionMatrix();
@@ -683,6 +731,7 @@ class App {
       rc.setFromCamera(ndc, this.camera);
       ptr.ray.copy(rc.ray);
       ptr.shift = !!e.shiftKey;
+      ptr.alt = !!e.altKey;
     };
     el.addEventListener('pointerdown', (e) => {
       if (this.renderer.xr.isPresenting) return;
@@ -737,17 +786,23 @@ class App {
       const k = e.key.toLowerCase();
       if ((e.ctrlKey || e.metaKey) && k === 'z') { e.preventDefault(); this.actions.undo(); return; }
       if (this.space === 'solids') {
-        const sm = { 1: 'build', 2: 'open', 3: 'edges', 4: 'layout', 5: 'inspect', 6: 'shape', b: 'build', o: 'open', e: 'edges', l: 'layout', i: 'inspect', s: 'shape' };
+        const sm = { 1: 'build', 2: 'open', 3: 'edges', 4: 'net', b: 'build', o: 'open', e: 'edges', n: 'net', l: 'layout', s: 'shape' };
         if (sm[k]) this.solids.setTool(sm[k]);
+        else if (k === 'i' || k === 't') this.solids.setNavTurn();
+        else if (k === 'f') this.solids.fitAll();
+        else if (k === '.') this.solids.focusSelected();
+        else if (k === '0' || k === 'home') this.solids.resetView();
         else if (k === 'u') this.solids.unfoldAll();
         else if (k === 'r') this.solids.refoldAll();
-        else if (this.solids.state.tool === 'inspect' && k.startsWith('arrow')) {
+        else if (k.startsWith('arrow') && !this.solids.tools.isBusy()) {
+          // Arrow keys turn the view in every tool.
           e.preventDefault();
           if (k === 'arrowleft' || k === 'arrowright') this.solids.stepView('up', k === 'arrowleft' ? -15 : 15);
           else this.solids.stepView('tip', k === 'arrowup' ? -15 : 15);
         }
         return;
       }
+      if (k === '0' || k === 'home') { this.nav.resetView(); return; }
       const map = { 1: 'paint', 2: 'crease', 3: 'cut', 4: 'fold', 5: 'move', p: 'paint', c: 'crease', x: 'cut', f: 'fold', m: 'move' };
       if (map[k]) this.actions.setTool(map[k]);
       else if (k === 'e') this.actions.toggleEraser();
@@ -862,7 +917,7 @@ class App {
       }
     }
     if (xr) this.xrInput.update();
-    else this.controls.update();
+    else { this.stepCamera(dt); this.controls.update(); }
     this.activeTools.update(dt);
     this.panel.update();
     this.paint.flush();

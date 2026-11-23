@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { validateLayout, pieceToTable } from './validate.js';
+import { validateLayout, pieceToTable, refusalText } from './validate.js';
 
 // Exports of the Solid → Unfold workspace.
 //
@@ -49,8 +49,7 @@ export function netSVG(shell, opts = {}) {
   // The same check the layout shows on screen.
   const check = validateLayout(shell);
   if (!check.exportable.length) {
-    const why = check.issues.filter((i) => i.severity === 'error').slice(0, 3).map((i) => i.text).join(' ');
-    return { error: `No piece can be exported yet. ${why}`, check };
+    return { error: `No piece can be exported yet. ${refusalText(check)}`, check };
   }
   // Each valid planar piece is drawn from its own plane: laid face down at
   // its own centre (a rigid move, so nothing is stretched), then seen from
@@ -267,6 +266,7 @@ export function viewPNG(app, { transparent = false, scale = 2 } = {}) {
   }
   // Plain look: no selection, hover or warning tints.
   ws.clean = true;
+  if (ws.issueMarks) { const vis = ws.issueMarks.visible; ws.issueMarks.visible = false; restore.push(() => { ws.issueMarks.visible = vis; }); }
   ws.refreshStyles();
   restore.push(() => { ws.clean = false; ws.refreshStyles(); });
   const pr = r.getPixelRatio();

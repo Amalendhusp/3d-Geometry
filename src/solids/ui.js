@@ -1,5 +1,6 @@
 import { PRESETS } from './workspace.js';
 import { netSVG, viewPNG } from './exporter.js';
+import { refusalText } from './validate.js';
 
 // Screen controls for the Solid → Unfold workspace.
 
@@ -34,10 +35,14 @@ export class SolidsUI {
     on('#exportJsonBtn', () => this.exportFile());
     on('#exportSvgBtn', () => this.exportSVG());
     on('#exportPngBtn', () => this.exportPNG());
-    on('#resetOrientBtn', () => ws.resetOrientation());
-    on('#fitViewBtn', () => ws.fitView());
-    on('#turnViewBtn', () => ws.stepView('up', 90));
-    on('#tipViewBtn', () => ws.stepView('tip', 90));
+    // Navigation bar (every workspace).
+    on('#navFit', () => app.nav.fitAll());
+    on('#navFocus', () => app.nav.focusSelected());
+    on('#navReset', () => app.nav.resetView());
+    on('#navTurn', () => ws.setNavTurn());
+    on('#navTurn90', () => ws.stepView('up', 90));
+    on('#navTip90', () => ws.stepView('tip', 90));
+    $$('[data-netmode]').forEach((b) => b.addEventListener('click', () => ws.setTool(b.dataset.netmode)));
     on('#layFlatBtn', () => ws.layFlat());
     on('#arrangeBtn', () => ws.arrangePieces());
     on('#otherNetsBtn', () => ws.otherNets());
@@ -58,6 +63,15 @@ export class SolidsUI {
     on('#shapeUnpinBtn', () => (ws.shapeEdit.pin ? ws.shapeEdit.togglePin(ws.shapeEdit.pin) : app.toast('Nothing is pinned. Tap a side or corner of the net to pin it.')));
     on('#idsBtn', () => ws.toggleIds());
     on('#importShellBtn', () => $('#importShellFile').click());
+    on('#focusIssueBtn', () => ws.focusIssue());
+    on('#nextIssueBtn', () => ws.nextIssue());
+    on('#clearIssueBtn', () => ws.clearIssueFocus());
+    on('#issueListBtn', () => { this.listOpen = !this.listOpen; this.render(); });
+    on('#svgIssuesBtn', () => {
+      $('#exportDialog').hidden = true;
+      if (ws.state.tool !== 'layout') ws.setTool('layout');
+      ws.focusIssue(0);
+    });
     $('#importShellFile').addEventListener('change', async (e) => {
       const f = e.target.files && e.target.files[0];
       e.target.value = '';
@@ -87,7 +101,74 @@ export class SolidsUI {
 
   openExport() {
     $('#exportMsg').textContent = '';
+    this.renderExportCheck();
     $('#exportDialog').hidden = false;
+  }
+
+  // What the SVG will contain, from the same check as the issue list.
+  renderExportCheck() {
+    const ws = this.ws;
+    const check = ws.layoutCheck();
+    const n = check.pieces.length;
+    const ex = check.exportable;
+    const closed = ws.shell.isClosed();
+    let t;
+    if (closed) t = 'The form is closed: unfold it (Layout, Lay net on surface) to export the net.';
+    else if (ex.length === n) t = `All ${n} piece${n > 1 ? 's' : ''} will be exported${check.allOnTable ? '' : ' (tilted or raised pieces are drawn from their own plane)'}.`;
+    else if (ex.length) t = `${ex.length} of ${n} pieces will be exported. Left out: ${check.excluded.map((pc) => `piece ${pc.index} (${pc.valid ? 'not flat' : 'invalid panels'})`).join(', ')}.`;
+    else t = `Nothing can be exported yet. ${refusalText(check)}`;
+    const ov = check.issues.filter((i) => i.kind === 'overlap').length;
+    if (ov && !closed) t += ` ${ov} overlapping panel pair${ov > 1 ? 's' : ''}: check before cutting.`;
+    $('#svgCheck').textContent = t;
+    $('#svgIssuesBtn').hidden = closed || !check.issues.some((i) => i.severity !== 'info');
+    $('#exportSvgBtn').disabled = closed || !ex.length;
+  }
+
+  // The persistent issue list (Layout and Shape tools).
+  renderIssues() {
+    const ws = this.ws;
+    const card = $('#issueCard');
+    const tool = ws.state.tool;
+    const show = this.app.space === 'solids' && (tool === 'layout' || tool === 'shape') && !ws.shell.isClosed() && !ws.anim;
+    card.hidden = !show;
+    if (!show) return;
+    const check = ws.layoutCheck();
+    if (this.listOpen === undefined) this.listOpen = window.innerWidth > 640;
+    $('#issueSummary').textContent = ws.issueSummary(check);
+    card.classList.toggle('ok', !check.errors && !check.warnings);
+    const cur = ws.focusedIssue();
+    const has = check.issues.length > 0;
+    const sevName = { error: 'Error', warning: 'Warning', info: 'Note' };
+    $('#issueText').textContent = cur
+      ? `${sevName[cur.severity]} ${ws.issueIdx + 1} of ${check.issues.length}: ${cur.text}`
+      : has ? `${check.issues.length} item${check.issues.length > 1 ? 's' : ''} to look at. Focus issue highlights the first one.` : 'Nothing to fix: every piece is flat, valid and clear of the others.';
+    $('#issueCard .iacts').hidden = !has;
+    $('#focusIssueBtn').disabled = !has;
+    $('#nextIssueBtn').disabled = !has || (check.issues.length < 2 && !!cur);
+    $('#clearIssueBtn').hidden = !cur;
+    const btn = $('#issueListBtn');
+    btn.hidden = !has;
+    btn.setAttribute('aria-expanded', String(!!this.listOpen));
+    btn.textContent = this.listOpen ? 'Hide list' : `List (${check.issues.length})`;
+    const ol = $('#issueList');
+    ol.hidden = !has || !this.listOpen;
+    const sig = check.issues.map((i) => i.key).join('|') + `#${cur ? ws.issueIdx : -1}`;
+    if (sig === this.issueSig) return;
+    this.issueSig = sig;
+    ol.replaceChildren();
+    check.issues.forEach((is, i) => {
+      const li = document.createElement('li');
+      const b = document.createElement('button');
+      b.type = 'button';
+      const sev = document.createElement('span');
+      sev.className = `sev sev-${is.severity}`;
+      sev.textContent = sevName[is.severity];
+      b.append(sev, document.createTextNode(is.text));
+      b.setAttribute('aria-current', String(!!cur && i === ws.issueIdx));
+      b.addEventListener('click', () => ws.focusIssue(i));
+      li.appendChild(b);
+      ol.appendChild(li);
+    });
   }
 
   note(msg) {
@@ -123,14 +204,16 @@ export class SolidsUI {
   exportSVG() {
     const ws = this.ws;
     const r = netSVG(ws.shell, { labels: $('#svgLabels').checked, ids: $('#svgIds').checked, tabs: $('#svgTabs').checked, title: `Net: ${ws.solidsText()}` });
-    if (r.error) { this.note(`${r.error} (Layout → Lay net on surface.)`); return; }
+    if (r.error) { this.note(r.error); this.renderExportCheck(); return; }
     this.lastSVG = r;
-    const ov = ws.shell.overlapReport();
     const blob = new Blob([r.svg], { type: 'image/svg+xml' });
     if (!this.download(blob, `net-${this.stamp()}.svg`)) return;
     let msg = `Net saved: ${Math.round(r.width)} × ${Math.round(r.height)} mm, ${r.counts.cut} cut, ${r.counts.mountain} mountain, ${r.counts.valley} valley${r.counts.flat ? `, ${r.counts.flat} no-fold` : ''} lines.`;
     if (r.tabs) msg += ` ${r.tabs} glue tabs${r.tabConflicts ? `, ${r.tabConflicts} of them overlap another part (check before cutting)` : ''}.`;
-    if (ov.within || ov.between) msg += ` Warning: ${ov.within + ov.between} overlapping panel pair${ov.within + ov.between > 1 ? 's' : ''} in this layout.`;
+    if (r.moved) msg += ` ${r.moved} tilted or raised piece${r.moved > 1 ? 's were' : ' was'} drawn from ${r.moved > 1 ? 'their' : 'its'} own plane.`;
+    if (r.excluded.length) msg += ` Left out (not flat or invalid): ${r.excluded.map((pc) => `piece ${pc.index}`).join(', ')}; see Show issues.`;
+    const ov = r.check.issues.filter((i) => i.kind === 'overlap').length;
+    if (ov) msg += ` Warning: ${ov} overlapping panel pair${ov > 1 ? 's' : ''} in this layout.`;
     this.note(msg);
   }
 
@@ -162,8 +245,14 @@ export class SolidsUI {
     $('#solidsDock').hidden = !solids;
     $('#paperBtn').hidden = solids;
     $$('[data-space]').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.space === app.space)));
-    if (!solids) return;
-    $$('[data-stool]').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.stool === ws.state.tool)));
+    $$('[data-nav-solids]').forEach((b) => { b.hidden = !solids; });
+    $('#navFocus').hidden = !solids;
+    if (!solids) { $('#issueCard').hidden = true; return; }
+    const tool = ws.state.tool;
+    const netTool = tool === 'layout' || tool === 'shape';
+    $$('[data-stool]').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.stool === tool || (b.dataset.stool === 'net' && netTool) || (b.dataset.stool === 'build' && tool === 'inspect'))));
+    $$('[data-netmode]').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.netmode === tool)));
+    $('#navTurn').setAttribute('aria-pressed', String(!!ws.navTurn));
     $$('[data-sfor]').forEach((c) => { c.hidden = c.dataset.sfor !== ws.state.tool; });
     $$('[data-omode]').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.omode === ws.state.openMode)));
     $('#solidsStats').textContent = ws.statusLine();
@@ -190,5 +279,7 @@ export class SolidsUI {
     } else this.sizeKey = null;
     $('#idsBtn').setAttribute('aria-pressed', String(!!ws.state.showIds));
     this.syncSolidAngle();
+    this.renderIssues();
+    if (!$('#exportDialog').hidden) this.renderExportCheck();
   }
 }

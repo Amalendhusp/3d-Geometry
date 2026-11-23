@@ -68,7 +68,8 @@ export class VRPanel {
       let x = M;
       for (const it of items) {
         const w = Math.round(free * (it.w || 1) / total);
-        btn(x, y, w, h, it.label, it.action, it);
+        // `it.w` is a relative weight; the pixel width computed here wins.
+        btn(x, y, w, h, it.label, it.action, { ...it, w });
         x += w + gap;
       }
     };
@@ -90,7 +91,8 @@ export class VRPanel {
     }
     if (space === 'solids') {
       this.app.solids.panelRows(row, B, M, W, 160);
-      B.push({ kind: 'text', x: M, y: 672, w: W - 210, h: 170, label: this.app.statusText || '', status: true });
+      // Below the navigation row.
+      B.push({ kind: 'text', x: M, y: 704, w: W - 210, h: 150, label: this.app.statusText || '', status: true });
       btn(PX_W - M - 196, 752, 196, 70, 'Exit VR', () => a.exitXR());
       this.buttons = B;
       return;
