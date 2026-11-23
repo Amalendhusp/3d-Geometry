@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { validateLayout, pieceToTable } from './validate.js';
 
 // Exports of the Solid → Unfold workspace.
 //
@@ -45,12 +46,38 @@ export function foldKind(shell, e) {
 
 export function netSVG(shell, opts = {}) {
   const { ids = false, labels = true, tabs = false, title = 'Net' } = opts;
-  const fr = shell.flatReport();
-  if (!fr.ok) return { error: 'The net is not lying flat. Lay it on the surface first.' };
-  // Outside faces down: view from below, so mirror x.
-  const mirror = fr.down >= fr.up ? -1 : 1;
-  const to2 = (v) => [mirror * v.x * MM, v.z * MM];
-  const polys = new Map(shell.panels.map((p) => [p, shell.worldPoly(p).map(to2)]));
+  // The same check the layout shows on screen.
+  const check = validateLayout(shell);
+  if (!check.exportable.length) {
+    const why = check.issues.filter((i) => i.severity === 'error').slice(0, 3).map((i) => i.text).join(' ');
+    return { error: `No piece can be exported yet. ${why}`, check };
+  }
+  // Each valid planar piece is drawn from its own plane: laid face down at
+  // its own centre (a rigid move, so nothing is stretched), then seen from
+  // the outside (from below, hence the mirrored x). Pieces already on the
+  // table keep their arrangement; a piece that was tilted or raised keeps
+  // its position unless it would land on another piece.
+  const to2 = (v) => [-v.x * MM, v.z * MM];
+  const polys = new Map();
+  const placed = [];
+  const boxOf = (list) => { const b = { x0: Infinity, y0: Infinity, x1: -Infinity, y1: -Infinity }; for (const q of list) for (const [x, y] of q) { b.x0 = Math.min(b.x0, x); b.x1 = Math.max(b.x1, x); b.y0 = Math.min(b.y0, y); b.y1 = Math.max(b.y1, y); } return b; };
+  const hits = (a, b) => a.x0 < b.x1 + 5 && b.x0 < a.x1 + 5 && a.y0 < b.y1 + 5 && b.y0 < a.y1 + 5;
+  for (const pc of [...check.exportable].sort((a, b) => Number(b.onTable) - Number(a.onTable))) {
+    const T = pc.onTable ? null : pieceToTable(pc);
+    let list = pc.panels.map((p) => shell.worldPoly(p).map((v) => to2(T ? v.applyMatrix4(T) : v)));
+    if (!pc.onTable) {
+      let b = boxOf(list);
+      if (placed.some((o) => hits(o, b))) {
+        const all = placed.reduce((u, o) => ({ x0: Math.min(u.x0, o.x0), x1: Math.max(u.x1, o.x1), y0: Math.min(u.y0, o.y0), y1: Math.max(u.y1, o.y1) }), { ...b });
+        const dx = all.x1 + 15 - b.x0, dy = all.y0 - b.y0;
+        list = list.map((q) => q.map(([x, y]) => [x + dx, y + dy]));
+        b = boxOf(list);
+      }
+    }
+    placed.push(boxOf(list));
+    pc.panels.forEach((p, i) => polys.set(p, list[i]));
+  }
+  const drawn = (p) => polys.has(p);
 
   const lines = { cut: [], mountain: [], valley: [], flat: [] };
   const seen = new Set();
@@ -69,6 +96,7 @@ export function netSVG(shell, opts = {}) {
   // Hinges: one line each.
   for (const e of shell.edges) {
     if (!e.shared || e.locked || e.type !== 'hinge') continue;
+    if (!e.uses.every((x) => drawn(x.panel))) continue;
     const u = e.uses[0];
     const poly = polys.get(u.panel);
     add(foldKind(shell, e), poly[u.i], poly[(u.i + 1) % poly.length]);
@@ -82,6 +110,7 @@ export function netSVG(shell, opts = {}) {
     const all = [...polys.values()];
     for (const e of shell.edges) {
       if (!e.shared || e.locked || e.type === 'hinge') continue;
+      if (!e.uses.every((x) => drawn(x.panel))) continue;
       const cands = e.uses.map((u) => {
         const poly = polys.get(u.panel);
         const a = poly[u.i], b = poly[(u.i + 1) % poly.length];
@@ -107,6 +136,7 @@ export function netSVG(shell, opts = {}) {
 
   // Outlines: every panel side that is not a hinge (and has no tab).
   for (const p of shell.panels) {
+    if (!drawn(p)) continue;
     const poly = polys.get(p);
     for (let i = 0; i < poly.length; i++) {
       const e = p.edges[i];
@@ -135,6 +165,7 @@ export function netSVG(shell, opts = {}) {
   const texts = [];
   if (labels) {
     for (const p of shell.panels) {
+      if (!drawn(p)) continue;
       const poly = polys.get(p);
       const c = poly.reduce((s, q) => [s[0] + q[0] / poly.length, s[1] + q[1] / poly.length], [0, 0]);
       for (let i = 0; i < poly.length; i++) {
@@ -156,6 +187,7 @@ export function netSVG(shell, opts = {}) {
   }
   if (ids) {
     for (const p of shell.panels) {
+      if (!drawn(p)) continue;
       const poly = polys.get(p);
       const c = poly.reduce((s, q) => [s[0] + q[0] / poly.length, s[1] + q[1] / poly.length], [0, 0]);
       texts.push({ x: c[0], y: c[1], ang: 0, text: `P${p.no}`, cls: 'id' });
@@ -167,7 +199,7 @@ export function netSVG(shell, opts = {}) {
   out.push(`<?xml version="1.0" encoding="UTF-8"?>`);
   out.push(`<svg xmlns="http://www.w3.org/2000/svg" width="${fmt(W)}mm" height="${fmt(H)}mm" viewBox="0 0 ${fmt(W)} ${fmt(H)}">`);
   out.push(`<title>${escapeXml(title)}</title>`);
-  out.push(`<desc>Full size, units mm. Seen from the outside (printed side). ${edgeText}. ${shell.panels.length} panels, ${fr.pieces} piece(s).</desc>`);
+  out.push(`<desc>Full size, units mm. Seen from the outside (printed side). ${edgeText}. ${polys.size} of ${shell.panels.length} panels, ${check.exportable.length} piece(s)${check.excluded.length ? `; not exported: ${check.excluded.map((pc) => `piece ${pc.index} (${pc.valid ? 'not flat' : 'invalid panels'})`).join(', ')}` : ''}.</desc>`);
   out.push('<style>.cut{stroke:#000;stroke-width:0.3}.mountain{stroke:#d4462a;stroke-width:0.3;stroke-dasharray:4 1.2 0.8 1.2}.valley{stroke:#1e6ad4;stroke-width:0.3;stroke-dasharray:2.4 1.6}.flat{stroke:#9a9a9a;stroke-width:0.2;stroke-dasharray:0.6 1.2}path{fill:none;stroke-linecap:round}text{font-family:Helvetica,Arial,sans-serif;text-anchor:middle;dominant-baseline:central}.edge{fill:#b3261e;font-weight:700}.id{fill:#555}.legend{fill:#333;text-anchor:start}</style>');
   for (const kind of ['flat', 'valley', 'mountain', 'cut']) {
     if (lines[kind].length) out.push(`<path id="${kind}" class="${kind}" d="${path(lines[kind])}"/>`);
@@ -189,7 +221,7 @@ export function netSVG(shell, opts = {}) {
   out.push('</g>');
   out.push('</svg>');
   const counts = Object.fromEntries(Object.entries(lines).map(([k, v]) => [k, v.length]));
-  return { svg: out.join('\n'), width: W, height: H, counts, tabs: tabPolys.length, tabConflicts, labels: texts.filter((t) => t.cls === 'edge').length };
+  return { svg: out.join('\n'), width: W, height: H, counts, tabs: tabPolys.length, tabConflicts, labels: texts.filter((t) => t.cls === 'edge').length, check, excluded: check.excluded, moved: check.exportable.filter((pc) => !pc.onTable).length };
 }
 
 function escapeXml(s) {
