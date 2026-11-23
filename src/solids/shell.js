@@ -699,6 +699,8 @@ export class Shell {
   serialize() {
     return {
       types: Object.fromEntries(this.edges.filter((e) => e.shared).map((e) => [e.key, e.type])),
+      // Edges the user locked as hinge or cut (kept by Suggest split layout).
+      locks: Object.fromEntries(this.edges.filter((e) => e.userLock).map((e) => [e.key, e.userLock])),
       M: Object.fromEntries(this.panels.map((p) => [p.id, p.M.toArray()])),
       bases: [...this.bases],
       net: this.net ? { status: this.net.status, searched: !!this.net.searched } : null,
@@ -708,6 +710,7 @@ export class Shell {
   restore(data) {
     if (!data) return;
     for (const e of this.edges) if (e.shared && !e.locked && data.types[e.key]) e.type = data.types[e.key];
+    for (const e of this.edges) e.userLock = (e.shared && !e.locked && data.locks && data.locks[e.key]) || undefined;
     for (const p of this.panels) if (data.M[p.id]) p.M.fromArray(data.M[p.id]);
     if (data.bases) {
       const ids = data.bases.filter((id) => this.panelById.has(id));

@@ -8,6 +8,7 @@ import { LabelLayer } from './labels.js';
 import { ShapeEditor } from './shapeedit.js';
 import { captureLayout, applyLayout, anchorTo, elPos } from './resize.js';
 import { validateLayout } from './validate.js';
+import { searchLayouts, lockInfo, cutLengthBound, layoutStats } from './suggest.js';
 
 // "Solid → Unfold" workspace: build a composition of solids, then open its
 // exterior shell panel by panel along hinges.
@@ -126,6 +127,10 @@ const COLORS = {
   loop: '#ff7a1a',
   issue: '#ff3df0',
   issueInfo: '#3fa9ff',
+  lockHinge: '#0b6b3a',
+  lockCut: '#9c1f0c',
+  newCut: '#ff3df0',
+  newHinge: '#22d3ff',
 };
 
 const deg = THREE.MathUtils.radToDeg;
@@ -272,6 +277,7 @@ export class SolidsWorkspace {
   }
 
   restoreSnapshot(snap) {
+    if (this.alt) this.endAlternatives();
     this.comp.restore(snap.comp);
     this.shell.build(this.comp);
     this.shell.restore(snap.shell);
@@ -521,9 +527,11 @@ export class SolidsWorkspace {
     if (this.hoverEdge === e) return { color: '#ffffff', w: w * 2.6 };
     const fi = this.focusedIssue();
     if (fi && fi.edges.includes(e)) return { color: COLORS.issue, w: w * 3 };
+    if (this.altDiff && this.altDiff.has(e)) return this.altDiff.get(e) === 'cut' ? { color: COLORS.newCut, w: w * 2.6, dashed: true } : { color: COLORS.newHinge, w: w * 2.6 };
     if (this.hoverPanel === p && this.hoverHinge === e && this.sel.panel !== p) return { color: '#5aa0ff', w: w * 2.2 };
     if (this.sel.panel === p && this.sel.hinge === e && this.state.tool === 'open') return { color: COLORS.chosen, w: w * 2.4 };
     if (this.loopEdges.has(e)) return { color: COLORS.loop, w: w * 2 };
+    if (e.userLock) return e.type === 'hinge' ? { color: COLORS.lockHinge, w: w * 2.1 } : { color: COLORS.lockCut, w: w * 2.1, dashed: true };
     if (this.sel.panel === p && okEdges.has(e)) return { color: COLORS.option, w: w * 1.9 };
     if (!e.shared || e.locked) return { color: COLORS.locked, w, dashed: true };
     if (e.type === 'hinge') return { color: COLORS.hinge, w };
@@ -1222,6 +1230,7 @@ export class SolidsWorkspace {
     if (t !== 'build') this.sel.solidId = this.sel.fi = null;
     if (!inNet(t)) this.sel.piece = null;
     if (!inNet(t) && this.issueKey) this.clearIssueFocus(false);
+    if (t !== 'layout' && this.alt) this.endAlternatives();
     this.loopEdges.clear();
     this.refreshStyles();
     const hints = {
@@ -1575,6 +1584,127 @@ export class SolidsWorkspace {
 
   arrangePieces() { this.layFlat({ arrange: true, prefix: 'Pieces arranged side by side.' }); }
 
+  // ------------------------------------------ suggested split layouts
+
+  // Search for alternative layouts a slice at a time, then compare them
+  // with "My layout" (the layout as it was). Previews change only edge
+  // types and panel poses; Apply makes one undo step back to My layout.
+  suggestLayouts() {
+    this.tools.finishAll();
+    this.stopAnim();
+    if (this.alt) this.endAlternatives(true);
+    if (this.state.tool !== 'layout') this.setTool('layout');
+    const sh = this.shell;
+    const info = lockInfo(sh);
+    const bound = cutLengthBound(sh, info);
+    const hinges = new Set(sh.sharedEdges().filter((e) => e.type === 'hinge'));
+    const box = new THREE.Box3();
+    for (const p of sh.panels) for (const v of sh.worldPoly(p)) box.expandByPoint(v);
+    const flat = sh.flatReport().ok;
+    // Not laid flat: count the overlaps it would have once unfolded.
+    const ovCount = flat ? (() => { const o = sh.overlapReport(); return o.within + o.between; })() : sh.flatOverlaps().pairs;
+    const mine = {
+      snap: this.snapshot(),
+      types: sh.edges.map((e) => e.type),
+      M: sh.panels.map((p) => p.M.clone()),
+      stats: { ...layoutStats(sh, hinges, info, bound), overlaps: ovCount, width: box.max.x - box.min.x, depth: box.max.z - box.min.z, flat },
+    };
+    const gen = searchLayouts(sh, { budgetMs: 3000, want: 4 });
+    this.alt = { mine, list: [], idx: -1, searching: true, tried: 0, gen, result: null };
+    this.app.toast('Looking for alternative layouts (up to 3 s)…');
+    const step = () => {
+      if (!this.alt || this.alt.gen !== gen) return;
+      const t = performance.now();
+      let r;
+      do { r = gen.next(); } while (!r.done && performance.now() - t < 30);
+      if (!r.done) { this.alt.tried = r.value.tried; this.app.notify?.(); setTimeout(step, 0); return; }
+      const res = r.value;
+      this.alt.searching = false;
+      this.alt.result = res;
+      this.alt.list = res.suggestions || [];
+      if (res.error) { this.app.toast(res.error, 7000); this.app.notify?.(); return; }
+      if (!this.alt.list.length) { this.app.toast(res.note, 7000); this.app.notify?.(); return; }
+      this.previewAlternative(0);
+    };
+    setTimeout(step, 0);
+    this.app.notify?.();
+  }
+
+  altStatsText(s) {
+    const mm = (v) => Math.round(v * 1000);
+    const parts = [`${s.pieces} piece${s.pieces > 1 ? 's' : ''}`, `${s.extraCuts} extra cut${s.extraCuts === 1 ? '' : 's'}`, `cut ${mm(s.cutLength)} mm${s.addLength > 5e-5 ? ` (+${mm(s.addLength)})` : ''}`, `${s.overlaps} overlap${s.overlaps === 1 ? '' : 's'}${s.flat === false ? ' when unfolded' : ''}`];
+    if (s.width !== undefined && (s.flat !== false)) parts.push(`${mm(s.width)} × ${mm(s.depth)} mm`);
+    else if (s.flat === false) parts.push('not laid flat');
+    return parts.join(' · ');
+  }
+
+  previewAlternative(i) {
+    const a = this.alt;
+    if (!a || a.searching) return;
+    const n = a.list.length;
+    if (i < -1) i = n - 1;
+    if (i >= n) i = -1;
+    a.idx = i;
+    const sh = this.shell;
+    if (i < 0) {
+      sh.edges.forEach((e, k) => { e.type = a.mine.types[k]; });
+      sh.panels.forEach((p, k) => p.M.copy(a.mine.M[k]));
+      this.altDiff = null;
+    } else {
+      const s = a.list[i];
+      sh.setLayout(s.hinges);
+      sh.panels.forEach((p, k) => p.M.copy(s.poses[k]));
+      this.altDiff = new Map();
+      sh.edges.forEach((e, k) => { if (e.shared && e.type !== a.mine.types[k]) this.altDiff.set(e, e.type); });
+    }
+    sh.classify();
+    this.sel.piece = null;
+    this.updateMatrices();
+    this.checkOverlaps();
+    this.refreshStyles();
+    if (this.shapeEdit.active) this.shapeEdit.refresh();
+    this.frameView(true);
+    const s = i < 0 ? a.mine.stats : a.list[i];
+    const what = i < 0 ? 'My layout' : `Suggestion ${i + 1} of ${n}`;
+    const diff = this.altDiff ? [...this.altDiff.values()] : [];
+    const nc = diff.filter((t) => t === 'cut').length, nh = diff.length - nc;
+    this.app.toast(`${what}: ${this.altStatsText(s)}.${i >= 0 ? ` Changes from my layout: ${nc} new cut${nc === 1 ? '' : 's'} (magenta), ${nh} new hinge${nh === 1 ? '' : 's'} (cyan). Apply keeps it; Undo then returns to my layout.` : ''}`, 7000);
+    this.app.notify?.();
+  }
+
+  applyAlternative() {
+    const a = this.alt;
+    if (!a || a.searching) return;
+    if (a.idx < 0) { this.endAlternatives(); this.app.toast('Kept my layout.'); return; }
+    const s = a.list[a.idx];
+    this.history.push(a.mine.snap);
+    if (this.history.length > 80) this.history.shift();
+    this.alt = null;
+    this.altDiff = null;
+    this.refreshStyles();
+    this.app.toast(`Suggestion applied: ${this.altStatsText(s)}. Undo returns to my layout.`, 6000);
+    this.app.notify?.();
+  }
+
+  // Close the comparison. Unless `keepShown`, My layout comes back exactly.
+  endAlternatives(restore = true) {
+    const a = this.alt;
+    if (!a) return;
+    this.alt = null;
+    this.altDiff = null;
+    if (restore && a.idx >= 0) {
+      const sh = this.shell;
+      sh.edges.forEach((e, k) => { if (a.mine.types[k]) e.type = a.mine.types[k]; });
+      sh.panels.forEach((p, k) => { if (a.mine.M[k]) p.M.copy(a.mine.M[k]); });
+      sh.classify();
+      this.updateMatrices();
+      this.checkOverlaps();
+      if (this.shapeEdit.active) this.shapeEdit.refresh();
+    }
+    this.refreshStyles();
+    this.app.notify?.();
+  }
+
   // ------------------------------------------------- layout check / issues
 
   // The same check the SVG exporter uses (validate.js), cached until a
@@ -1789,6 +1919,7 @@ export class SolidsWorkspace {
   // pieces), or join a cut whose two sides meet.
   layoutEdge(e, P) {
     if (!e.shared || e.locked) { this.app.toast(`Edge ${e.no} joins more than two panels, so it stays cut.`); return; }
+    if (e.userLock) { this.app.toast(this.lockRefusal(e), 5000); return; }
     const Q = this.shell.other(e, P);
     if (e.type === 'hinge') { this.cutHinge(e, P, Q); return; }
     if (!this.shell.intact(e)) {
@@ -1880,8 +2011,30 @@ export class SolidsWorkspace {
 
   // ------------------------------------------------------------- edges
 
+  setEdgeTap(m) {
+    this.state.edgeTap = m === 'lock' ? 'lock' : 'switch';
+    this.app.toast(m === 'lock'
+      ? 'Tap: Lock. Tapping an edge locks it as it is (thick line): a locked hinge stays a hinge and a locked cut stays a cut, also in Suggest split layout. Tap again to unlock.'
+      : 'Tap: Switch. Tapping an edge switches it between hinge and cut.');
+    this.app.notify?.();
+  }
+
+  toggleLock(e) {
+    if (!e.shared || e.locked) { this.app.toast('More than two panels meet at this edge, so it is always cut.'); return; }
+    this.pushHistory();
+    e.userLock = e.userLock ? undefined : e.type;
+    this.refreshStyles();
+    this.app.toast(e.userLock ? `Edge ${e.no} locked as a ${e.type}. Suggest split layout will keep it.` : `Edge ${e.no} unlocked.`);
+    this.app.notify?.();
+  }
+
+  lockRefusal(e) {
+    return `Edge ${e.no} is locked as a ${e.userLock}. In Edges, choose Tap: Lock and tap it to unlock it first.`;
+  }
+
   toggleEdge(e) {
     if (!e.shared || e.locked) { this.app.toast('More than two panels meet at this edge, so it stays cut.'); return; }
+    if (e.userLock) { this.app.toast(this.lockRefusal(e), 5000); return; }
     if (e.type === 'cut' && !this.shell.intact(e)) { this.app.toast('These panels are apart. Refold them before joining this edge with a hinge.'); return; }
     this.pushHistory();
     e.type = e.type === 'hinge' ? 'cut' : 'hinge';
@@ -2260,6 +2413,7 @@ export class SolidsWorkspace {
     if (this.state.tool === 'layout') parts.push(`Layout: ${this.layoutText().text}`);
     if (this.state.tool === 'inspect') parts.push(this.isTurned() ? `Turned ${Math.round(this.viewTurnDegrees())}° for viewing` : 'Resting orientation');
     else if (this.viewText()) parts.push(this.viewText());
+    if (this.alt) parts.push(this.alt.searching ? `Searching layouts… ${this.alt.tried} tried` : `Comparing ${this.alt.list.length + 1} layouts`);
     if (this.state.tool === 'shape' || this.comp.isShaped()) parts.push(`${this.comp.isShaped() ? 'Shape changed' : 'Regular solids'}: ${this.sizeText()}`);
     if (this.state.tool === 'shape') parts.push(this.foldText());
     parts.push(this.netText());
@@ -2334,9 +2488,21 @@ export class SolidsWorkspace {
         { label: 'Lay flat', action: () => a.layFlat() },
         { label: 'Arrange', action: () => a.arrangePieces() },
         { label: 'Other nets', action: () => a.otherNets() },
+        { label: 'Suggest', action: () => a.suggestLayouts(), active: !!a.alt },
         { label: '⟲ 15°', action: () => a.rotatePiece(15) },
         { label: '⟳ 15°', action: () => a.rotatePiece(-15) },
       ], 8);
+      if (a.alt) {
+        const al = a.alt;
+        const lab = al.searching ? `Searching… ${al.tried} tried` : al.idx < 0 ? `My layout (1 of ${al.list.length + 1})` : `Suggestion ${al.idx + 1} of ${al.list.length}`;
+        row(y2, 78, [
+          { label: '◀', w: 0.5, action: () => a.previewAlternative(al.idx - 1), disabled: al.searching },
+          { label: lab, w: 2.2, kind: 'label' },
+          { label: '▶', w: 0.5, action: () => a.previewAlternative(al.idx + 1), disabled: al.searching },
+          { label: 'Apply', action: () => a.applyAlternative(), disabled: al.searching || al.idx < 0 },
+          { label: 'Keep mine', w: 1.2, action: () => { a.endAlternatives(); a.app.toast('Kept my layout.'); } },
+        ], 8);
+      } else {
       const check = a.shell.isClosed() ? null : a.layoutCheck();
       const fi = a.focusedIssue();
       const n = check ? check.issues.length : 0;
@@ -2348,6 +2514,7 @@ export class SolidsWorkspace {
         { label: 'Next issue', action: () => a.nextIssue(), disabled: n < 2 && !!fi || !n },
         { label: 'Clear', action: () => a.clearIssueFocus(), disabled: !fi },
       ], 8);
+      }
     } else if (s.tool === 'build') {
       const short = { cube: 'Cube', tetra: 'Tetra', octa: 'Octa', cubocta: 'Cubocta' };
       row(y1, 78, SOLID_TYPES.map((t) => ({ label: short[t], action: () => a.setAddType(t), active: a.addType === t })), 10);
@@ -2376,8 +2543,10 @@ export class SolidsWorkspace {
       row(y1, 78, [
         { label: 'Find net', action: () => a.defaultNet() },
         { label: 'Check net', action: () => a.checkNet() },
+        { label: 'Tap: switch', action: () => a.setEdgeTap('switch'), active: s.edgeTap !== 'lock' },
+        { label: 'Tap: lock', action: () => a.setEdgeTap('lock'), active: s.edgeTap === 'lock' },
       ]);
-      B.push({ kind: 'text', x: M, y: y2, w: W, h: 78, label: 'Point at an edge and pull the trigger (or pinch / touch it) to switch hinge ↔ cut. Green = hinge, red dashed = cut.' });
+      B.push({ kind: 'text', x: M, y: y2, w: W, h: 78, label: s.edgeTap === 'lock' ? 'Point at an edge and pull the trigger to lock it as it is (thick line) or unlock it.' : 'Point at an edge and pull the trigger (or pinch / touch it) to switch hinge ↔ cut. Green = hinge, red dashed = cut, thick = locked.' });
     }
     row(y0 + 280, 78, [
       { label: 'Undo', action: () => a.undo() },
@@ -2485,6 +2654,14 @@ class SolidsTools {
       return false;
     }
     if (!hit) return false;
+    // Working on the layout during a comparison: a suggestion being shown
+    // is kept (applied, undoable); a search still running is stopped.
+    if (this.ws.alt && this.ws.state.tool === 'layout' && !this.ws.navTurn && !(ptr.kind === 'screen' && ptr.alt)) {
+      const al = this.ws.alt;
+      if (al.searching) { this.ws.endAlternatives(); this.ws.app.toast('Search stopped.'); }
+      else if (al.idx >= 0) this.ws.applyAlternative();
+      else this.ws.endAlternatives();
+    }
     const turn = this.ws.navTurn || (ptr.kind === 'screen' && ptr.alt);
     if (turn && (hit.panel || hit.form || hit.ghost)) {
       this.ws.altTurn = !this.ws.navTurn;
@@ -2847,7 +3024,7 @@ class SolidsTools {
     return {
       move: () => {},
       end: () => {
-        if (e) ws.toggleEdge(e);
+        if (e) { if (ws.state.edgeTap === 'lock') ws.toggleLock(e); else ws.toggleEdge(e); }
         else if (ptr.kind !== 'touch') ws.app.toast('Tap closer to an edge.');
       },
     };

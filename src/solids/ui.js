@@ -1,6 +1,8 @@
 import { PRESETS } from './workspace.js';
 import { netSVG, viewPNG } from './exporter.js';
 import { refusalText } from './validate.js';
+import { exportGLB, exportOBJ } from './export3d.js';
+import { BUILD } from '../version.js';
 
 // Screen controls for the Solid → Unfold workspace.
 
@@ -63,6 +65,12 @@ export class SolidsUI {
     on('#shapeUnpinBtn', () => (ws.shapeEdit.pin ? ws.shapeEdit.togglePin(ws.shapeEdit.pin) : app.toast('Nothing is pinned. Tap a side or corner of the net to pin it.')));
     on('#idsBtn', () => ws.toggleIds());
     on('#importShellBtn', () => $('#importShellFile').click());
+    on('#suggestBtn', () => ws.suggestLayouts());
+    on('#altApplyBtn', () => ws.applyAlternative());
+    on('#altMineBtn', () => { ws.endAlternatives(); app.toast('Kept my layout.'); });
+    $$('[data-etap]').forEach((b) => b.addEventListener('click', () => ws.setEdgeTap(b.dataset.etap)));
+    on('#exportGlbBtn', () => this.exportModel('glb'));
+    on('#exportObjBtn', () => this.exportModel('obj'));
     on('#focusIssueBtn', () => ws.focusIssue());
     on('#nextIssueBtn', () => ws.nextIssue());
     on('#clearIssueBtn', () => ws.clearIssueFocus());
@@ -217,6 +225,67 @@ export class SolidsUI {
     this.note(msg);
   }
 
+  // 3D model from the panels themselves (never the scene), real size.
+  exportModel(kind) {
+    const ws = this.ws;
+    const pose = (document.querySelector('input[name="modelPose"]:checked') || {}).value === 'current' ? 'current' : 'assembled';
+    const base = `model-${this.stamp()}-${pose}`;
+    const header = [`Paper Fold Studio ${BUILD.version} (${BUILD.commit})`, ws.solidsText(), `${ws.shell.panels.length} panels`];
+    const size = (v) => v.toArray().map((x) => x.toFixed(1)).join(' × ');
+    const poseText = pose === 'assembled' ? 'assembled form' : 'current folded pose';
+    if (kind === 'glb') {
+      const r = exportGLB(ws.shell, ws.comp, { pose, generator: `Paper Fold Studio ${BUILD.version}`, meta: { solids: ws.solidsText(), build: BUILD.commit } });
+      this.lastModel = { kind, pose, bytes: r.bytes.length, triangles: r.triangles, sizeMM: r.sizeMM.toArray(), name: `${base}.glb` };
+      if (this.download(new Blob([r.bytes], { type: 'model/gltf-binary' }), `${base}.glb`)) this.note(`3D model saved (${poseText}): ${r.parts} solid${r.parts > 1 ? 's' : ''}, ${r.panels} panels, ${r.triangles} triangles, ${size(r.sizeMM)} mm. glTF units are metres.`);
+      return;
+    }
+    const r = exportOBJ(ws.shell, ws.comp, { pose, name: base, header });
+    this.lastModel = { kind, pose, faces: r.faces, vertices: r.vertices, sizeMM: r.sizeMM.toArray(), name: `${base}.obj`, mtl: `${base}.mtl`, obj: r.obj, mtlText: r.mtl };
+    const ok = this.download(new Blob([r.obj], { type: 'text/plain' }), `${base}.obj`);
+    // The .mtl goes alongside (keep both files in the same folder).
+    setTimeout(() => this.download(new Blob([r.mtl], { type: 'text/plain' }), `${base}.mtl`), 400);
+    if (ok) this.note(`3D model saved (${poseText}): ${base}.obj and ${base}.mtl, ${r.faces} faces, ${size(r.sizeMM)} mm. OBJ units are millimetres; keep the two files together.`);
+  }
+
+  // Compare "My layout" with the suggestions.
+  renderAlternatives() {
+    const ws = this.ws;
+    const a = ws.alt;
+    const card = $('#altCard');
+    card.hidden = !a || this.app.space !== 'solids';
+    if (!a) { this.altSig = null; return; }
+    const res = a.result;
+    $('#altSummary').textContent = a.searching ? `searching… ${a.tried} layouts tried` : res && !res.error ? `${a.list.length} suggestion${a.list.length === 1 ? '' : 's'} · ${res.tried} tried in ${(res.ms / 1000).toFixed(1)} s` : '';
+    $('#altNote').textContent = a.searching ? 'First without extra cuts; only if none works, with the fewest and shortest extra cuts.' : res ? (res.error || res.note) : '';
+    $('#altApplyBtn').disabled = a.searching || a.idx < 0;
+    const sig = `${a.searching}|${a.idx}|${a.list.length}`;
+    if (sig === this.altSig) return;
+    this.altSig = sig;
+    const ol = $('#altList');
+    ol.replaceChildren();
+    if (a.searching) return;
+    const rows = [{ name: 'My layout', s: a.mine.stats, i: -1 }, ...a.list.map((s, i) => ({ name: `Suggestion ${i + 1}${i === 0 ? ' (best found)' : ''}`, s, i }))];
+    for (const r of rows) {
+      const li = document.createElement('li');
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'alt';
+      const k = document.createElement('span'); k.className = 'k'; k.textContent = r.name;
+      const st = document.createElement('span'); st.className = 's'; st.textContent = ws.altStatsText(r.s);
+      b.append(k, st);
+      b.setAttribute('aria-current', String(r.i === a.idx));
+      b.addEventListener('click', () => ws.previewAlternative(r.i));
+      li.appendChild(b);
+      ol.appendChild(li);
+    }
+    if (a.idx >= 0) {
+      const lg = document.createElement('li');
+      lg.className = 'legend-alt';
+      lg.innerHTML = 'Changes shown on the net: <i style="background:#ff3df0"></i>new cut <i style="background:#22d3ff"></i>new hinge';
+      ol.appendChild(lg);
+    }
+  }
+
   exportPNG() {
     const transparent = (document.querySelector('input[name="pngBg"]:checked') || {}).value !== 'scene';
     const r = viewPNG(this.app, { transparent });
@@ -279,7 +348,10 @@ export class SolidsUI {
     } else this.sizeKey = null;
     $('#idsBtn').setAttribute('aria-pressed', String(!!ws.state.showIds));
     this.syncSolidAngle();
+    this.renderAlternatives();
     this.renderIssues();
+    if (ws.alt) $('#issueCard').hidden = true;
+    $$('[data-etap]').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.etap === (ws.state.edgeTap || 'switch'))));
     if (!$('#exportDialog').hidden) this.renderExportCheck();
   }
 }
