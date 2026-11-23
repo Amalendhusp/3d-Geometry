@@ -255,33 +255,43 @@ export class SolidsUI {
     card.hidden = !a || this.app.space !== 'solids';
     if (!a) { this.altSig = null; return; }
     const res = a.result;
-    $('#altSummary').textContent = a.searching ? `searching… ${a.tried} layouts tried` : res && !res.error ? `${a.list.length} suggestion${a.list.length === 1 ? '' : 's'} · ${res.tried} tried in ${(res.ms / 1000).toFixed(1)} s` : '';
-    $('#altNote').textContent = a.searching ? 'First without extra cuts; only if none works, with the fewest and shortest extra cuts.' : res ? (res.error || res.note) : '';
-    $('#altApplyBtn').disabled = a.searching || a.idx < 0;
+    $('#altSummary').textContent = a.searching ? `trying ${a.level} cut${a.level === 1 ? '' : 's'}… ${a.nodes} checked` : res ? `${res.pairs.length} overlapping pair${res.pairs.length === 1 ? '' : 's'} · ${a.list.length} option${a.list.length === 1 ? '' : 's'} · ${(res.ms / 1000).toFixed(1)} s` : '';
+    $('#altNote').textContent = a.searching ? 'Keeping your hinges and cuts: one additional cut is tried first, then two, and so on.' : res ? res.note : '';
+    const cur = a.idx >= 0 ? a.list[a.idx] : null;
+    $('#altApplyBtn').disabled = a.searching || !cur || !cur.valid;
+    $('#altApplyBtn').textContent = cur && !cur.valid ? 'Not valid' : 'Apply';
     const sig = `${a.searching}|${a.idx}|${a.list.length}`;
     if (sig === this.altSig) return;
     this.altSig = sig;
     const ol = $('#altList');
     ol.replaceChildren();
     if (a.searching) return;
-    const rows = [{ name: 'My layout', s: a.mine.stats, i: -1 }, ...a.list.map((s, i) => ({ name: `Suggestion ${i + 1}${i === 0 ? ' (best found)' : ''}`, s, i }))];
+    const best = a.result && a.result.proven.count ? 'fewest cuts, proven' : 'best found';
+    const rows = [{ name: 'My layout', s: a.mine.stats, i: -1, mine: true }, ...a.list.map((s, i) => ({ name: `Option ${i + 1}${i === 0 ? ` (${best})` : ''}`, s, i }))];
     for (const r of rows) {
       const li = document.createElement('li');
       const b = document.createElement('button');
       b.type = 'button';
       b.className = 'alt';
       const k = document.createElement('span'); k.className = 'k'; k.textContent = r.name;
-      const st = document.createElement('span'); st.className = 's'; st.textContent = ws.altStatsText(r.s);
+      const st = document.createElement('span'); st.className = 's'; st.textContent = r.s ? ws.altStatsText(r.s, !!r.mine) : '';
       b.append(k, st);
       b.setAttribute('aria-current', String(r.i === a.idx));
       b.addEventListener('click', () => ws.previewAlternative(r.i));
       li.appendChild(b);
       ol.appendChild(li);
     }
-    if (a.idx >= 0) {
+    if (cur) {
+      // Why each additional cut was chosen.
+      for (const t of ws.altWhy(cur)) {
+        const li = document.createElement('li');
+        li.className = 'legend-alt';
+        li.textContent = t;
+        ol.appendChild(li);
+      }
       const lg = document.createElement('li');
       lg.className = 'legend-alt';
-      lg.innerHTML = 'Changes shown on the net: <i style="background:#ff3df0"></i>new cut <i style="background:#22d3ff"></i>new hinge';
+      lg.innerHTML = 'On the net: <i style="background:#ff3df0"></i>additional cut. Everything else keeps its hinges, cuts and place; only the freed part moves.';
       ol.appendChild(lg);
     }
   }

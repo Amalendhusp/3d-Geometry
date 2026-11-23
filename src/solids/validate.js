@@ -21,6 +21,17 @@ const deg = THREE.MathUtils.radToDeg;
 
 function wrap(a) { return Math.atan2(Math.sin(a), Math.cos(a)); }
 
+// Panels hinged beyond `p` in forest F (p included).
+function subtree(F, p) {
+  if (!F._kids) {
+    F._kids = new Map();
+    for (const [c, l] of F.parent) { if (!F._kids.has(l.parent)) F._kids.set(l.parent, []); F._kids.get(l.parent).push(c); }
+  }
+  const out = [p];
+  for (let i = 0; i < out.length; i++) for (const c of F._kids.get(out[i]) || []) out.push(c);
+  return out;
+}
+
 export function validateLayout(shell, tol = TOL) {
   const F = shell.forest();
   const rootOf = shell.pieceRoots(F);
@@ -59,32 +70,51 @@ export function validateLayout(shell, tol = TOL) {
     const g = pts.reduce((a, v) => a.add(v), new THREE.Vector3()).divideScalar(pts.length);
     const c = g.clone().addScaledVector(n, -g.clone().sub(o).dot(n));
     const aligned = panels.every((p) => shell.worldNormal(p).dot(n) > Math.cos(tol.angle));
-    // Hinges inside this piece that are not at their flat angle.
+    // Hinges inside this piece that are not at their flat angle. A fold
+    // counts when its angle is over the angle tolerance, or when it lifts
+    // the panels beyond it by more than the distance tolerance (a tiny
+    // angle on a long piece), so nothing out of plane goes unnamed.
     const residual = [];
     const inPiece = new Set(panels);
     for (const [child, link] of F.parent) {
       if (!inPiece.has(child)) continue;
       const off = wrap(shell.angle(link.e, child, link.parent) - shell.flatAngle(link.e, child, link.parent));
-      if (Math.abs(off) > tol.angle) residual.push({ e: link.e, P: child, Q: link.parent, deg: deg(off) });
+      if (Math.abs(off) < 1e-12) continue;
+      const u = link.e.uses.find((x) => x.panel === child) || link.e.uses[0];
+      const w = shell.worldPoly(u.panel);
+      const A = w[u.i], B = w[(u.i + 1) % w.length];
+      const axis = B.clone().sub(A).normalize();
+      let reach = 0;
+      for (const p of subtree(F, child)) for (const v of shell.worldPoly(p)) { const d = v.clone().sub(A); reach = Math.max(reach, d.addScaledVector(axis, -d.dot(axis)).length()); }
+      const lift = Math.abs(Math.sin(off)) * reach;
+      if (Math.abs(off) > tol.angle || lift > tol.dist) residual.push({ e: link.e, P: child, Q: link.parent, deg: deg(off), lift });
     }
     const planar = maxDev <= tol.dist && aligned && !residual.length;
+    // Largest gap between the two sides of a hinge in this piece.
+    let seam = 0;
+    for (const [child, link] of F.parent) {
+      if (!inPiece.has(child)) continue;
+      const [u, v] = link.e.uses;
+      seam = Math.max(seam, link.e.a.clone().applyMatrix4(u.panel.M).distanceTo(link.e.a.clone().applyMatrix4(v.panel.M)), link.e.b.clone().applyMatrix4(u.panel.M).distanceTo(link.e.b.clone().applyMatrix4(v.panel.M)));
+    }
     const down = n.dot(DOWN);
     const tilt = deg(Math.acos(Math.min(1, Math.abs(down))));
     let minY = Infinity, maxY = -Infinity;
     for (const v of pts) { minY = Math.min(minY, v.y); maxY = Math.max(maxY, v.y); }
     const onTable = planar && tilt <= deg(tol.angle) && Math.abs(minY) <= tol.dist && Math.abs(maxY) <= tol.dist;
     const valid = !panels.some((p) => badPanels.has(p));
-    return { index: i + 1, panels, root, planar, onTable, valid, maxDev, residual, tilt, faceUp: down < 0, minY, maxY, normal: n, centre: c };
+    return { index: i + 1, panels, root, planar, onTable, valid, maxDev, residual, seam, tilt, faceUp: down < 0, minY, maxY, normal: n, centre: c };
   });
   const pieceOf = new Map();
   for (const pc of pieces) for (const p of pc.panels) pieceOf.set(p, pc);
 
   for (const pc of pieces) {
     for (const r of pc.residual) {
-      add({ kind: 'fold', severity: 'error', piece: pc, panels: [r.P, r.Q], edges: [r.e], text: `Piece ${pc.index}: hinge ${r.e.no} is still folded ${Math.abs(r.deg).toFixed(2)}° from flat (between P${r.P.no} and P${r.Q.no}). It is not exported until it lies flat: press Lay net on surface, or open that hinge fully.` });
+      const a = Math.abs(r.deg);
+      add({ kind: 'fold', severity: 'error', piece: pc, panels: [r.P, r.Q], edges: [r.e], text: `Piece ${pc.index}: hinge ${r.e.no} is still folded ${a < 0.01 ? a.toFixed(4) : a.toFixed(2)}° from flat (between P${r.P.no} and P${r.Q.no}), lifting the panels beyond it by up to ${(r.lift * 1000).toFixed(2)} mm. This is a real residual fold, not rounding. It is not exported until it lies flat: press Lay net on surface, or open that hinge fully.` });
     }
     if (!pc.residual.length && !pc.planar && pc.valid) {
-      add({ kind: 'fold', severity: 'error', piece: pc, panels: pc.panels, edges: [], text: `Piece ${pc.index} is not flat (up to ${(pc.maxDev * 1000).toFixed(2)} mm out of its plane). It is not exported until it lies flat.` });
+      add({ kind: 'fold', severity: 'error', piece: pc, panels: pc.panels, edges: [], text: `Piece ${pc.index} is not flat (up to ${(pc.maxDev * 1000).toFixed(2)} mm out of its plane), and no single hinge fold or warped panel explains it (hinge seams up to ${(pc.seam * 1000).toFixed(3)} mm apart). It is not exported until it lies flat: press Arrange pieces to lay it out again from its hinges.` });
     }
   }
   const ov = shell.overlapReport();

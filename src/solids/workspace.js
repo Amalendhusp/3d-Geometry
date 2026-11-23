@@ -8,7 +8,7 @@ import { LabelLayer } from './labels.js';
 import { ShapeEditor } from './shapeedit.js';
 import { captureLayout, applyLayout, anchorTo, elPos } from './resize.js';
 import { validateLayout } from './validate.js';
-import { searchLayouts, lockInfo, cutLengthBound, layoutStats } from './suggest.js';
+import { resolveOverlaps as resolveOverlapsSearch, edgeLength } from './suggest.js';
 
 // "Solid → Unfold" workspace: build a composition of solids, then open its
 // exterior shell panel by panel along hinges.
@@ -1584,58 +1584,78 @@ export class SolidsWorkspace {
 
   arrangePieces() { this.layFlat({ arrange: true, prefix: 'Pieces arranged side by side.' }); }
 
-  // ------------------------------------------ suggested split layouts
+  // ------------------------------------------ resolve overlaps
 
-  // Search for alternative layouts a slice at a time, then compare them
-  // with "My layout" (the layout as it was). Previews change only edge
-  // types and panel poses; Apply makes one undo step back to My layout.
-  suggestLayouts() {
+  // Resolve overlaps: the fewest additional cuts for the current hinge
+  // layout (suggest.js), compared with "My layout". The search runs a
+  // slice at a time. Previews change only edge types and panel poses;
+  // Apply (valid results only) is one undo step back to My layout.
+  resolveOverlaps() {
     this.tools.finishAll();
     this.stopAnim();
     if (this.alt) this.endAlternatives(true);
     if (this.state.tool !== 'layout') this.setTool('layout');
     const sh = this.shell;
-    const info = lockInfo(sh);
-    const bound = cutLengthBound(sh, info);
-    const hinges = new Set(sh.sharedEdges().filter((e) => e.type === 'hinge'));
-    const box = new THREE.Box3();
-    for (const p of sh.panels) for (const v of sh.worldPoly(p)) box.expandByPoint(v);
-    const flat = sh.flatReport().ok;
-    // Not laid flat: count the overlaps it would have once unfolded.
-    const ovCount = flat ? (() => { const o = sh.overlapReport(); return o.within + o.between; })() : sh.flatOverlaps().pairs;
-    const mine = {
-      snap: this.snapshot(),
-      types: sh.edges.map((e) => e.type),
-      M: sh.panels.map((p) => p.M.clone()),
-      stats: { ...layoutStats(sh, hinges, info, bound), overlaps: ovCount, width: box.max.x - box.min.x, depth: box.max.z - box.min.z, flat },
-    };
-    const gen = searchLayouts(sh, { budgetMs: 3000, want: 4 });
-    this.alt = { mine, list: [], idx: -1, searching: true, tried: 0, gen, result: null };
-    this.app.toast('Looking for alternative layouts (up to 3 s)…');
+    const mine = { snap: this.snapshot(), types: sh.edges.map((e) => e.type), M: sh.panels.map((p) => p.M.clone()) };
+    const gen = resolveOverlapsSearch(sh, { budgetMs: 3000 });
+    this.alt = { mine, list: [], idx: -1, searching: true, level: 0, nodes: 0, gen, result: null };
+    this.app.toast('Looking for the fewest additional cuts that separate every overlapping pair…');
     const step = () => {
       if (!this.alt || this.alt.gen !== gen) return;
       const t = performance.now();
       let r;
       do { r = gen.next(); } while (!r.done && performance.now() - t < 30);
-      if (!r.done) { this.alt.tried = r.value.tried; this.app.notify?.(); setTimeout(step, 0); return; }
+      if (!r.done) { this.alt.level = r.value.level; this.alt.nodes = r.value.nodes; this.app.notify?.(); setTimeout(step, 0); return; }
       const res = r.value;
       this.alt.searching = false;
       this.alt.result = res;
       this.alt.list = res.suggestions || [];
-      if (res.error) { this.app.toast(res.error, 7000); this.app.notify?.(); return; }
-      if (!this.alt.list.length) { this.app.toast(res.note, 7000); this.app.notify?.(); return; }
+      this.alt.mine.stats = res.mine;
+      if (!this.alt.list.length) { this.app.toast(res.note, 8000); this.app.notify?.(); return; }
       this.previewAlternative(0);
     };
     setTimeout(step, 0);
     this.app.notify?.();
   }
 
-  altStatsText(s) {
+  // Backwards name (VR panel and older calls).
+  suggestLayouts() { this.resolveOverlaps(); }
+
+  altStatsText(s, mine = false) {
     const mm = (v) => Math.round(v * 1000);
-    const parts = [`${s.pieces} piece${s.pieces > 1 ? 's' : ''}`, `${s.extraCuts} extra cut${s.extraCuts === 1 ? '' : 's'}`, `cut ${mm(s.cutLength)} mm${s.addLength > 5e-5 ? ` (+${mm(s.addLength)})` : ''}`, `${s.overlaps} overlap${s.overlaps === 1 ? '' : 's'}${s.flat === false ? ' when unfolded' : ''}`];
-    if (s.width !== undefined && (s.flat !== false)) parts.push(`${mm(s.width)} × ${mm(s.depth)} mm`);
-    else if (s.flat === false) parts.push('not laid flat');
-    return parts.join(' · ');
+    if (mine) {
+      return [`${s.pieces} piece${s.pieces === 1 ? '' : 's'}`, `${s.pairs} overlapping pair${s.pairs === 1 ? '' : 's'} inside pieces`, s.badLoops ? `${s.badLoops} loop${s.badLoops === 1 ? '' : 's'} of hinges that cannot lie flat` : '', s.flat ? '' : 'not laid flat'].filter(Boolean).join(' · ');
+    }
+    const k = s.cuts.length;
+    return [
+      `${k} additional cut${k === 1 ? '' : 's'}${k ? ` (hinge${k === 1 ? '' : 's'} ${s.cuts.map((e) => e.no).join(', ')})` : ''}`,
+      `${mm(s.cutLength)} mm`,
+      `${s.pieces} piece${s.pieces === 1 ? '' : 's'}`,
+      s.valid ? '0 overlaps' : `${s.overlaps} overlap${s.overlaps === 1 ? '' : 's'} left (not valid)`,
+      `${mm(s.width)} × ${mm(s.depth)} mm`,
+    ].join(' · ');
+  }
+
+  // Why each cut was chosen, in words.
+  altWhy(s) {
+    const mm = (v) => Math.round(v * 1000);
+    return s.why.map((w) => {
+      const e = w.e;
+      const [P, Q] = [e.uses[0].panel, e.uses[1].panel];
+      const bits = [];
+      if (w.pairs.length) bits.push(`it lies on the hinge path of ${w.pairs.length === 1 ? 'the overlapping pair' : `${w.pairs.length} overlapping pairs`} ${w.pairs.map(([a, b]) => `P${a.no}–P${b.no}`).join(', ')}${w.pairs.length > 1 ? ', so one cut separates all of them' : ''}`);
+      for (const sh of w.shared || []) bits.push(`it also lies on the path of P${sh.pair[0].no}–P${sh.pair[1].no}, which hinge${sh.with.length === 1 ? '' : 's'} ${sh.with.map((x) => x.no).join(', ')} also separate${sh.with.length === 1 ? 's' : ''}`);
+      if (w.loops.length) bits.push('it opens a loop of hinges that cannot lie flat');
+      let alt = 'no other single hinge does the same with these cuts';
+      if (w.alts.length) {
+        const L = edgeLength(e), others = w.alts.map(edgeLength);
+        const shorter = others.filter((x) => x < L - 1e-7).length, same = others.filter((x) => Math.abs(x - L) <= 1e-7).length;
+        alt = shorter ? `${shorter} shorter hinge${shorter === 1 ? '' : 's'} would also do it` // not expected: length ranks before compactness
+          : same ? `${same === 1 ? 'one other hinge' : `${same} other hinges`} would do the same at the same length; this one leaves the more compact layout${others.length > same ? `, and ${others.length - same} more would need longer cuts` : ''}`
+            : `it is the shortest of the ${others.length + 1} hinges that would do the same`;
+      }
+      return `Hinge ${e.no} (${mm(edgeLength(e))} mm, P${P.no}–P${Q.no}): ${bits.join('; ')}; ${alt}.`;
+    });
   }
 
   previewAlternative(i) {
@@ -1653,9 +1673,8 @@ export class SolidsWorkspace {
     } else {
       const s = a.list[i];
       sh.setLayout(s.hinges);
-      sh.panels.forEach((p, k) => p.M.copy(s.poses[k]));
-      this.altDiff = new Map();
-      sh.edges.forEach((e, k) => { if (e.shared && e.type !== a.mine.types[k]) this.altDiff.set(e, e.type); });
+      sh.panels.forEach((p, k) => p.M.copy(s.Ms[k]));
+      this.altDiff = new Map(s.cuts.map((e) => [e, 'cut']));
     }
     sh.classify();
     this.sel.piece = null;
@@ -1664,11 +1683,11 @@ export class SolidsWorkspace {
     this.refreshStyles();
     if (this.shapeEdit.active) this.shapeEdit.refresh();
     this.frameView(true);
-    const s = i < 0 ? a.mine.stats : a.list[i];
-    const what = i < 0 ? 'My layout' : `Suggestion ${i + 1} of ${n}`;
-    const diff = this.altDiff ? [...this.altDiff.values()] : [];
-    const nc = diff.filter((t) => t === 'cut').length, nh = diff.length - nc;
-    this.app.toast(`${what}: ${this.altStatsText(s)}.${i >= 0 ? ` Changes from my layout: ${nc} new cut${nc === 1 ? '' : 's'} (magenta), ${nh} new hinge${nh === 1 ? '' : 's'} (cyan). Apply keeps it; Undo then returns to my layout.` : ''}`, 7000);
+    if (i < 0) this.app.toast(`My layout: ${this.altStatsText(a.mine.stats, true)}.`, 6000);
+    else {
+      const s = a.list[i];
+      this.app.toast(`Option ${i + 1} of ${n}: ${this.altStatsText(s)}. ${s.valid ? 'New cuts in magenta; Apply keeps it (Undo returns to my layout).' : 'Not valid: it cannot be applied.'} ${this.altWhy(s).join(' ')}`, 9000);
+    }
     this.app.notify?.();
   }
 
@@ -1677,12 +1696,13 @@ export class SolidsWorkspace {
     if (!a || a.searching) return;
     if (a.idx < 0) { this.endAlternatives(); this.app.toast('Kept my layout.'); return; }
     const s = a.list[a.idx];
+    if (!s.valid) { this.app.toast('This option still has overlaps, so it is not applied. Your layout is unchanged.'); return; }
     this.history.push(a.mine.snap);
     if (this.history.length > 80) this.history.shift();
     this.alt = null;
     this.altDiff = null;
     this.refreshStyles();
-    this.app.toast(`Suggestion applied: ${this.altStatsText(s)}. Undo returns to my layout.`, 6000);
+    this.app.toast(`Applied: ${this.altStatsText(s)}. Undo returns to my layout.`, 6000);
     this.app.notify?.();
   }
 
@@ -2413,7 +2433,7 @@ export class SolidsWorkspace {
     if (this.state.tool === 'layout') parts.push(`Layout: ${this.layoutText().text}`);
     if (this.state.tool === 'inspect') parts.push(this.isTurned() ? `Turned ${Math.round(this.viewTurnDegrees())}° for viewing` : 'Resting orientation');
     else if (this.viewText()) parts.push(this.viewText());
-    if (this.alt) parts.push(this.alt.searching ? `Searching layouts… ${this.alt.tried} tried` : `Comparing ${this.alt.list.length + 1} layouts`);
+    if (this.alt) parts.push(this.alt.searching ? `Resolving overlaps… trying ${this.alt.level} cut${this.alt.level === 1 ? '' : 's'}` : `Comparing ${this.alt.list.length + 1} layouts`);
     if (this.state.tool === 'shape' || this.comp.isShaped()) parts.push(`${this.comp.isShaped() ? 'Shape changed' : 'Regular solids'}: ${this.sizeText()}`);
     if (this.state.tool === 'shape') parts.push(this.foldText());
     parts.push(this.netText());
@@ -2488,18 +2508,18 @@ export class SolidsWorkspace {
         { label: 'Lay flat', action: () => a.layFlat() },
         { label: 'Arrange', action: () => a.arrangePieces() },
         { label: 'Other nets', action: () => a.otherNets() },
-        { label: 'Suggest', action: () => a.suggestLayouts(), active: !!a.alt },
+        { label: 'Resolve', action: () => a.resolveOverlaps(), active: !!a.alt },
         { label: '⟲ 15°', action: () => a.rotatePiece(15) },
         { label: '⟳ 15°', action: () => a.rotatePiece(-15) },
       ], 8);
       if (a.alt) {
         const al = a.alt;
-        const lab = al.searching ? `Searching… ${al.tried} tried` : al.idx < 0 ? `My layout (1 of ${al.list.length + 1})` : `Suggestion ${al.idx + 1} of ${al.list.length}`;
+        const lab = al.searching ? `Trying ${al.level} cut${al.level === 1 ? '' : 's'}…` : al.idx < 0 ? `My layout (1 of ${al.list.length + 1})` : `Option ${al.idx + 1} of ${al.list.length}`;
         row(y2, 78, [
           { label: '◀', w: 0.5, action: () => a.previewAlternative(al.idx - 1), disabled: al.searching },
           { label: lab, w: 2.2, kind: 'label' },
           { label: '▶', w: 0.5, action: () => a.previewAlternative(al.idx + 1), disabled: al.searching },
-          { label: 'Apply', action: () => a.applyAlternative(), disabled: al.searching || al.idx < 0 },
+          { label: 'Apply', action: () => a.applyAlternative(), disabled: al.searching || al.idx < 0 || !al.list[al.idx].valid },
           { label: 'Keep mine', w: 1.2, action: () => { a.endAlternatives(); a.app.toast('Kept my layout.'); } },
         ], 8);
       } else {
@@ -2654,13 +2674,13 @@ class SolidsTools {
       return false;
     }
     if (!hit) return false;
-    // Working on the layout during a comparison: a suggestion being shown
-    // is kept (applied, undoable); a search still running is stopped.
+    // Working on the layout during a comparison ends it and brings my
+    // layout back: nothing is applied without Apply.
     if (this.ws.alt && this.ws.state.tool === 'layout' && !this.ws.navTurn && !(ptr.kind === 'screen' && ptr.alt)) {
       const al = this.ws.alt;
-      if (al.searching) { this.ws.endAlternatives(); this.ws.app.toast('Search stopped.'); }
-      else if (al.idx >= 0) this.ws.applyAlternative();
-      else this.ws.endAlternatives();
+      this.ws.endAlternatives();
+      this.ws.app.toast(al.searching ? 'Search stopped; my layout is unchanged.' : 'Comparison closed; my layout is back as it was (use Apply to keep an option).');
+      return false;
     }
     const turn = this.ws.navTurn || (ptr.kind === 'screen' && ptr.alt);
     if (turn && (hit.panel || hit.form || hit.ghost)) {
