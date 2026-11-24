@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { template } from './polyhedra.js';
+import { template, templateMirror } from './polyhedra.js';
 
 // A composition is a list of solids, each a template placed with a position,
 // orientation and edge length (metres). Solids attach face to face; they may
@@ -71,12 +71,16 @@ export class Composition {
     // Free-form edits: new positions for vertices of the (stretched) form,
     // keyed by where each vertex was before editing, so a vertex shared by
     // several faces or solids moves as one. And faces split into triangles
-    // on purpose: face id -> the two corners of the dividing diagonal.
+    // on purpose: face id -> the dividing diagonals, each a pair of corner
+    // indices ([i, j] for one diagonal, [[i, j], [k, l], …] for several).
     this.edits = new Map();
     this.tri = new Map();
+    // Merged panels: groups of coplanar adjoining faces ("solid:face" ids)
+    // that form one convex panel.
+    this.merge = [];
   }
 
-  isEdited() { return this.edits.size > 0 || this.tri.size > 0; }
+  isEdited() { return this.edits.size > 0 || this.tri.size > 0 || this.merge.length > 0; }
 
   isShaped() { return Math.abs(this.shape.x - 1) > 1e-9 || Math.abs(this.shape.y - 1) > 1e-9 || Math.abs(this.shape.z - 1) > 1e-9; }
 
@@ -97,20 +101,17 @@ export class Composition {
     }
     // `base` keeps each corner's unedited position: it names the vertex.
     for (const f of faces) f.base = f.verts.map((v) => v.clone());
-    if (!edits.size && !tri.size) return faces;
-    const out = [];
+    if (!edits.size && !tri.size && !this.merge.length) return faces;
+    let out = [];
     for (const f of faces) {
       if (edits.size) f.verts = f.base.map((b) => { const e = edits.get(vkey(b)); return e ? e.clone() : b.clone(); });
       const d = tri.get(`${f.solid.id}:${f.fi}`);
-      if (d && f.verts.length > 3) {
-        const n = f.verts.length;
-        const [i, j] = d;
-        const loops = [[], []];
-        for (let k = i; ; k = (k + 1) % n) { loops[0].push(k); if (k === j) break; }
-        for (let k = j; ; k = (k + 1) % n) { loops[1].push(k); if (k === i) break; }
+      const loops = d && f.verts.length > 3 ? splitLoops(f.verts.length, diagonalsOf(d)) : null;
+      if (loops) {
         loops.forEach((loop, sub) => out.push({ ...f, sub, pid: `${f.solid.id}:${f.fi}.${sub}`, verts: loop.map((k) => f.verts[k].clone()), base: loop.map((k) => f.base[k].clone()), sides: loop.length }));
       } else out.push(f);
     }
+    if (this.merge.length) out = mergeFaces(out, this.merge);
     for (const f of out) {
       f.normal = polyNormal(f.verts);
       f.centroid = f.verts.reduce((a, v) => a.add(v), new THREE.Vector3()).divideScalar(f.verts.length);
@@ -131,7 +132,8 @@ export class Composition {
     const out = { nextId: this.nextId, solids: this.solids.map((s) => s.toJSON()) };
     if (this.isShaped()) out.shape = this.shape.toArray();
     if (this.edits.size) out.edits = [...this.edits].map(([k, v]) => [k, ...v.toArray().map((x) => Math.round(x * 1e9) / 1e9)]);
-    if (this.tri.size) out.tri = [...this.tri].map(([k, d]) => [k, d[0], d[1]]);
+    if (this.tri.size) out.tri = [...this.tri].map(([k, d]) => (Array.isArray(d[0]) ? [k, d.map((x) => [x[0], x[1]])] : [k, d[0], d[1]]));
+    if (this.merge.length) out.merge = this.merge.map((g) => g.slice());
     return out;
   }
 
@@ -143,7 +145,14 @@ export class Composition {
     this.edits = new Map();
     if (Array.isArray(data.edits)) for (const [k, x, y, z] of data.edits) if (typeof k === 'string' && [x, y, z].every(Number.isFinite)) this.edits.set(k, new THREE.Vector3(x, y, z));
     this.tri = new Map();
-    if (Array.isArray(data.tri)) for (const [k, i, j] of data.tri) if (typeof k === 'string' && Number.isInteger(i) && Number.isInteger(j)) this.tri.set(k, [i, j]);
+    if (Array.isArray(data.tri)) {
+      for (const [k, i, j] of data.tri) {
+        if (typeof k !== 'string') continue;
+        if (Number.isInteger(i) && Number.isInteger(j)) this.tri.set(k, [i, j]);
+        else if (Array.isArray(i) && i.length && i.every((x) => Array.isArray(x) && x.length === 2 && x.every(Number.isInteger))) this.tri.set(k, i.map((x) => [x[0], x[1]]));
+      }
+    }
+    this.merge = Array.isArray(data.merge) ? data.merge.filter((g) => Array.isArray(g) && g.length >= 2 && g.every((x) => typeof x === 'string')).map((g) => g.slice()) : [];
   }
 
   // Lowest point of all solids (y).
@@ -287,6 +296,107 @@ export class Composition {
     if (problem) return { error: problem.kind === 'overlap' ? 'Another solid already fills that space.' : problem.message, blocker: problem.solid, problem };
     return { solid: this.add(type, edge, best.position, best.quaternion) };
   }
+}
+
+// The diagonals stored for a face: one pair, or a list of pairs.
+export function diagonalsOf(d) { return Array.isArray(d[0]) ? d : [d]; }
+
+// Split the corners 0..n-1 of a convex face by non-crossing diagonals.
+// Each diagonal (i, j) splits the loop that holds both corners into the
+// walk from i forward to j and the walk from j forward to i, so a single
+// diagonal gives the same two pieces (and panel ids) as before. Returns null
+// for a pair that is not a diagonal of the current pieces.
+export function splitLoops(n, diags) {
+  let loops = [[...Array(n).keys()]];
+  for (const [i, j] of diags) {
+    const at = loops.findIndex((l) => l.includes(i) && l.includes(j));
+    if (at < 0 || i === j) return null;
+    const L = loops[at], m = L.length;
+    const a = L.indexOf(i), b = L.indexOf(j);
+    const gap = (b - a + m) % m;
+    if (gap < 2 || gap > m - 2) return null;
+    const A = [], B = [];
+    for (let k = a; ; k = (k + 1) % m) { A.push(L[k]); if (k === b) break; }
+    for (let k = b; ; k = (k + 1) % m) { B.push(L[k]); if (k === a) break; }
+    loops = [...loops.slice(0, at), A, B, ...loops.slice(at + 1)];
+  }
+  return loops;
+}
+
+// One convex panel from a group of coplanar faces that share edges: the
+// shared edges cancel and the rest is walked into a single loop. Returns
+// null when the faces do not form one simple loop.
+export function mergeLoop(faces) {
+  const key = (v) => vkey(v);
+  const dir = new Map();
+  for (const f of faces) {
+    const n = f.base.length;
+    for (let i = 0; i < n; i++) {
+      const a = key(f.base[i]), b = key(f.base[(i + 1) % n]);
+      const back = `${b}>${a}`;
+      if (dir.has(back)) dir.delete(back);
+      else dir.set(`${a}>${b}`, { a, b, f, i });
+    }
+  }
+  const next = new Map();
+  for (const d of dir.values()) { if (next.has(d.a)) return null; next.set(d.a, d); }
+  const start = dir.values().next().value;
+  if (!start) return null;
+  const loop = [];
+  let d = start;
+  for (let guard = 0; guard <= dir.size; guard++) {
+    loop.push(d);
+    d = next.get(d.b);
+    if (!d) return null;
+    if (d === start) break;
+  }
+  if (loop.length !== dir.size) return null;
+  return loop.map((x) => ({ vert: x.f.verts[x.i], base: x.f.base[x.i] }));
+}
+
+// Is a loop of points convex (corners of 180° allowed) about normal n?
+export function isConvexLoop(pts, n, tol = 1e-9) {
+  const m = pts.length;
+  for (let i = 0; i < m; i++) {
+    const a = pts[i], b = pts[(i + 1) % m], c = pts[(i + 2) % m];
+    const t = new THREE.Vector3().subVectors(b, a).cross(new THREE.Vector3().subVectors(c, b)).dot(n);
+    if (t < -tol * a.distanceTo(b) * b.distanceTo(c)) return false;
+  }
+  return true;
+}
+
+function mergeFaces(faces, groups) {
+  const byId = new Map(faces.filter((f) => f.sub == null).map((f) => [`${f.solid.id}:${f.fi}`, f]));
+  const used = new Set();
+  const merged = [];
+  for (const g of groups) {
+    const fs = g.map((id) => byId.get(id));
+    if (fs.some((f) => !f || used.has(f))) continue;
+    const loop = mergeLoop(fs);
+    if (!loop) continue;
+    fs.forEach((f) => used.add(f));
+    const f0 = fs[0];
+    merged.push({ ...f0, pid: `m(${g.join(',')})`, merged: g.slice(), verts: loop.map((x) => x.vert.clone()), base: loop.map((x) => x.base.clone()), sides: loop.length });
+  }
+  return faces.filter((f) => !used.has(f)).concat(merged);
+}
+
+// Pose of the mirror image of a solid in the plane through `o` with unit
+// normal `n`: the reflected vertex set, as the same solid type with a proper
+// rotation (reflection · R · S, S being the solid's own mirror symmetry).
+export function mirrorPose(solid, o, n) {
+  const F = new THREE.Matrix3().set(
+    1 - 2 * n.x * n.x, -2 * n.x * n.y, -2 * n.x * n.z,
+    -2 * n.y * n.x, 1 - 2 * n.y * n.y, -2 * n.y * n.z,
+    -2 * n.z * n.x, -2 * n.z * n.y, 1 - 2 * n.z * n.z);
+  const R = new THREE.Matrix3().setFromMatrix4(new THREE.Matrix4().makeRotationFromQuaternion(solid.quaternion));
+  const M = F.clone().multiply(R).multiply(templateMirror(solid.type));
+  const e = M.elements;
+  const m4 = new THREE.Matrix4().set(e[0], e[3], e[6], 0, e[1], e[4], e[7], 0, e[2], e[5], e[8], 0, 0, 0, 0, 1);
+  const quaternion = new THREE.Quaternion().setFromRotationMatrix(m4).normalize();
+  const d = solid.position.clone().sub(o).dot(n);
+  const position = solid.position.clone().addScaledVector(n, -2 * d);
+  return { position, quaternion };
 }
 
 // Pose that puts face `fi` of a template (scaled to `edge`) flush against a

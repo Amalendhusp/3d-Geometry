@@ -1034,8 +1034,9 @@ export class ShapeEditor {
     const prev = this.netState();
     ws.comp.edits = new Map();
     ws.comp.tri = new Map();
+    ws.comp.merge = [];
     this.lastChange = null;
     ws.reshapeEdit(prev);
-    ws.app.toast('Edits reset: back to the regular solids. Undo brings the edits back.');
+    ws.app.toast('Edits reset: back to the regular solids (no free-form edits, triangulation or merged panels). Undo brings them back.');
   }
 }

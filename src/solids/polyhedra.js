@@ -23,6 +23,21 @@ function cuboctaVerts() {
   return out;
 }
 
+// A 12-sided right prism with unit edges: its 12 sides are unit squares (so
+// they join cubes and cuboctahedron squares) and its ends are regular
+// 12-gons. This is what "Cylinder" means here: a faceted approximation.
+function prism12Verts() {
+  const R = 1 / (2 * Math.sin(Math.PI / 12));
+  const out = [];
+  for (const y of [-0.5, 0.5]) {
+    for (let k = 0; k < 12; k++) {
+      const a = (k + 0.5) * Math.PI / 6;
+      out.push([R * Math.cos(a), y, R * Math.sin(a)]);
+    }
+  }
+  return out;
+}
+
 export const TEMPLATES = {
   cube: {
     name: 'Cube', plural: 'cubes',
@@ -46,7 +61,17 @@ export const TEMPLATES = {
     vertices: cuboctaVerts(),
     colors: ['#f3dcc8', '#e6c6ad'],
   },
+  cyl12: {
+    name: 'Cylinder (12-sided prism)', plural: 'cylinders (12-sided prisms)', short: 'Cylinder',
+    vertices: prism12Verts(),
+    colors: ['#e6dcef', '#d4c6e3'],
+  },
 };
+
+// The name of a face shape, for messages.
+export function faceShapeName(sides) {
+  return sides === 3 ? 'triangle' : sides === 4 ? 'square' : `${sides}-sided face`;
+}
 
 export const SOLID_TYPES = Object.keys(TEMPLATES);
 
@@ -130,6 +155,23 @@ function restPose(verts, faces) {
   const yaw = -Math.atan2(-(b.z - a.z), b.x - a.x);
   const qy = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), yaw);
   return qy.multiply(q);
+}
+
+// A reflection (det −1) that maps a template's vertex set onto itself.
+// Every solid here is mirror-symmetric; a mirrored copy of it is the same
+// solid in another orientation: reflection · rotation · this = rotation.
+const mirrorCache = new Map();
+export function templateMirror(type) {
+  if (mirrorCache.has(type)) return mirrorCache.get(type);
+  const t = template(type);
+  const cands = [
+    [-1, 0, 0, 0, 1, 0, 0, 0, 1], [1, 0, 0, 0, -1, 0, 0, 0, 1], [1, 0, 0, 0, 1, 0, 0, 0, -1],
+    [0, 1, 0, 1, 0, 0, 0, 0, 1], [0, 0, 1, 0, 1, 0, 1, 0, 0], [1, 0, 0, 0, 0, 1, 0, 1, 0],
+  ].map((e) => new THREE.Matrix3().set(...e));
+  const found = cands.find((M) => t.verts.every((v) => { const w = v.clone().applyMatrix3(M); return t.verts.some((u) => u.distanceTo(w) < 1e-9); }));
+  if (!found) throw new Error(`${type}: no mirror symmetry found`);
+  mirrorCache.set(type, found);
+  return found;
 }
 
 // Height of the centre above the resting face, for an edge length.

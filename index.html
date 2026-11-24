@@ -623,6 +623,12 @@
         <button type="button" data-stool="alts" aria-pressed="false" title="Preview other nets, including the fewest additional cuts, before accepting one">Alternate nets</button>
       </div>
 
+      <div class="subtools" data-tabfor="solid" hidden>
+        <button type="button" data-ssub="add" aria-pressed="true" title="Add modules on faces, remove, duplicate, rotate">Add / Remove</button>
+        <button type="button" data-ssub="mirror" aria-pressed="false" title="Reflect selected modules across a face">Symmetry</button>
+        <button type="button" data-ssub="scale" aria-pressed="false" title="Enlarge or reduce selected modules uniformly">Scale</button>
+      </div>
+
       <div class="context" data-sfor="build">
         <span class="label">Add / Remove</span>
         <span class="seg chipset" role="group" aria-label="Module">
@@ -630,12 +636,14 @@
           <button type="button" data-addtype="tetra" aria-pressed="false">Tetrahedron</button>
           <button type="button" data-addtype="octa" aria-pressed="false">Octahedron</button>
           <button type="button" data-addtype="cubocta" aria-pressed="false">Cuboctahedron</button>
+          <button type="button" data-addtype="cyl12" aria-pressed="false" title="A 12-sided prism: its square sides join cubes, its 12-sided ends join other cylinders">Cylinder</button>
         </span>
         <select id="addTypeSel" aria-label="Module to add" hidden>
           <option value="cube">Cube</option>
           <option value="tetra">Tetrahedron</option>
           <option value="octa">Octahedron</option>
           <option value="cubocta">Cuboctahedron</option>
+          <option value="cyl12">Cylinder (12-sided prism)</option>
         </select>
         <button type="button" id="addCubeBtn" class="primary" title="Add the chosen module on the selected face">Add on face</button>
         <button type="button" id="delCubeBtn" title="Remove the selected module">Remove</button>
@@ -644,6 +652,30 @@
         <button type="button" id="rotCubeBtn" title="Turn the selected module in place">Rotate module</button>
         <button type="button" id="tipBtn" title="Tip the whole composition onto another face">Tip over</button>
         <span class="hint">Tap a face to target it, choose a module and Add on face. Drag a module to move it; it snaps to a matching face.</span>
+      </div>
+
+      <div class="context" data-sfor="mirror" hidden>
+        <span class="label">Symmetry</span>
+        <span class="seg" role="group" aria-label="Tap picks">
+          <button type="button" data-mpick="modules" aria-pressed="true" title="Taps add or remove modules from the selection">Modules</button>
+          <button type="button" data-mpick="face" aria-pressed="false" title="The next tap chooses the face to reflect across">Mirror face</button>
+        </span>
+        <button type="button" id="mirrorBtn" class="primary" title="Add the mirror images of the selected modules">Reflect</button>
+        <button type="button" class="allModsBtn">All modules</button>
+        <button type="button" class="clearModsBtn">Clear selection</button>
+        <span class="hint" id="mirrorHint">Tap modules to select them, choose Mirror face and tap a face: Reflect adds their mirror images across that face's plane. Copies that would overlap or only partly touch a module are refused, and nothing is added.</span>
+      </div>
+
+      <div class="context" data-sfor="scale" hidden>
+        <span class="label">Scale</span>
+        <button type="button" class="allModsBtn">All modules</button>
+        <button type="button" class="clearModsBtn">Clear selection</button>
+        <span class="sep"></span>
+        <button type="button" id="scaleDownBtn" title="Reduce the selected modules to 80%">Reduce ×0.8</button>
+        <button type="button" id="scaleUpBtn" title="Enlarge the selected modules by 25%">Enlarge ×1.25</button>
+        <button type="button" id="scaleHalfBtn" title="Half the size">×½</button>
+        <button type="button" id="scaleDoubleBtn" title="Twice the size">×2</button>
+        <span class="hint" id="scaleHint">Tap modules to select them (or All modules), then Enlarge or Reduce: every edge changes by the same factor, so shapes and angles stay. A group joined to unselected modules is not scaled alone.</span>
       </div>
 
       <div class="context" data-sfor="shape" hidden>
@@ -680,13 +712,18 @@
 
       <div class="context" data-sfor="join" hidden>
         <span class="label">Join as</span>
-        <span class="seg" role="group" aria-label="Join as"><button type="button" data-jmode="hinge" aria-pressed="true" title="Connect the two edges with a fold">Hinge</button></span>
-        <span class="hint">Tap a cut edge whose two sides meet to join it with a hinge (it keeps its fold). In a flat net, move a piece in Arrange until the matching numbered edges meet first.</span>
+        <span class="seg" role="group" aria-label="Join as"><button type="button" data-jmode="hinge" aria-pressed="true" title="Connect the two edges with a fold">Hinge</button><button type="button" data-jmode="merge" aria-pressed="false" title="Make two panels that lie flat against each other one panel">Merge</button></span>
+        <span class="hint" id="joinHint">Hinge: tap a cut edge whose two sides meet to join it with a fold. Merge: tap the edge between two panels that are coplanar in the assembled form; they become one panel if the result is convex. In a flat net, move a piece in Arrange until the matching numbered edges meet first.</span>
       </div>
 
       <div class="context" data-sfor="tri" hidden>
+        <button type="button" id="triPrevBtn" title="The other diagonal, or the previous corner for the fan">◀</button>
+        <button type="button" id="triNextBtn" title="The other diagonal, or the next corner for the fan">▶</button>
+        <button type="button" id="triApplyBtn" class="primary" title="Split the face as shown">Apply</button>
+        <button type="button" id="triCancelBtn" title="Close the preview; nothing changes">Cancel</button>
+        <span class="sep"></span>
         <button type="button" id="triBtn" title="Split the faces at the last corner you pointed at into triangles">Triangulate at corner</button>
-        <span class="hint">Point at a corner of the floating form, then press Triangulate at corner (or tap the corner): the faces meeting there are split into triangles and the new fold lines show in the form and the net.</span>
+        <span class="hint" id="triHint">Tap a face in the net or on the floating form. A four-sided face shows its two diagonals (◀ ▶ to switch); a face with more corners shows a full split into triangles from one corner (◀ ▶ to move that corner). Apply adds the fold lines; nothing changes before that.</span>
       </div>
 
       <div class="context" data-sfor="layout" hidden>
@@ -853,11 +890,11 @@
       <dt>Projects (☰)</dt>
       <dd>The menu at the top left: New starts from a preset, Open shows your saved projects (with pictures), Save keeps the current one in this browser, Import reads a .json composition from a file, and Export saves the composition, the net as SVG, the 3D model (GLB in metres, or OBJ + MTL in millimetres) or a PNG of the view. Unsaved changes are named under the project title; New, Open and Import ask before discarding them. Projects saved by earlier versions are listed too.</dd>
       <dt>Solid Modeling</dt>
-      <dd>Tap a face to target it, choose cube, tetrahedron, octahedron or cuboctahedron and Add on face; only faces of the same shape join, and joined faces disappear so the inside stays hollow. Remove, Duplicate, Rotate module and Tip over act on the targeted module; drag a module to move it, and it snaps to a matching face.</dd>
+      <dd>Add / Remove: tap a face to target it, choose cube, tetrahedron, octahedron, cuboctahedron or cylinder and Add on face; only faces of the same shape and size join, and joined faces disappear so the inside stays hollow. The cylinder is a 12-sided prism: its square sides join cubes and cuboctahedron squares, its 12-sided ends join other cylinders. Remove, Duplicate, Rotate module and Tip over act on the targeted module; drag a module to move it, and it snaps to a matching face. Symmetry: tap modules to select them, choose Mirror face and tap a face, then Reflect adds their mirror images across that face's plane; if any copy would overlap or only partly touch a module, nothing is added and the reason is given. Scale: select modules (or All modules) and Enlarge or Reduce; every edge changes by the same factor (20–480 mm), and a group joined to unselected modules is not scaled alone.</dd>
       <dt>Surface Modeling</dt>
       <dd>Push and pull the floating form directly: drag a corner or an edge. Tap to select a group of corners (a face selects its corners). Corners that must move to keep every face flat are shown in orange; when a move reaches a limit (a face would fold or turn inside out) it stops and the status line says why. Triangulate a face (Net → Triangulate) to let it fold.</dd>
       <dt>Net</dt>
-      <dd>Unfold all lays the net flat; Refold all closes it; Reset net puts back the default cuts. Open: tap a panel and swing it on its hinge (Group swings everything hinged beyond it, Single just that panel). Edit edge: each deliberate tap switches an edge between hinge and cut, with a brief flash; Lock keeps an edge as it is. Join edge: tap a cut edge whose two sides meet to join it with a hinge. Triangulate: point at a corner to split its faces into triangles. Arrange: drag pieces and turn them with ⟲ ⟳; Arrange never cuts, and equal numbers mark the edges that join. Alternate nets: Fewest additional cuts keeps your hinges and cuts and finds the fewest extra cuts that separate every overlapping pair (one cut first, then two…), with the reason for each; Other hinge layouts searches different nets. Previews never replace your arrangement until you Accept, and Undo returns to it.</dd>
+      <dd>Unfold all lays the net flat; Refold all closes it; Reset net puts back the default cuts. Open: tap a panel and swing it on its hinge (Group swings everything hinged beyond it, Single just that panel). Edit edge: each deliberate tap switches an edge between hinge and cut, with a brief flash; Lock keeps an edge as it is. Join edge: as Hinge, tap a cut edge whose two sides meet (or the edge on the floating form) to join it with a fold; as Merge, tap the edge between two panels that are coplanar in the assembled form and they become one panel, if the result is convex (a merge that would close a loop of hinges cuts one hinge on that loop and names it). Triangulate: tap a face; a four-sided face shows its two diagonals and a face with more corners a full split into triangles from one corner (◀ ▶ to switch), and Apply adds the fold lines; Triangulate at corner splits every face at a corner. Arrange: drag pieces and turn them with ⟲ ⟳; Arrange never cuts, and equal numbers mark the edges that join. Alternate nets: Fewest additional cuts keeps your hinges and cuts and finds the fewest extra cuts that separate every overlapping pair (one cut first, then two…), with the reason for each; Other hinge layouts searches different nets. Previews never replace your arrangement until you Accept, and Undo returns to it.</dd>
       <dt>View</dt>
       <dd>The toolbar on the right works in every tab: Fit all (F), Focus selected (.), Rotate (I: drag the form to turn it; Alt+drag any time) and Reset view (0); More has quarter turns, and the last button shows or hides the labels. Drag empty space to orbit, right-drag to pan, wheel to zoom toward the pointer. The view is framed in the part of the screen no panel covers. Undo and Redo sit above the tools (Ctrl+Z, Ctrl+Shift+Z).</dd>
       <dt>Info and Errors</dt>

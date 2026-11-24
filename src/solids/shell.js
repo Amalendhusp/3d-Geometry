@@ -99,6 +99,7 @@ export class Shell {
     this.panels = faces.filter((f) => !removed.has(f)).map((f) => ({
       id: f.pid || `${f.solid.id}:${f.fi}`,
       sub: f.sub ?? null,
+      merged: f.merged || null,
       solidId: f.solid.id,
       type: f.solid.type,
       fi: f.fi,

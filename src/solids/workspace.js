@@ -1,7 +1,7 @@
 import * as THREE from 'three';
-import { Composition, alignFace } from './composition.js';
+import { Composition, alignFace, mirrorPose, isConvexLoop } from './composition.js';
 import { Shell } from './shell.js';
-import { template, TEMPLATES, SOLID_TYPES, restHeight } from './polyhedra.js';
+import { template, TEMPLATES, SOLID_TYPES, restHeight, faceShapeName } from './polyhedra.js';
 import { makeFrame, angleFromPoint, angleFromRay } from './hinge.js';
 import { flatTargets, pieceCentre, planarMove, edgeSnap, layFlatStable } from './layout.js';
 import { LabelLayer } from './labels.js';
@@ -40,6 +40,8 @@ export const PRESETS = {
   cuboid: { label: 'Cuboid 180 × 60 × 120 mm (stretched cube)', build: (c) => { first(c, 'cube'); c.shape.set(1.5, 0.5, 1); } },
   longTwo: { label: '2 cubes stretched to 2:1 tall', build: (c) => { c.add('cube', EDGE, new THREE.Vector3(0, EDGE / 2, 0)); c.add('cube', EDGE, new THREE.Vector3(EDGE, EDGE / 2, 0)); c.shape.set(1, 2, 1); } },
   tallTetraOcta: { label: 'Octahedron + tetrahedron, 1.4× taller', build: (c) => { const o = first(c, 'octa'); attachToward(c, o, UP, 'tetra'); c.shape.set(1, 1.4, 1); } },
+  cyl: { label: '1 cylinder (12-sided prism)', build: (c) => first(c, 'cyl12') },
+  cylCube: { label: 'Cylinder (12-sided prism) + cube on a side', build: (c) => { const k = first(c, 'cyl12'); attachToward(c, k, new THREE.Vector3(1, 0, 0), 'cube', 4); } },
 };
 
 const SHAPE_LIMITS = { factor: [0.2, 5], minEdge: 0.01, maxSize: 0.9, minAngle: 5 };
@@ -166,6 +168,8 @@ export class SolidsWorkspace {
     this.issueIdx = -1;
     this.state = { tool: 'open', openMode: 'group', showLabels: true, showIds: false };
     this.sel = { panel: null, hinge: null, solidId: null, fi: null, piece: null };
+    // Modules picked for Symmetry and Scale (solid ids).
+    this.modSel = new Set();
     this.inspectHover = false;
     this.loopEdges = new Set();
     this.hoverPanel = null;
@@ -219,6 +223,7 @@ export class SolidsWorkspace {
     if (shellState) this.shell.restore(shellState);
     else this.shell.defaultNet();
     this.sel = { panel: null, hinge: null, solidId: null, fi: null, piece: null };
+    this.modSel = new Set([...(this.modSel || [])].filter((id) => this.comp.get(id)));
     this.loopEdges.clear();
     this.moving.clear();
     this.netCycle = null;
@@ -279,10 +284,12 @@ export class SolidsWorkspace {
 
   restoreSnapshot(snap) {
     if (this.alt) this.endAlternatives();
+    this.clearTriPreview();
     this.comp.restore(snap.comp);
     this.shell.build(this.comp);
     this.shell.restore(snap.shell);
     this.sel = { panel: null, hinge: null, solidId: null, fi: null, piece: null };
+    this.modSel = new Set([...(this.modSel || [])].filter((id) => this.comp.get(id)));
     this.loopEdges.clear();
     this.moving.clear();
     this.netCycle = null;
@@ -338,6 +345,30 @@ export class SolidsWorkspace {
     for (const comp of this.shell.pieces()) if (!comp.some((p) => this.shell.bases.has(p.id))) this.shell.chooseBasesFor(comp);
     layFlatStable(this.shell, prev.poses);
     this.shell.classify();
+    this.updatePivot();
+    this.buildMeshes();
+    this.applyView();
+    this.checkOverlaps();
+    this.shapeEdit.refresh();
+    this.app.notify?.();
+  }
+
+  // Rebuild after the panels themselves changed (merged, triangulated),
+  // keeping every other edge's hinge or cut: a flat net stays flat with its
+  // pieces where they were, an assembled form stays assembled.
+  reshapeKeeping(prev, flat) {
+    this.clearTriPreview();
+    if (flat) { this.reshapeEdit(prev); return; }
+    this.shell.build(this.comp);
+    for (const e of this.shell.edges) {
+      if (!e.shared || e.locked) continue;
+      e.type = prev.types[e.key] || (e.diagonal ? 'hinge' : 'cut');
+    }
+    const ids = prev.bases.filter((id) => this.shell.panelById.has(id));
+    if (ids.length) this.shell.bases = new Set(ids);
+    for (const comp of this.shell.pieces()) if (!comp.some((p) => this.shell.bases.has(p.id))) this.shell.chooseBasesFor(comp);
+    this.shell.classify();
+    this.sel.panel = this.sel.hinge = this.sel.piece = null;
     this.updatePivot();
     this.buildMeshes();
     this.applyView();
@@ -588,6 +619,12 @@ export class SolidsWorkspace {
       return this.hoverPanel === p ? 'hover' : 'none';
     }
     if (tool === 'build') {
+      if (this.solidSub !== 'add') {
+        // Symmetry / Scale: the picked modules, and (Symmetry) the mirror face.
+        if (this.solidSub === 'mirror' && this.sel.solidId === p.solidId && p.fi === this.sel.fi) return 'face';
+        if (this.modSel.has(p.solidId)) return 'solid';
+        return this.hoverPanel === p ? 'hover' : 'none';
+      }
       if (this.sel.solidId === p.solidId) return p.fi === this.sel.fi ? 'face' : 'solid';
       return this.hoverPanel === p ? 'hover' : 'none';
     }
@@ -701,7 +738,7 @@ export class SolidsWorkspace {
     const hits = this.raycaster.intersectObjects(this.pickables || [], false);
     const lift = this.liftHit(ray);
     if (lift && (!hits.length || lift.distance < hits[0].distance)) return lift;
-    if (this.shapeEdit.active && (this.state.tool === 'shape' || this.state.tool === 'tri')) {
+    if (this.shapeEdit.active && (this.state.tool === 'shape' || this.state.tool === 'tri' || this.state.tool === 'join')) {
       const g = this.shapeEdit.pickGhost(ray);
       if (g && (!hits.length || g.distance < hits[0].distance)) return g;
     }
@@ -1334,6 +1371,7 @@ export class SolidsWorkspace {
     this.inspectHover = false;
     if (t !== 'open') this.sel.panel = this.sel.hinge = null;
     if (t !== 'build') this.sel.solidId = this.sel.fi = null;
+    if (t !== 'tri') this.clearTriPreview();
     if (!inNet(t)) this.sel.piece = null;
     if (!inNet(t) && this.issueKey) this.clearIssueFocus(false);
     if ((t !== 'layout' || this.state.netSub !== 'alts') && this.alt) this.endAlternatives();
@@ -2160,11 +2198,116 @@ export class SolidsWorkspace {
     this.app.notify?.();
   }
 
+  get joinMode() { return this.state.joinMode === 'merge' ? 'merge' : 'hinge'; }
+
+  setJoinMode(m) {
+    this.state.joinMode = m === 'merge' ? 'merge' : 'hinge';
+    this.app.toast(m === 'merge'
+      ? 'Join as Merge: tap the edge between two panels that lie flat against each other in the assembled form; they become one panel (it must stay convex). The edge disappears.'
+      : 'Join as Hinge: tap a cut edge whose two sides meet; it becomes a hinge and keeps its fold.', 5000);
+    this.app.notify?.();
+  }
+
+  // A tap on an edge with Join edge.
+  joinTap(e, opts = {}) { return this.joinMode === 'merge' ? this.mergeEdge(e, opts) : this.joinEdge(e, opts); }
+
+  // Hinges on the path between two panels of the same piece (excluding `skip`).
+  hingePath(P, Q, skip) {
+    const prev = new Map([[P, null]]);
+    const queue = [P];
+    while (queue.length) {
+      const x = queue.shift();
+      if (x === Q) break;
+      for (const e of x.edges) {
+        if (e === skip || !e.shared || e.type !== 'hinge') continue;
+        const y = this.shell.other(e, x);
+        if (!y || prev.has(y)) continue;
+        prev.set(y, { from: x, e });
+        queue.push(y);
+      }
+    }
+    if (!prev.has(Q)) return null;
+    const path = [];
+    for (let x = Q; prev.get(x); x = prev.get(x).from) path.unshift(prev.get(x).e);
+    return path;
+  }
+
+  // Merge: the two panels on either side of an edge become one panel. Only
+  // when they are coplanar in the assembled form and their union is convex.
+  mergeEdge(e, opts = {}) {
+    if (!e || !e.shared || e.locked) { this.app.toast('Only an edge between exactly two panels can be merged.'); return false; }
+    if (e.userLock) { this.app.toast(this.lockRefusal(e), 5000); return false; }
+    if (e.diagonal) { this.app.toast(`Edge ${e.no} is a fold line made by Triangulate. Undo (or Reset edits in Surface Modeling) removes the triangulation.`, 5000); return false; }
+    const [P, Q] = [e.uses[0].panel, e.uses[1].panel];
+    if (P.sub != null || Q.sub != null) { this.app.toast('Triangulated faces stay in triangles, so they cannot be merged. Undo the triangulation first.', 5000); return false; }
+    const n = P.normal.clone().normalize();
+    const tol = this.edgeLen * 1e-6;
+    const coplanar = n.dot(Q.normal.clone().normalize()) > 1 - 1e-9 && Q.verts.every((v) => Math.abs(v.clone().sub(P.verts[0]).dot(n)) < tol);
+    if (!coplanar) {
+      const ang = 180 - deg(Math.acos(THREE.MathUtils.clamp(n.dot(Q.normal.clone().normalize()), -1, 1)));
+      this.flashEdge(e);
+      this.app.toast(`Panels P${P.no} and P${Q.no} meet at ${ang.toFixed(1)}° in the assembled form, not flat, so they cannot be one panel. Join as Hinge keeps them as two panels with a fold.`, 6000);
+      return false;
+    }
+    // A cut whose sides are apart in the net can be merged from the floating
+    // form (there the two panels always meet). If the two panels are already
+    // joined through hinges, one hinge on that path becomes a cut so that no
+    // loop of hinges is closed; the message names it.
+    let extraCut = null;
+    if (e.type === 'cut') {
+      if (!opts.ghost && !this.shell.intact(e)) { this.app.toast(`Edge ${e.no} is cut and its two sides are apart in the net. Tap it on the floating form, or move a piece in Arrange until the two edges numbered ${e.no} meet.`, 6000); return false; }
+      const path = this.hingePath(P, Q, e);
+      if (path) {
+        extraCut = path.slice().reverse().find((h) => !h.userLock) || null;
+        if (!extraCut) { this.app.toast(`P${P.no} and P${Q.no} are joined through locked hinges; merging would close a loop of hinges, so edge ${e.no} stays as it is.`, 6000); return false; }
+      }
+    }
+    const keysOf = (x) => x.merged ? x.merged : [x.id];
+    const group = [...keysOf(P), ...keysOf(Q)];
+    const list = this.comp.merge.filter((g) => !g.some((k) => group.includes(k))).concat([group]);
+    const trial = new Composition();
+    trial.restore(this.comp.serialize());
+    trial.merge = list;
+    const face = trial.shapedFaces().find((f) => f.merged && f.merged.length === group.length && f.merged.every((k) => group.includes(k)));
+    if (!face) { this.app.toast(`P${P.no} and P${Q.no} do not form a single panel outline, so they stay separate.`, 5000); return false; }
+    if (!isConvexLoop(face.verts, face.normal)) {
+      this.flashEdge(e);
+      this.app.toast(`Together, P${P.no} and P${Q.no} would not be convex (a corner would point inward), so they cannot be one panel. Join as Hinge instead.`, 6000);
+      return false;
+    }
+    const flat = !this.shell.isClosed() && this.shell.flatReport().ok;
+    this.pushHistory();
+    let cutNote = '';
+    if (extraCut) {
+      const [a, b] = extraCut.uses.map((u) => u.panel);
+      extraCut.type = 'cut';
+      cutNote = ` To keep the net free of hinge loops, hinge ${extraCut.no} (P${a.no}–P${b.no}) is now a cut.`;
+    }
+    const prev = this.shapeEdit.netState();
+    this.comp.merge = list;
+    this.reshapeKeeping(prev, flat);
+    const np = this.shell.panels.find((x) => x.merged && x.merged.length === group.length && x.merged.every((k) => group.includes(k)));
+    this.app.toast(`Merged into one panel${np ? ` (P${np.no}, ${np.verts.length} corners${np.verts.length > 4 ? ', some of them straight where neighbouring edges meet' : ''})` : ''}: edge ${e.no} is gone and the panel folds as one piece.${cutNote} Undo splits it again. ${this.netSentence()}`, 8000);
+    return true;
+  }
+
   // Join edge: make a cut edge a hinge again when its two sides meet.
-  joinEdge(e) {
+  joinEdge(e, opts = {}) {
     if (!e || !e.shared || e.locked) { this.app.toast('This edge is not shared by two panels, so it cannot be joined.'); return false; }
     if (e.userLock) { this.app.toast(this.lockRefusal(e), 5000); return false; }
-    if (e.type === 'hinge') { this.flashEdge(e); this.app.toast(`Edge ${e.no} is already a hinge.`); return false; }
+    if (e.type === 'hinge') { this.flashEdge(e); this.app.toast(`Edge ${e.no} is already a hinge.${this.joinMode === 'hinge' ? ' Join as Merge makes two coplanar panels one panel.' : ''}`); return false; }
+    if (opts.ghost && !this.shell.intact(e)) {
+      const [P, Q] = [e.uses[0].panel, e.uses[1].panel];
+      const rootOf = this.shell.pieceRoots();
+      if (rootOf.get(P) === rootOf.get(Q)) { this.app.toast(`Joining edge ${e.no} would close a loop of hinges inside this piece, so it stays cut.`); return false; }
+      const flat = !this.shell.isClosed() && this.shell.flatReport().ok;
+      this.pushHistory();
+      const prev = this.shapeEdit.netState();
+      prev.types[e.key] = 'hinge';
+      this.reshapeKeeping(prev, flat);
+      this.app.toast(`Edge ${e.no} joined as a hinge: its two pieces are one piece now${flat ? ', laid out again on the surface' : ''}. ${this.netSentence()}`, 6000);
+      return true;
+    }
     if (!this.shell.intact(e)) {
       this.app.toast(`Edge ${e.no} is cut and its two sides are apart. Use Arrange to move a piece until the two edges numbered ${e.no} meet (they snap), then join.`, 6000);
       return false;
@@ -2241,11 +2384,11 @@ export class SolidsWorkspace {
 
   requireClosed() {
     if (this.comp.isEdited()) {
-      this.app.toast('This form has free-form edits. Building works on the regular solids: press Reset edits (Shape → Edit) to add, move, turn or remove solids.', 5000);
+      this.app.toast('This form has free-form edits. Solid Modeling works on the regular modules: press Reset edits (Surface Modeling) to add, move, turn, reflect or scale modules.', 5000);
       return false;
     }
     if (this.comp.isShaped()) {
-      this.app.toast('This composition has a changed shape. Building works on the regular solids: press Reset shape (Shape tool) to add, move, turn or remove solids.', 5000);
+      this.app.toast('This composition has a changed shape (a stretch). Solid Modeling works on the regular modules: press Reset edits (Surface Modeling) to add, move, turn, reflect or scale modules.', 5000);
       return false;
     }
     if (this.shell.isClosed()) return true;
@@ -2399,7 +2542,7 @@ export class SolidsWorkspace {
     this.sel.fi = p ? p.fi : null;
     this.refreshStyles();
     if (p) {
-      const shape = p.verts.length === 3 ? 'triangle' : 'square';
+      const shape = faceShapeName(p.verts.length);
       const fits = SOLID_TYPES.filter((t) => template(t).faces.some((f) => f.sides === p.verts.length)).map((t) => TEMPLATES[t].name.toLowerCase());
       this.app.toast(`${shape[0].toUpperCase() + shape.slice(1)} face picked. It fits a ${fits.join(' or ')}; pick the type and press Add.`);
     }
@@ -2429,9 +2572,10 @@ export class SolidsWorkspace {
       fi = hit[1];
     }
     const probe = this.probeAttach(target, fi, type);
+    const edge = target.edge;
     if (!probe) {
       const sides = target.worldFaces()[fi].sides;
-      this.app.toast(`A ${name} has no ${sides === 3 ? 'triangle' : 'square'} face to match this one. Choose a solid that does.`);
+      this.app.toast(`A ${name} has no ${faceShapeName(sides)} to match this one. Choose a solid that does.`);
       return;
     }
     if (probe.problem) {
@@ -2440,7 +2584,7 @@ export class SolidsWorkspace {
       return;
     }
     this.pushHistory();
-    const s = this.comp.add(type, EDGE, probe.pose.position, probe.pose.quaternion);
+    const s = this.comp.add(type, edge, probe.pose.position, probe.pose.quaternion);
     this.rebuild();
     const p = this.shell.panels.find((q) => q.solidId === s.id);
     if (p) this.selectFace(p);
@@ -2459,14 +2603,14 @@ export class SolidsWorkspace {
     for (let f = 0; f < tm.faces.length; f++) {
       if (tm.faces[f].sides !== tf.sides) continue;
       for (let j = 0; j < tf.verts.length; j++) {
-        const pose = alignFace(tm, f, EDGE, tf, j);
+        const pose = alignFace(tm, f, target.edge, tf, j);
         if (!pose) continue;
         const ang = pose.quaternion.angleTo(target.quaternion);
         if (!best || ang < best.ang) best = { pose, ang };
       }
     }
     if (!best) return null;
-    return { pose: best.pose, problem: this.comp.placementProblem(type, EDGE, best.pose.position, best.pose.quaternion) };
+    return { pose: best.pose, problem: this.comp.placementProblem(type, target.edge, best.pose.position, best.pose.quaternion) };
   }
 
   duplicate() {
@@ -2541,6 +2685,274 @@ export class SolidsWorkspace {
     this.app.toast(`${TEMPLATES[s.type].name} turned ${Math.round(deg(step))}° in place. ${this.netSentence()}`);
   }
 
+  // Back to the regular modules: free-form edits, triangulation, merged
+  // panels and any stretch from older projects or presets.
+  resetToRegular() {
+    if (this.comp.isEdited()) { this.shapeEdit.resetEdits(); if (!this.comp.isShaped()) return; }
+    if (this.comp.isShaped()) { this.resetShape(); return; }
+    this.app.toast('No edits to reset: the modules are regular.');
+  }
+
+  // ------------------------------------------ Triangulate (Net)
+
+  // Tap a face: a four-sided face offers its two diagonals, a face with more
+  // corners a full subdivision into triangles (a fan from one corner; ◀ ▶
+  // moves the corner). Nothing changes until Apply.
+  triPick(P) {
+    if (!P) return;
+    if (P.sub != null) { this.app.toast('That is already part of a triangulated face. Undo (or Reset edits) removes the triangulation.'); return; }
+    if (P.merged) { this.app.toast('Merged panels stay whole. Undo the merge to triangulate its faces.'); return; }
+    const n = P.verts.length;
+    if (n === 3) { this.app.toast(`P${P.no} is already a triangle.`); return; }
+    const opts = [];
+    if (n === 4) opts.push({ diags: [[0, 2]], label: 'Diagonal A' }, { diags: [[1, 3]], label: 'Diagonal B' });
+    else for (let k = 0; k < n; k++) { const d = []; for (let j = 2; j <= n - 2; j++) d.push([k, (k + j) % n]); opts.push({ diags: d, label: `Fan from corner ${k + 1}` }); }
+    this.triSel = { id: P.id, no: P.no, n, opts, idx: 0 };
+    this.drawTriPreview();
+    this.app.toast(this.triText(), 6000);
+    this.app.notify?.();
+  }
+
+  triText() {
+    const t = this.triSel;
+    if (!t) return 'Tap a face (in the net or on the floating form) to choose how to split it into triangles.';
+    const o = t.opts[t.idx];
+    const tris = t.n - 2;
+    return t.n === 4
+      ? `P${t.no} (4 corners): ${o.label} of 2 shown dashed. ◀ ▶ switches diagonal; Apply makes 2 triangles with 1 new fold line.`
+      : `P${t.no} (${t.n} corners): ${o.label} (${t.idx + 1} of ${t.n}) shown dashed: ${tris} triangles, ${tris - 1} new fold lines. ◀ ▶ moves the corner; Apply splits it.`;
+  }
+
+  triStep(d) {
+    const t = this.triSel;
+    if (!t) { this.app.toast(this.triText()); return; }
+    t.idx = (t.idx + d + t.opts.length) % t.opts.length;
+    this.drawTriPreview();
+    this.app.toast(this.triText(), 6000);
+    this.app.notify?.();
+  }
+
+  triApply() {
+    const t = this.triSel;
+    if (!t) { this.app.toast(this.triText()); return false; }
+    const P = this.shell.panelById.get(t.id);
+    if (!P) { this.clearTriPreview(); return false; }
+    const prev = this.shapeEdit.netState();
+    const flat = !this.shell.isClosed() && this.shell.flatReport().ok;
+    this.pushHistory();
+    const o = t.opts[t.idx];
+    this.comp.tri.set(t.id, o.diags.length === 1 ? o.diags[0].slice() : o.diags.map((x) => x.slice()));
+    this.reshapeKeeping(prev, flat);
+    this.app.toast(`Triangulated P${t.no} into ${t.n - 2} triangles: ${t.n - 3} new fold line${t.n - 3 === 1 ? '' : 's'} (green) in the form and the net. Undo removes them. ${this.netSentence()}`, 7000);
+    return true;
+  }
+
+  triCancel() {
+    if (!this.triSel) return;
+    this.clearTriPreview();
+    this.app.toast('Triangulation preview closed; nothing changed.');
+    this.app.notify?.();
+  }
+
+  clearTriPreview() {
+    this.triSel = null;
+    if (this.triLines) { this.triLines.parent?.remove(this.triLines); this.triLines.geometry.dispose(); this.triLines = null; }
+  }
+
+  // Dashed lines for the chosen diagonals, on the net panel and (when shown)
+  // on the floating assembled form.
+  drawTriPreview() {
+    if (this.triLines) { this.triLines.parent?.remove(this.triLines); this.triLines.geometry.dispose(); this.triLines = null; }
+    const t = this.triSel;
+    const P = t && this.shell.panelById.get(t.id);
+    if (!P) return;
+    const pts = [];
+    const lift = P.normal.clone().multiplyScalar(this.edgeLen * 0.004);
+    const add = (f) => { for (const [i, j] of t.opts[t.idx].diags) pts.push(f(P.verts[i]), f(P.verts[j])); };
+    add((v) => v.clone().add(lift).applyMatrix4(P.M));
+    if (this.shapeEdit.active) { const off = this.shapeEdit.ghostOffset(); add((v) => v.clone().add(lift).add(off)); }
+    const g = new THREE.BufferGeometry().setFromPoints(pts);
+    this.triLines = new THREE.LineSegments(g, new THREE.LineDashedMaterial({ color: '#ff3df0', dashSize: this.edgeLen * 0.05, gapSize: this.edgeLen * 0.035, depthTest: false, transparent: true }));
+    this.triLines.computeLineDistances();
+    this.triLines.renderOrder = 20;
+    this.triLines.userData.ui = true;
+    this.shellGroup.add(this.triLines);
+  }
+
+  // ------------------------------------------ Symmetry and Scale (Solid Modeling)
+
+  get solidSub() { return this.state.solidSub || 'add'; }
+
+  // Solid Modeling sub-tools: add (Add / Remove), mirror (Symmetry), scale.
+  setSolidSub(k) {
+    if (this.state.tool !== 'build') this.setTool('build');
+    this.state.solidSub = ['add', 'mirror', 'scale'].includes(k) ? k : 'add';
+    if (k === 'mirror') this.state.mirrorPick = this.modSel.size ? 'face' : 'modules';
+    this.sel.solidId = this.sel.fi = null;
+    this.refreshStyles();
+    this.app.toast(k === 'mirror'
+      ? 'Symmetry: tap the modules to reflect (each tap adds or removes one), then choose Mirror face and tap the face to reflect them across. Reflect adds the mirrored copies.'
+      : k === 'scale'
+        ? 'Scale: tap the modules to scale (each tap adds or removes one) or choose All modules, then Enlarge or Reduce. The modules keep their shape; only their size changes.'
+        : 'Add / Remove: tap a face, choose a module and Add on face.', 6000);
+    this.app.notify?.();
+  }
+
+  setMirrorPick(k) {
+    this.state.mirrorPick = k === 'face' ? 'face' : 'modules';
+    this.app.toast(k === 'face' ? 'Tap the face to reflect across. Any face of a module works; the mirror is its whole plane.' : 'Tap modules to add or remove them from the selection.');
+    this.app.notify?.();
+  }
+
+  // A tap on a panel in Solid Modeling.
+  buildTap(P) {
+    const sub = this.solidSub;
+    if (sub === 'add' || !P) { this.selectFace(P); return; }
+    if (sub === 'mirror' && this.state.mirrorPick === 'face') {
+      this.sel.solidId = P.solidId;
+      this.sel.fi = P.fi;
+      this.refreshStyles();
+      const n = this.modSel.size;
+      this.app.toast(`Mirror face chosen (${faceShapeName(P.verts.length)} of ${this.moduleName(P.solidId)}). ${n ? `Press Reflect to add the mirror image of the ${n} selected module${n === 1 ? '' : 's'}.` : 'Now choose Modules and tap the modules to reflect.'}`, 5000);
+      this.app.notify?.();
+      return;
+    }
+    this.toggleModule(P.solidId);
+  }
+
+  moduleName(id) {
+    const s = this.comp.get(id);
+    return s ? `${TEMPLATES[s.type].name.toLowerCase()} ${id}` : `module ${id}`;
+  }
+
+  toggleModule(id) {
+    if (this.modSel.has(id)) this.modSel.delete(id); else this.modSel.add(id);
+    this.refreshStyles();
+    const n = this.modSel.size;
+    const next = this.solidSub === 'mirror' ? ' Then choose Mirror face.' : ' Then Enlarge or Reduce.';
+    this.app.toast(`${this.modSel.has(id) ? 'Selected' : 'Deselected'} ${this.moduleName(id)}: ${n} module${n === 1 ? '' : 's'} selected.${n ? next : ''}`);
+    this.app.notify?.();
+  }
+
+  selectAllModules() {
+    this.modSel = new Set(this.comp.solids.map((x) => x.id));
+    this.refreshStyles();
+    this.app.toast(`All ${this.modSel.size} modules selected.`);
+    this.app.notify?.();
+  }
+
+  clearModules() {
+    this.modSel.clear();
+    this.refreshStyles();
+    this.app.toast('Module selection cleared.');
+    this.app.notify?.();
+  }
+
+  // Do two solids share a whole face (are they joined)?
+  joined(a, b) {
+    const tol = Math.min(a.edge, b.edge) * 1e-4;
+    for (const fa of a.worldFaces()) {
+      for (const fb of b.worldFaces()) {
+        if (fa.sides !== fb.sides || fa.normal.dot(fb.normal) > -0.9999) continue;
+        if (fa.verts.every((v) => fb.verts.some((w) => w.distanceTo(v) < tol))) return true;
+      }
+    }
+    return false;
+  }
+
+  // Symmetry: add the mirror images of the selected modules across the
+  // plane of the chosen face. All copies are checked before anything is
+  // added: a copy may not overlap a module (or another copy), nor touch one
+  // with only part of a face. Nothing changes unless every copy fits.
+  reflectSelected() {
+    if (!this.requireClosed()) return false;
+    const mods = [...this.modSel].map((id) => this.comp.get(id)).filter(Boolean);
+    if (!mods.length) { this.app.toast('Select the modules to reflect first: tap them (Modules).'); return false; }
+    const owner = this.comp.get(this.sel.solidId);
+    if (!owner || this.sel.fi == null) { this.app.toast('Choose the mirror face: press Mirror face, then tap a face.'); return false; }
+    const face = owner.worldFaces()[this.sel.fi];
+    const o = face.centroid.clone(), n = face.normal.clone().normalize();
+    const trial = new Composition();
+    trial.restore(this.comp.serialize());
+    const added = [];
+    for (const m of mods) {
+      const pose = mirrorPose(m, o, n);
+      const probe = { position: pose.position, quaternion: pose.quaternion };
+      roundPose(probe);
+      const problem = trial.placementProblem(m.type, m.edge, probe.position, probe.quaternion);
+      if (problem) {
+        const blocker = problem.solid && problem.solid.id;
+        this.flashSolid(blocker != null && this.comp.get(blocker) ? blocker : m.id);
+        const what = problem.kind === 'overlap'
+          ? `would overlap ${this.comp.get(blocker) ? this.moduleName(blocker) : 'another mirrored copy'} (shown in red)`
+          : `would only partly touch ${this.comp.get(blocker) ? this.moduleName(blocker) : 'another mirrored copy'}`;
+        this.app.toast(`The mirror image of ${this.moduleName(m.id)} ${what}. Nothing was added: choose other modules or another mirror face.`, 6000);
+        return false;
+      }
+      added.push(trial.add(m.type, m.edge, probe.position, probe.quaternion));
+    }
+    this.pushHistory();
+    this.comp = trial;
+    this.rebuild();
+    this.modSel = new Set(added.map((x) => x.id));
+    this.refreshStyles();
+    const jt = this.jointText();
+    this.app.toast(`Reflected ${added.length} module${added.length === 1 ? '' : 's'} across the mirror face: the copies are selected. ${this.describe()}.${jt ? ` Joints: ${jt}.` : ''} ${this.netSentence()}`, 6000);
+    return true;
+  }
+
+  // Scale: change the size of the selected modules uniformly by `f`, about
+  // the middle of their footprint on the table. Modules joined to modules
+  // that are not selected cannot be scaled alone (their shared faces would
+  // no longer match); the result must not overlap or partly touch anything.
+  scaleSelected(f) {
+    if (!this.requireClosed()) return false;
+    const mods = [...this.modSel].map((id) => this.comp.get(id)).filter(Boolean);
+    if (!mods.length) { this.app.toast('Select the modules to scale first: tap them, or All modules.'); return false; }
+    const others = this.comp.solids.filter((x) => !this.modSel.has(x.id));
+    for (const m of mods) {
+      const j = others.find((x) => this.joined(m, x));
+      if (j) {
+        this.flashSolid(j.id);
+        this.app.toast(`${this.moduleName(m.id)} is joined to ${this.moduleName(j.id)}, which is not selected (red). Scaled alone, their shared face would no longer match. Select the whole joined group, or All modules.`, 6500);
+        return false;
+      }
+    }
+    const edges = mods.map((m) => m.edge * f);
+    if (edges.some((e) => e < 0.02 - 1e-9 || e > 0.48 + 1e-9)) {
+      this.app.toast(`That would make an edge ${Math.round(Math.min(...edges) * 1000)}–${Math.round(Math.max(...edges) * 1000)} mm. Edges stay between 20 and 480 mm.`, 5000);
+      return false;
+    }
+    const box = new THREE.Box3();
+    for (const m of mods) for (const v of m.worldVerts()) box.expandByPoint(v);
+    const pivot = new THREE.Vector3((box.min.x + box.max.x) / 2, box.min.y, (box.min.z + box.max.z) / 2);
+    const rest = new Composition();
+    rest.restore(this.comp.serialize());
+    rest.solids = rest.solids.filter((x) => !this.modSel.has(x.id));
+    const scaled = mods.map((m) => ({ id: m.id, type: m.type, edge: m.edge * f, position: m.position.clone().sub(pivot).multiplyScalar(f).add(pivot), quaternion: m.quaternion.clone() }));
+    for (const sc of scaled) {
+      const problem = rest.placementProblem(sc.type, sc.edge, sc.position, sc.quaternion);
+      if (problem) {
+        this.flashSolid(problem.solid && problem.solid.id);
+        this.app.toast(`Scaled, ${this.moduleName(sc.id)} would ${problem.kind === 'overlap' ? 'overlap' : 'only partly touch'} ${this.moduleName(problem.solid.id)} (red). Nothing changed: move the modules apart first.`, 6000);
+        return false;
+      }
+    }
+    this.pushHistory();
+    for (const sc of scaled) {
+      const m = this.comp.get(sc.id);
+      m.edge = Math.round(sc.edge * 1e9) / 1e9;
+      m.position.copy(sc.position);
+      roundPose(m);
+    }
+    this.rebuild();
+    this.refreshStyles();
+    const mm = (e) => `${Math.round(e * 10000) / 10} mm`;
+    const sizes = [...new Set(mods.map((m) => mm(m.edge)))].join(', ');
+    this.app.toast(`Scaled ${mods.length} module${mods.length === 1 ? '' : 's'} ×${+f.toFixed(3)}: edges now ${sizes}. ${this.describe()}. ${this.netSentence()}`, 6000);
+    return true;
+  }
+
   // Ghost preview for moving a solid.
   showGhost(type, edge, position, quaternion, state) {
     if (this.ghost && this.ghost.userData.type !== type) { this.shellGroup.remove(this.ghost); this.ghost.geometry.dispose(); this.ghost = null; }
@@ -2607,20 +3019,47 @@ export class SolidsWorkspace {
     const R = (items, gap = 8, h = 70) => { row(y, h, items, gap); y += h + 10; };
     const text = (label, h = 70) => { B.push({ kind: 'text', x: M, y, w: W, h, label }); y += h + 10; };
     if (tab === 'solid') {
-      const short = { cube: 'Cube', tetra: 'Tetra', octa: 'Octa', cubocta: 'Cubocta' };
-      R(SOLID_TYPES.map((t) => ({ label: short[t] || t, action: () => a.setAddType(t), active: a.addType === t })));
+      const ss = a.solidSub;
       R([
-        { label: 'Add on face', w: 1.3, action: () => a.addSolid() },
-        { label: 'Remove', action: () => a.removeSolid() },
-        { label: 'Duplicate', action: () => a.duplicate() },
-        { label: 'Rotate module', w: 1.35, action: () => a.rotateSolid() },
-        { label: 'Tip over', action: () => a.turnAll('x') },
-      ]);
-      text('Point at a face and pull the trigger to target it, choose a module and Add on face. Grab a module to move it; it snaps to a matching face.');
+        { label: 'Add / Remove', action: () => a.setSolidSub('add'), active: ss === 'add' },
+        { label: 'Symmetry', action: () => a.setSolidSub('mirror'), active: ss === 'mirror' },
+        { label: 'Scale', action: () => a.setSolidSub('scale'), active: ss === 'scale' },
+      ], 6, 58);
+      if (ss === 'mirror') {
+        R([
+          { label: 'Modules', action: () => a.setMirrorPick('modules'), active: s.mirrorPick !== 'face' },
+          { label: 'Mirror face', w: 1.2, action: () => a.setMirrorPick('face'), active: s.mirrorPick === 'face' },
+          { label: 'Reflect', action: () => a.reflectSelected() },
+          { label: 'All modules', w: 1.2, action: () => a.selectAllModules() },
+          { label: 'Clear', w: 0.8, action: () => a.clearModules() },
+        ], 6, 64);
+        text(`${a.modSel.size} module${a.modSel.size === 1 ? '' : 's'} selected${a.sel.solidId != null ? ', mirror face chosen' : ''}. Point and pull the trigger to pick modules, then Mirror face and the face to reflect across.`, 60);
+      } else if (ss === 'scale') {
+        R([
+          { label: 'All modules', w: 1.2, action: () => a.selectAllModules() },
+          { label: 'Clear', w: 0.8, action: () => a.clearModules() },
+          { label: 'Reduce ×0.8', w: 1.2, action: () => a.scaleSelected(0.8) },
+          { label: 'Enlarge ×1.25', w: 1.3, action: () => a.scaleSelected(1.25) },
+          { label: '×½', w: 0.6, action: () => a.scaleSelected(0.5) },
+          { label: '×2', w: 0.6, action: () => a.scaleSelected(2) },
+        ], 6, 64);
+        text(`${a.modSel.size} module${a.modSel.size === 1 ? '' : 's'} selected. Point and pull the trigger to pick modules; every edge changes by the same factor.`, 60);
+      } else {
+        const short = { cube: 'Cube', tetra: 'Tetra', octa: 'Octa', cubocta: 'Cubocta', cyl12: 'Cylinder' };
+        R(SOLID_TYPES.map((t) => ({ label: short[t] || t, action: () => a.setAddType(t), active: a.addType === t })), 6, 60);
+        R([
+          { label: 'Add on face', w: 1.3, action: () => a.addSolid() },
+          { label: 'Remove', action: () => a.removeSolid() },
+          { label: 'Duplicate', action: () => a.duplicate() },
+          { label: 'Rotate module', w: 1.35, action: () => a.rotateSolid() },
+          { label: 'Tip over', action: () => a.turnAll('x') },
+        ], 6, 62);
+        text('Point at a face and pull the trigger to target it, choose a module and Add on face. Grab a module to move it.', 46);
+      }
     } else if (tab === 'surface') {
       R([
         { label: 'Clear selection', action: () => a.shapeEdit.clearSelection() },
-        { label: 'Reset edits', action: () => a.shapeEdit.resetEdits() },
+        { label: 'Reset edits', action: () => a.resetToRegular() },
       ]);
       text('Grab a corner or edge of the floating form and move it to push or pull it. Tap to select a group. Orange corners move to keep faces flat; at a limit the move stops and says why.', 150);
     } else {
@@ -2651,9 +3090,21 @@ export class SolidsWorkspace {
           { label: 'Check net', action: () => a.checkNet() },
         ]);
       } else if (sub === 'join') {
-        text('Point at a cut edge whose two sides meet and pull the trigger to join it with a hinge.');
+        R([
+          { label: 'Join as Hinge', action: () => a.setJoinMode('hinge'), active: a.joinMode === 'hinge' },
+          { label: 'Join as Merge', action: () => a.setJoinMode('merge'), active: a.joinMode === 'merge' },
+        ], 6, 60);
+        text(a.joinMode === 'merge' ? 'Trigger on the edge between two coplanar panels: one panel.' : 'Trigger on a cut edge to join it with a hinge.', 40);
       } else if (sub === 'tri') {
-        R([{ label: 'Triangulate at corner', action: () => a.shapeEdit.triangulateAt() }]);
+        const ts = a.triSel;
+        R([
+          { label: '◀', w: 0.5, action: () => a.triStep(-1), disabled: !ts },
+          { label: '▶', w: 0.5, action: () => a.triStep(1), disabled: !ts },
+          { label: 'Apply', action: () => a.triApply(), disabled: !ts },
+          { label: 'Cancel', action: () => a.triCancel(), disabled: !ts },
+          { label: 'Triangulate at corner', w: 2, action: () => a.shapeEdit.triangulateAt() },
+        ], 6, 60);
+        text(ts ? `P${ts.no}: ${ts.opts[ts.idx].label} · ${ts.n - 2} triangles` : 'Trigger on a face to preview its triangles.', 40);
       } else if (sub === 'alts' && a.alt) {
         const al = a.alt;
         const lab = al.searching ? `Trying ${al.level} cut${al.level === 1 ? '' : 's'}…` : al.idx < 0 ? `My layout (1 of ${al.list.length + 1})` : `Option ${al.idx + 1} of ${al.list.length}`;
@@ -2804,14 +3255,41 @@ class SolidsTools {
       const ed = this.ws.shapeEdit;
       const g = { move: () => {}, end: () => {
         if (gh.kind === 'vertex') { ed.focusKey = gh.vid !== undefined ? this.ws.shell.vkeys[gh.vid] : ed.focusKey; ed.triangulateAt(); }
-        else this.ws.app.toast('Tap a corner of the floating form: the faces meeting there are split into triangles.');
+        else if (gh.kind === 'face' && gh.panel) this.ws.triPick(gh.panel);
+        else this.ws.app.toast('Tap a face to choose how to split it into triangles, or a corner to split the faces meeting there.');
       } };
       this.active.set(ptr.id, g);
       return true;
     }
+    if (tool === 'tri' && hit.panel) {
+      const P = hit.panel;
+      this.active.set(ptr.id, { move: () => {}, end: () => this.ws.triPick(P) });
+      return true;
+    }
+    if (tool === 'join' && hit.ghost) {
+      const gh = hit.ghost;
+      // A face hit close to one of its edges counts as that edge (a
+      // controller ray rarely lands exactly on a thin edge).
+      let edge = gh.kind === 'edge' ? gh.edge : null;
+      if (!edge && gh.kind === 'face' && gh.panel && hit.point) {
+        let best = null;
+        for (const g of this.ws.shapeEdit.ghostParts().edges) {
+          if (!gh.panel.edges.includes(g.e)) continue;
+          const q = new THREE.Line3(g.a, g.b).closestPointToPoint(hit.point, true, new THREE.Vector3());
+          const d = q.distanceTo(hit.point) / g.a.distanceTo(g.b);
+          if (d < 0.3 && (!best || d < best.d)) best = { d, e: g.e };
+        }
+        edge = best && best.e;
+      }
+      this.active.set(ptr.id, { move: () => {}, end: () => {
+        if (edge) this.ws.joinTap(edge, { ghost: true });
+        else this.ws.app.toast('Tap an edge of the floating form (or of the net) to join it.');
+      } });
+      return true;
+    }
     if (tool === 'join' && hit.panel) {
       const e = this.ws.edgeNear(hit.panel, hit.local, ptr.kind === 'ray' && !hit.near ? 0.32 : 0.25);
-      const g = { move: () => {}, end: () => { if (e) this.ws.joinEdge(e); else if (ptr.kind !== 'touch') this.ws.app.toast('Tap closer to a cut edge.'); } };
+      const g = { move: () => {}, end: () => { if (e) this.ws.joinTap(e); else if (ptr.kind !== 'touch') this.ws.app.toast(this.ws.joinMode === 'merge' ? 'Tap closer to the edge between the two panels.' : 'Tap closer to a cut edge.'); } };
       this.active.set(ptr.id, g);
       return true;
     }
@@ -3189,7 +3667,7 @@ class SolidsTools {
         if (drag) this.solidDragTo(drag, p);
       },
       end: () => {
-        if (!started) { ws.selectFace(P); return; }
+        if (!started) { ws.buildTap(P); return; }
         if (drag) this.endSolidDrag(drag);
       },
       cancel: () => { if (drag) { drag.state = 'blocked'; this.endSolidDrag(drag); } },
