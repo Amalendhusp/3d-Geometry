@@ -17,25 +17,38 @@ const MM = 1000;
 
 // One entry per solid: its panels as polygons in the chosen pose.
 export function modelParts(shell, comp, { pose = 'assembled' } = {}) {
-  const order = new Map(comp.solids.map((s, i) => [s.id, i]));
+  // One part per solid: a polyhedron (stored as pieces that share an
+  // origin), or the faces of a form built from shapes (one per object).
+  const pieceOf = new Map((comp.pieces || []).map((pc) => [pc.id, pc]));
+  const objectOf = new Map();
+  (shell.pieces ? shell.pieces() : []).forEach((c, k) => { for (const p of c) objectOf.set(p, k); });
+  const keyOf = (p) => {
+    const pc = pieceOf.get(p.solidId);
+    if (!pc) return `s${p.solidId}`;
+    return pc.origin != null ? `o${pc.origin}` : `f${objectOf.get(p) ?? 0}`;
+  };
+  const order = new Map();
   const parts = new Map();
   for (const p of shell.panels) {
     const M = pose === 'assembled' ? null : p.M;
     const pts = p.verts.map((v) => (M ? v.clone().applyMatrix4(M) : v.clone()));
     const n = M ? p.normal.clone().transformDirection(M) : p.normal.clone();
-    const idx = order.get(p.solidId) ?? 0;
+    const key = keyOf(p);
+    if (!order.has(key)) order.set(key, order.size);
+    const idx = order.get(key);
     const parity = idx % 2;
-    if (!parts.has(p.solidId)) {
+    if (!parts.has(key)) {
       const tpl = TEMPLATES[p.type] || { name: 'Shape', colors: ['#f6ecd6', '#ecdcbc'] };
-      parts.set(p.solidId, {
-        id: p.solidId, index: idx + 1, type: p.type,
-        name: `Solid ${idx + 1} (${tpl.name.toLowerCase()})`,
-        material: `${p.type}_${'AB'[parity]}`,
+      const own = key[0] === 'f';
+      parts.set(key, {
+        id: key, index: idx + 1, type: p.type,
+        name: own ? `Form ${idx + 1} (shapes)` : `Solid ${idx + 1} (${tpl.name.toLowerCase()})`,
+        material: `${own ? 'shape' : p.type}_${'AB'[parity]}`,
         color: tpl.colors[parity],
         panels: [],
       });
     }
-    parts.get(p.solidId).panels.push({ no: p.no, pts, n: n.normalize() });
+    parts.get(key).panels.push({ no: p.no, pts, n: n.normalize() });
   }
   return [...parts.values()].sort((a, b) => a.index - b.index);
 }

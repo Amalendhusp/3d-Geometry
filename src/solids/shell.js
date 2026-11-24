@@ -100,6 +100,9 @@ export class Shell {
       id: f.pid || `${f.solid.id}:${f.fi}`,
       sub: f.sub ?? null,
       merged: f.merged || null,
+      // A panel that is a piece (a face stored on its own, as everything
+      // built in the one-workspace interface is).
+      piece: !!f.solid.piece,
       solidId: f.solid.id,
       type: f.solid.type,
       fi: f.fi,
@@ -654,6 +657,36 @@ export class Shell {
     return { pairs, panels: hit };
   }
 
+  // A panel that a set of new faces (world polygons with normals) would pass
+  // through or overlap, or null. A new face lying exactly on a panel with
+  // the opposite normal (the same corners) is a face-to-face contact, not an
+  // overlap. `ignore(panel)` skips panels.
+  meets(faces, ignore = null) {
+    const L = Math.min(this.edgeLen, ...faces.map((f) => minSide(f.verts)));
+    const inset = L * 0.02, tol = L * 2e-3;
+    const prep = (w, n) => {
+      const c = w.reduce((a, v) => a.add(v), new THREE.Vector3()).divideScalar(w.length);
+      const poly = w.map((v) => { const d = v.clone().sub(c); const len = d.length(); return c.clone().addScaledVector(d, Math.max(0, len - inset) / len); });
+      let r = 0;
+      for (const v of poly) r = Math.max(r, v.distanceTo(c));
+      return { poly, c, r, n };
+    };
+    const B = faces.map((f) => ({ ...prep(f.verts, f.normal.clone().normalize()), raw: f.verts }));
+    for (const p of this.panels) {
+      if (ignore && ignore(p)) continue;
+      const w = this.worldPoly(p);
+      const n = this.worldNormal(p).normalize();
+      const A = prep(w, n);
+      for (const b of B) {
+        if (A.c.distanceTo(b.c) > A.r + b.r + 1e-6) continue;
+        const same = b.raw.length === w.length && n.dot(b.n) < -0.999 && b.raw.every((v) => w.some((x) => x.distanceTo(v) < tol));
+        if (same) continue;
+        if (polysIntersect(A, b, tol)) return p;
+      }
+    }
+    return null;
+  }
+
   // ---------------------------------------------------------- statistics
 
   stats() {
@@ -850,4 +883,10 @@ function overlap2D(P, R, n, tol) {
     }
   }
   return true;
+}
+
+function minSide(w) {
+  let m = Infinity;
+  for (let i = 0; i < w.length; i++) m = Math.min(m, w[i].distanceTo(w[(i + 1) % w.length]));
+  return m;
 }

@@ -33,9 +33,9 @@ export class WorkspaceUI {
     document.addEventListener('pointerdown', (e) => {
       if (!menu.hidden && !menu.contains(e.target) && !$('#wsMenuBtn').contains(e.target)) setMenu(false);
       const pk = $('#wsPickerPanel');
-      if (!pk.hidden && !pk.contains(e.target) && !$('#wsPicker').contains(e.target)) pk.hidden = true;
+      if (!pk.hidden && !pk.contains(e.target) && !$('#wsPicker').contains(e.target) && !$('#wsPickerMore').contains(e.target)) this.closePicker();
     }, true);
-    window.addEventListener('keydown', (e) => { if (e.key === 'Escape') { setMenu(false); $('#wsPickerPanel').hidden = true; } });
+    window.addEventListener('keydown', (e) => { if (e.key === 'Escape') { setMenu(false); this.closePicker(); } });
     const item = (sel, fn) => on(sel, () => { setMenu(false); fn(); });
     const sui = app.solidsUI;
     item('#wsNew', () => sui.protect(() => { ws.newEmpty(); app.toast('New: an empty workspace. Shape (2D) is selected; tap the picker on the left to place a square.', 5000); }));
@@ -69,25 +69,23 @@ export class WorkspaceUI {
       if (k === 'vr' && !sup.vr) { app.toast('VR needs a WebXR browser on a connected headset, such as the Meta Quest Browser.', 5000); return; }
       app.actions.enterXR(k === 'ar' ? 'immersive-ar' : 'immersive-vr');
     }));
-    // Left: picker (tap places; long press opens the solids picker), gallery, undo / redo
+    // Left: picker. A tap places the current shape or solid; the small arrow
+    // beside it, or a long press on it, opens the catalogue (both modes).
+    // Then gallery, undo / redo.
     const pick = $('#wsPicker');
     let timer = null, long = false;
     pick.addEventListener('pointerdown', () => {
       long = false;
       clearTimeout(timer);
-      timer = setTimeout(() => {
-        // Long press opens the picker in Solid (3D). In Shape (2D) the way to
-        // open it is still to be decided, so it is not offered there yet.
-        if (ws.state.mode !== 'solid') return;
-        long = true;
-        this.openPicker();
-      }, 450);
+      timer = setTimeout(() => { long = true; this.openPicker(); }, 450);
     });
     const stop = () => clearTimeout(timer);
     pick.addEventListener('pointerup', stop);
     pick.addEventListener('pointerleave', stop);
+    pick.addEventListener('pointercancel', stop);
     pick.addEventListener('contextmenu', (e) => e.preventDefault());
-    pick.addEventListener('click', () => { if (long) { long = false; return; } $('#wsPickerPanel').hidden = true; ws.startPlacing(); });
+    pick.addEventListener('click', () => { if (long) { long = false; return; } this.closePicker(); ws.startPlacing(); });
+    on('#wsPickerMore', () => { if ($('#wsPickerPanel').hidden) this.openPicker(); else this.closePicker(); });
     on('#wsGallery', () => app.toast('From Gallery (adding a copy of a saved model) comes in the next stage. Open… in the menu opens a saved model.', 5000));
     on('#wsUndo', () => app.actions.undo());
     on('#wsRedo', () => app.actions.redo());
@@ -95,7 +93,12 @@ export class WorkspaceUI {
     on('#wsInfoBtn', () => { this.drop = this.drop === 'info' ? null : 'info'; this.render(); app.layoutChanged?.(); });
     on('#wsErrBtn', () => { this.drop = this.drop === 'errors' ? null : 'errors'; this.render(); app.layoutChanged?.(); });
     // Tabs
-    $$('[data-mode]').forEach((b) => b.addEventListener('click', () => { $('#wsPickerPanel').hidden = true; if (ws.state.mode !== b.dataset.mode) ws.setMode(b.dataset.mode); }));
+    $$('[data-mode]').forEach((b) => b.addEventListener('click', () => { this.closePicker(); if (ws.state.mode !== b.dataset.mode) ws.setMode(b.dataset.mode); }));
+  }
+
+  closePicker() {
+    $('#wsPickerPanel').hidden = true;
+    $('#wsPickerMore').setAttribute('aria-expanded', 'false');
   }
 
   openPicker() {
@@ -111,13 +114,14 @@ export class WorkspaceUI {
       b.dataset.pick = it.key;
       b.setAttribute('aria-pressed', String(it.key === cur));
       b.innerHTML = `<svg class="i"><use href="#${it.icon}"/></svg>${it.name}`;
-      b.addEventListener('click', () => { pk.hidden = true; ws.setPickerType(it.key); });
+      b.addEventListener('click', () => { this.closePicker(); ws.setPickerType(it.key); });
       pk.appendChild(b);
     }
-    const r = $('#wsLeft').getBoundingClientRect();
-    pk.style.left = `${Math.round(r.right + 8)}px`;
+    const r = $('#wsPickerMore').getBoundingClientRect();
+    pk.style.left = `${Math.round(r.right + 6)}px`;
     pk.style.top = `${Math.round(Math.max(60, r.top))}px`;
     pk.hidden = false;
+    $('#wsPickerMore').setAttribute('aria-expanded', 'true');
   }
 
   async importFile(e) {
@@ -169,7 +173,8 @@ export class WorkspaceUI {
     const name = mode === 'solid' ? TEMPLATES[ws.state.solidType].name : shapeByKey(ws.state.shapeType).name;
     pick.querySelector('use').setAttribute('href', `#${icon}`);
     $('#wsPickerName').textContent = name;
-    pick.title = mode === 'solid' ? `Polyhedron: tap to place a ${name.toLowerCase()}; long press to choose another` : `Shapes: tap to place a ${name.toLowerCase()}`;
+    pick.title = `${mode === 'solid' ? 'Polyhedron' : 'Shapes'}: tap to place a ${name.toLowerCase()}; the arrow or a long press chooses another`;
+    $('#wsPickerMore').title = mode === 'solid' ? 'Choose another polyhedron' : 'Choose another shape';
     pick.setAttribute('aria-pressed', String(!!ws.placing));
     $('#wsUndo').disabled = !ws.history.length;
     $('#wsRedo').disabled = !ws.canRedo();

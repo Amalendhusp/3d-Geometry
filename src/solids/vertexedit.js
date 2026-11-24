@@ -132,6 +132,7 @@ export function solvePlanar(model, start, pins, targets, iters = 400) {
 function signedVolume(model, P) {
   let v = 0;
   for (const f of model.faces) {
+    if (f.hidden) continue;
     const a = P.get(f.keys[0]);
     for (let i = 1; i < f.keys.length - 1; i++) {
       const b = P.get(f.keys[i]), c = P.get(f.keys[i + 1]);
@@ -147,6 +148,8 @@ export function checkForm(model, P) {
   const polys = [];
   for (const f of model.faces) {
     const pts = f.keys.map((k) => P.get(k));
+    // A face hidden between two solids only has to stay flat.
+    if (f.hidden) { if (f.planar && planarDev(pts) > PLANAR_TOL) return `a face inside the form would bend out of plane`; continue; }
     const n = polyNormal(pts);
     let area = 0;
     const nn = pts.length;
@@ -154,7 +157,7 @@ export function checkForm(model, P) {
       const a = pts[(i + nn - 1) % nn], b = pts[i], c = pts[(i + 1) % nn];
       const u = a.clone().sub(b), w = c.clone().sub(b);
       const turn = new THREE.Vector3().crossVectors(w, u).dot(n);
-      if (turn <= 0) return `face ${f.id} would fold in on itself`;
+      if (turn <= 0) return `face ${f.id} would stop being convex (a corner would fold in on itself)`;
       const ang = THREE.MathUtils.radToDeg(u.angleTo(w));
       if (ang < MIN_ANGLE) return `a corner of face ${f.id} would close to ${ang.toFixed(1)}°`;
       area += turn / 2;
@@ -163,7 +166,8 @@ export function checkForm(model, P) {
     if (f.planar && planarDev(pts) > PLANAR_TOL) return `face ${f.id} would bend out of plane`;
     polys.push({ verts: pts.map((p) => p.clone()), normal: n, M: new THREE.Matrix4() });
   }
-  if (signedVolume(model, P) <= 1e-7) return 'the form would turn inside out';
+  // An open form (a net, a box without a lid) has no inside to turn out.
+  if (!model.open && signedVolume(model, P) <= 1e-7) return 'the form would turn inside out';
   // Faces passing through each other (the shell's own test, on the closed form).
   let minEdge = Infinity;
   for (const [a, b] of model.edges) minEdge = Math.min(minEdge, P.get(a).distanceTo(P.get(b)));

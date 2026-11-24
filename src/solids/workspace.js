@@ -579,6 +579,9 @@ export class SolidsWorkspace {
     this.meshes.clear();
     this.pickables = [];
     const order = new Map(this.comp.solids.map((s, i) => [s.id, i]));
+    // Pieces take the tone of the solid they came from, alternating.
+    const origins = [];
+    for (const pc of this.comp.pieces) { const o = pc.origin ?? pc.id; if (!origins.includes(o)) origins.push(o); order.set(pc.id, origins.indexOf(o)); }
     for (const p of this.shell.panels) {
       const n = p.verts.length;
       const pos = [], nrm = [], idx = [];

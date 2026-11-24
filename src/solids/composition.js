@@ -107,7 +107,7 @@ export class Composition {
     const verts = pc.verts.map((v) => v.clone());
     const normal = polyNormal(verts);
     const centroid = verts.reduce((a, v) => a.add(v), new THREE.Vector3()).divideScalar(verts.length);
-    return { solid: { id: pc.id, type: 'piece', piece: true }, fi: 0, verts, normal, centroid, sides: verts.length };
+    return { solid: { id: pc.id, type: pc.kind || 'piece', piece: true }, fi: 0, verts, normal, centroid, sides: verts.length };
   }
 
   isEdited() { return this.edits.size > 0 || this.tri.size > 0 || this.merge.length > 0; }
@@ -164,7 +164,7 @@ export class Composition {
     if (this.edits.size) out.edits = [...this.edits].map(([k, v]) => [k, ...v.toArray().map((x) => Math.round(x * 1e9) / 1e9)]);
     if (this.tri.size) out.tri = [...this.tri].map(([k, d]) => (Array.isArray(d[0]) ? [k, d.map((x) => [x[0], x[1]])] : [k, d[0], d[1]]));
     if (this.merge.length) out.merge = this.merge.map((g) => g.slice());
-    if (this.pieces.length) out.pieces = this.pieces.map((pc) => ({ id: pc.id, n: pc.n, v: pc.verts.flatMap((v) => v.toArray().map((x) => Math.round(x * 1e12) / 1e12)) }));
+    if (this.pieces.length) out.pieces = this.pieces.map((pc) => ({ id: pc.id, n: pc.n, ...(pc.kind ? { kind: pc.kind } : {}), ...(pc.origin != null ? { origin: pc.origin } : {}), v: pc.verts.flatMap((v) => v.toArray().map((x) => Math.round(x * 1e12) / 1e12)) }));
     if (this.seams.length) out.seams = this.seams.map((x) => x.slice());
     return out;
   }
@@ -191,7 +191,10 @@ export class Composition {
         if (!d || !Number.isInteger(d.id) || !Array.isArray(d.v) || d.v.length < 9 || d.v.length % 3 || !d.v.every(Number.isFinite)) continue;
         const verts = [];
         for (let i = 0; i < d.v.length; i += 3) verts.push(new THREE.Vector3(d.v[i], d.v[i + 1], d.v[i + 2]));
-        this.pieces.push({ id: d.id, n: d.n || verts.length, verts });
+        const pc = { id: d.id, n: d.n || verts.length, verts };
+        if (typeof d.kind === 'string') pc.kind = d.kind;
+        if (Number.isInteger(d.origin)) pc.origin = d.origin;
+        this.pieces.push(pc);
       }
     }
     this.seams = Array.isArray(data.seams) ? data.seams.filter((x) => Array.isArray(x) && x.length === 2 && x.every((k) => typeof k === 'string')).map((x) => x.slice()) : [];

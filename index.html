@@ -446,7 +446,12 @@
   .ws-col button.later, .ws-col button[aria-disabled="true"] { opacity: 0.42; }
   .ws-col button:disabled { opacity: 0.35; }
   .ws-pick[aria-pressed="true"] { background: var(--saffron); color: var(--ink); }
-  .ws-pick::after { content: ''; position: absolute; right: 4px; bottom: 4px; border: 4px solid transparent; border-right-color: currentColor; border-bottom-color: currentColor; opacity: 0.55; }
+  /* The small arrow beside the picker opens the catalogue (so does a long press). */
+  .ws-pickcol { position: relative; }
+  .ws-col button.ws-more { position: absolute; left: calc(100% + 4px); top: 4px; min-width: 0; min-height: 0; width: 26px; height: 44px; border-radius: 0 12px 12px 0; padding: 0; color: var(--washi); background: var(--glass-strong); border: 1px solid var(--glass-edge); }
+  .ws-col button.ws-more:hover { background: rgba(48, 54, 96, 0.92); }
+  .ws-col button.ws-more svg.i { width: 16px; height: 16px; transform: rotate(90deg); }
+  .ws-col button.ws-more[aria-expanded="true"] { background: var(--saffron); color: var(--ink); }
   .ws-badge { position: absolute; right: 2px; top: 2px; min-width: 16px; height: 16px; border-radius: 8px; background: #3f9b5a; color: #fff; font-size: 10px; font-weight: 700; display: grid; place-items: center; padding: 0 3px; }
   .ws-badge.bad { background: #d8452f; }
   .ws-pickerpanel { position: fixed; z-index: 30; display: grid; grid-template-columns: repeat(2, 1fr); gap: 4px; padding: 6px; }
@@ -647,8 +652,9 @@
 </div>
 
 <aside class="ws-left" id="wsLeft" aria-label="Add">
-  <div class="glass ws-col">
+  <div class="glass ws-col ws-pickcol">
     <button type="button" id="wsPicker" class="ws-pick" title="Shapes: tap to place a square" aria-haspopup="true"><svg class="i"><use href="#s-square"/></svg><span class="sr" id="wsPickerName">Square</span></button>
+    <button type="button" id="wsPickerMore" class="glass ws-more" title="Choose another shape" aria-haspopup="true" aria-expanded="false" aria-controls="wsPickerPanel"><svg class="i"><use href="#i-chev"/></svg><span class="sr">Choose another</span></button>
     <button type="button" id="wsGallery" title="From Gallery: add a copy of a saved model (next stage)" aria-disabled="true" class="later"><svg class="i"><use href="#i-gallery"/></svg><span class="sr">From Gallery</span></button>
   </div>
   <div class="glass ws-col">
