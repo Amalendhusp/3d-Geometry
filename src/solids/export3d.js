@@ -88,7 +88,7 @@ export function exportGLB(shell, comp, { pose = 'assembled', generator = 'Paper 
     for (const pn of part.panels) {
       const base = pos.length / 3;
       for (const v of pn.pts) { pos.push(v.x, v.y, v.z); nrm.push(pn.n.x, pn.n.y, pn.n.z); }
-      for (let i = 1; i < pn.pts.length - 1; i++) idx.push(base, base + i, base + i + 1);
+      for (const [a, b, c] of convexTriangles(pn.pts, pn.n)) idx.push(base + a, base + b, base + c);
     }
     triangles += idx.length / 3;
     const P = new Float32Array(pos), N = new Float32Array(nrm);
@@ -196,4 +196,35 @@ export function exportOBJ(shell, comp, { pose = 'assembled', name = 'model', hea
     mtl.push('', `newmtl ${part.material}`, `Kd ${r.toFixed(4)} ${g.toFixed(4)} ${b.toFixed(4)}`, 'Ka 0 0 0', 'Ks 0 0 0', 'd 1', 'illum 1');
   }
   return { obj, mtl: mtl.join('\n') + '\n', parts: parts.length, faces, vertices: vIndex.size, sizeMM: size };
+}
+
+// Triangles for a convex panel that may have straight corners (a merged
+// panel keeps the corners where neighbouring edges meet, so the shell stays
+// watertight). Every corner stays a vertex and no triangle has zero area:
+// ears are cut at strictly convex corners, never leaving a flat remainder.
+export function convexTriangles(pts, n) {
+  const m = pts.length;
+  if (m <= 3) return m === 3 ? [[0, 1, 2]] : [];
+  const area2 = (i, j, k) => new THREE.Vector3().subVectors(pts[j], pts[i]).cross(new THREE.Vector3().subVectors(pts[k], pts[j])).dot(n);
+  let ring = [...Array(m).keys()];
+  const total = (r) => { let a = 0; for (let i = 1; i < r.length - 1; i++) a += area2(r[0], r[i], r[i + 1]); return a; };
+  const out = [];
+  let guard = 0;
+  while (ring.length > 3 && guard++ < 4 * m) {
+    const all = total(ring);
+    const eps = Math.abs(all) * 1e-9;
+    let cut = -1;
+    for (let k = 0; k < ring.length; k++) {
+      const a = ring[(k + ring.length - 1) % ring.length], b = ring[k], c = ring[(k + 1) % ring.length];
+      const ear = area2(a, b, c);
+      if (ear > eps && all - ear > eps) { cut = k; break; }
+    }
+    if (cut < 0) break;
+    const a = ring[(cut + ring.length - 1) % ring.length], b = ring[cut], c = ring[(cut + 1) % ring.length];
+    out.push([a, b, c]);
+    ring = ring.filter((_, i) => i !== cut);
+  }
+  if (ring.length === 3) out.push(ring);
+  else for (let i = 1; i < ring.length - 1; i++) out.push([ring[0], ring[i], ring[i + 1]]);
+  return out;
 }
