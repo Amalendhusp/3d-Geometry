@@ -78,11 +78,11 @@ export class VRPanel {
     // Workspace switch, then the active workspace's controls.
     const space = this.app.space;
     const page = this.app.panelPage;
+    // One workspace (Shape / Solid); the older paper sheet only with #paper.
     row(84, 60, [
-      { label: 'Paper', action: () => { this.app.panelPage = 'work'; a.setSpace('paper'); this.invalidate(); }, active: page === 'work' && space === 'paper' },
-      { label: 'Solids', action: () => { this.app.panelPage = 'work'; a.setSpace('solids'); this.invalidate(); }, active: page === 'work' && space === 'solids' },
-      { label: 'Place & view', action: () => { this.app.panelPage = 'place'; this.invalidate(); }, active: page === 'place' },
-      { label: '☰ Project', action: () => { this.app.panelPage = 'project'; this.projectPage = 0; this.invalidate(); }, active: page === 'project' },
+      ...(space === 'paper' ? [{ label: 'Paper', action: () => { this.app.panelPage = 'work'; this.invalidate(); }, active: page === 'work' }] : [{ label: 'Workspace', action: () => { this.app.panelPage = 'work'; this.invalidate(); }, active: page === 'work' }]),
+      { label: 'Scene', action: () => { this.app.panelPage = 'place'; this.invalidate(); }, active: page === 'place' },
+      { label: '☰ Menu', action: () => { this.app.panelPage = 'project'; this.projectPage = 0; this.invalidate(); }, active: page === 'project' },
     ]);
     if (page === 'project') {
       this.projectRows(row, B, M, W);
@@ -267,7 +267,7 @@ export class VRPanel {
     ctx.fillStyle = C.muted;
     ctx.textAlign = 'right';
     ctx.fillText(this.app.space === 'solids'
-      ? `${this.app.solids.solidsText()} · ${this.app.solids.shell.panels.length} panels`
+      ? this.app.solids.infoText().split(' · ').slice(0, 3).join(' · ')
       : `Sheet ${fmt(this.app.paper.W * 100)} × ${fmt(this.app.paper.H * 100)} cm`, PX_W - 28, 46);
     const hovered = new Set(this.hover.values());
     for (const b of this.buttons) {

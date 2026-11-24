@@ -20,6 +20,7 @@ const STORE_KEY = 'paper-fold-studio.solids.v1';
 // Starting compositions. Cube ones use lattice cells; the others attach
 // solids face to face from a first solid resting on the table.
 export const PRESETS = {
+  empty: { label: 'Empty workspace', build: () => {} },
   one: { label: '1 cube', cells: [[0, 0, 0]] },
   two: { label: '2 cubes', cells: [[0, 0, 0], [1, 0, 0]] },
   row: { label: '3 cubes in a row', cells: [[0, 0, 0], [1, 0, 0], [2, 0, 0]] },
@@ -120,6 +121,9 @@ const NET_TEXT = {
   unchecked: 'Net not checked',
 };
 
+// Shape (2D) pieces: a warm paper colour, two tones for neighbours.
+const PIECE_STYLE = { name: 'Shape', plural: 'shapes', colors: ['#f6ecd6', '#ecdcbc'] };
+
 const COLORS = {
   inside: '#8ea4c2',
   hinge: '#1e9a5f',
@@ -184,7 +188,8 @@ export class SolidsWorkspace {
     this.tools = new SolidsTools(this);
     this.raycaster = new THREE.Raycaster();
     this.ready = false;
-    this.preset('one', false);
+    this.initModes?.();
+    this.preset('empty', false);
     this.ready = true;
   }
 
@@ -551,7 +556,7 @@ export class SolidsWorkspace {
     const tint = { none: null, selected: '#f0b44c', moving: '#ffd27a', overlap: '#ff2a12', solid: '#4a8cff', face: '#f0b44c', hover: '#5aa0ff', issue: COLORS.issue, issueInfo: COLORS.issueInfo }[state];
     const strength = { none: 0, selected: 0.38, moving: 0.18, overlap: 0.55, solid: 0.25, face: 0.45, hover: 0.22, issue: 0.55, issueInfo: 0.4 }[state];
     const m = new THREE.MeshStandardMaterial({
-      color: side === 'out' ? TEMPLATES[type].colors[parity] : COLORS.inside,
+      color: side === 'out' ? (TEMPLATES[type] || PIECE_STYLE).colors[parity] : COLORS.inside,
       roughness: 0.85,
       metalness: 0,
       side: side === 'out' ? THREE.FrontSide : THREE.BackSide,
@@ -3211,7 +3216,7 @@ export class SolidsWorkspace {
 
 // ------------------------------------------------------------- gestures
 
-class SolidsTools {
+export class SolidsTools {
   constructor(ws) {
     this.ws = ws;
     this.active = new Map();

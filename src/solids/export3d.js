@@ -26,7 +26,7 @@ export function modelParts(shell, comp, { pose = 'assembled' } = {}) {
     const idx = order.get(p.solidId) ?? 0;
     const parity = idx % 2;
     if (!parts.has(p.solidId)) {
-      const tpl = TEMPLATES[p.type];
+      const tpl = TEMPLATES[p.type] || { name: 'Shape', colors: ['#f6ecd6', '#ecdcbc'] };
       parts.set(p.solidId, {
         id: p.solidId, index: idx + 1, type: p.type,
         name: `Solid ${idx + 1} (${tpl.name.toLowerCase()})`,

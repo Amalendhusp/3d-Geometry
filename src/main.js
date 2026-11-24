@@ -7,7 +7,9 @@ import { VRPanel } from './vrpanel.js';
 import { XRInput } from './xr.js';
 import { UI } from './ui.js';
 import { SolidsWorkspace } from './solids/workspace.js';
+import './solids/modes.js';
 import { SolidsUI } from './solids/ui.js';
+import { WorkspaceUI } from './ui2.js';
 import { Placement, SURFACES, SURFACE_LABELS } from './placement.js';
 import { HandTools } from './handtools.js';
 import { Environments, ENV_LABELS } from './environment.js';
@@ -55,7 +57,9 @@ class App {
     this.panel.mesh.visible = false;
     this.surface.add(this.panel.mesh);
     this.initPreviews();
-    this.space = location.hash === '#solids' ? 'solids' : 'paper';
+    // One workspace with Shape (2D) and Solid (3D) modes. The older paper
+    // sheet is no longer offered (it opens only with #paper).
+    this.space = location.hash === '#paper' ? 'paper' : 'solids';
     this.solids = new SolidsWorkspace(this);
     this.surface.add(this.solids.root);
     this.placement = new Placement(this);
@@ -76,15 +80,16 @@ class App {
     this.controls.addEventListener('start', () => { this.camAnim = null; });
     this.ui = new UI(this);
     this.solidsUI = new SolidsUI(this);
+    this.ui2 = new WorkspaceUI(this);
     // Re-frame when floating panels open, close or change size.
     if (typeof ResizeObserver !== 'undefined') {
       const ro = new ResizeObserver(() => this.layoutChanged());
-      for (const id of ['solidsDock', 'paperDock', 'issueCard', 'infoPanel', 'altCard', 'navBar', 'undoBar', 'diagChips', 'projectBar']) { const el = document.getElementById(id); if (el) ro.observe(el); }
+      for (const id of ['solidsDock', 'paperDock', 'issueCard', 'infoPanel', 'altCard', 'navBar', 'undoBar', 'diagChips', 'projectBar', 'wsLeft', 'wsRight', 'wsTop', 'wsTabs', 'wsMenuBar', 'wsSession', 'wsInfo', 'wsErrors']) { const el = document.getElementById(id); if (el) ro.observe(el); }
     }
     this.applySpace();
     this.environments.set('terrace');
     this.environments.align(new THREE.Vector3(0, 0, 0.5), 0);
-    if (this.space === 'solids') this.statusText = 'Solid → Unfold: tap a panel to see its hinges, then swing it open. Build adds and joins solids.';
+    if (this.space === 'solids') this.statusText = 'Shape (2D): tap the picker on the left to place a square, then attach more squares to its edges.';
     this.layoutTable();
     this.resetPosition();
     this.fitCamera();
@@ -418,7 +423,14 @@ class App {
     // (offsetParent is always null for fixed elements, so use client rects.)
     const vis = (el) => el && !el.hidden && el.getClientRects().length > 0 && getComputedStyle(el).visibility !== 'hidden';
     const r = (sel) => { const el = document.querySelector(sel); return vis(el) ? el.getBoundingClientRect() : null; };
-    for (const sel of ['#projectBar', '#sessionBar', '#diagChips']) { const b = r(sel); if (b) top = Math.max(top, b.bottom + 8); }
+    for (const sel of ['#projectBar', '#sessionBar', '#diagChips', '#wsMenuBar', '#wsSession', '#wsTop']) { const b = r(sel); if (b) top = Math.max(top, b.bottom + 8); }
+    { const b = r('#wsTabs'); if (b) bottom = Math.min(bottom, b.top - 8); }
+    // The side toolbars are narrow; on a phone the geometry may pass
+    // behind them rather than shrink to the strip between them.
+    if (W > 640) {
+      { const b = r('#wsLeft'); if (b) left = Math.max(left, b.right + 8); }
+      { const b = r('#wsRight'); if (b) right = Math.min(right, b.left - 8); }
+    }
     for (const sel of this.space === 'solids' ? ['#solidsDock'] : ['#paperDock']) { const b = r(sel); if (b) bottom = Math.min(bottom, b.top - 8); }
     const ur = r('#undoBar'); if (ur) bottom = Math.min(bottom, ur.top - 4);
     // The View toolbar is a column at the right, or (phone, tool sheet open)
@@ -841,6 +853,12 @@ class App {
     };
     this.screenPtr = ptr;
     let active = null, activeAt = 0;
+    // Every finger or button down on the canvas, a tap candidate, and
+    // whether a pinch (two fingers) or a wheel zoom is going on.
+    const downs = new Map();
+    let multi = false, tapCand = null;
+    this.lastWheel = 0;
+    el.addEventListener('wheel', () => { this.lastWheel = performance.now(); tapCand = null; }, { passive: true, capture: true });
     const setRay = (e) => {
       const r = el.getBoundingClientRect();
       ndc.set(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1);
@@ -850,19 +868,32 @@ class App {
       ptr.alt = !!e.altKey;
     };
     el.addEventListener('pointerdown', (e) => {
-      if (this.renderer.xr.isPresenting) return;
-      if (active !== null) {
-        // A second finger shortly after the first means pinch-zoom, not drawing.
-        if (e.pointerType === 'touch' && performance.now() - activeAt < 250) {
+      if (this.renderer.xr.isPresenting || this.forwarding) return;
+      downs.set(e.pointerId, { x: e.clientX, y: e.clientY, type: e.pointerType });
+      if (downs.size >= 2) {
+        // Two fingers: zoom (or pan). Modeling and selection pause until
+        // every finger is lifted, and lifting them never places or selects.
+        multi = true;
+        tapCand = null;
+        if (active !== null) {
+          const id = active, first = downs.get(id);
           this.activeTools.cancel(ptr);
           active = null;
+          try { el.releasePointerCapture(id); } catch { /* ignore */ }
+          // Hand the first finger to the view controls so the pinch zooms.
+          if (first && this.space === 'solids') {
+            this.forwarding = true;
+            try { el.dispatchEvent(new PointerEvent('pointerdown', { pointerId: id, pointerType: first.type, clientX: first.x, clientY: first.y, isPrimary: true, bubbles: true, button: 0, buttons: 1 })); } finally { this.forwarding = false; }
+          }
         }
-        e.stopImmediatePropagation();
         return;
       }
+      multi = false;
       if (e.pointerType === 'mouse' && e.button !== 0) return;
+      tapCand = { id: e.pointerId, x: e.clientX, y: e.clientY, t: performance.now(), free: true };
       setRay(e);
       if (this.activeTools.down(ptr)) {
+        tapCand.free = false;
         active = e.pointerId;
         activeAt = performance.now();
         try { el.setPointerCapture(e.pointerId); } catch { /* ignore */ }
@@ -871,6 +902,8 @@ class App {
       }
     });
     el.addEventListener('pointermove', (e) => {
+      const d = downs.get(e.pointerId);
+      if (d) { d.x = e.clientX; d.y = e.clientY; }
       if (e.pointerId === active) {
         setRay(e);
         this.activeTools.move(ptr);
@@ -889,8 +922,25 @@ class App {
       active = null;
       e.stopImmediatePropagation();
     };
+    // A tap: one finger or button, down and up in place, no zoom around it.
+    el.addEventListener('pointerup', (e) => {
+      if (this.forwarding) return;
+      const c = tapCand;
+      downs.delete(e.pointerId);
+      if (!downs.size) multi = false;
+      if (!c || c.id !== e.pointerId) return;
+      tapCand = null;
+      if (!c.free || multi || this.space !== 'solids' || this.renderer.xr.isPresenting) return;
+      if (Math.hypot(e.clientX - c.x, e.clientY - c.y) > 8 || performance.now() - c.t > 700) return;
+      if (performance.now() - this.lastWheel < 300) return;
+      setRay(e);
+      this.solids.tap(ptr);
+    }, true);
     el.addEventListener('pointerup', end);
     el.addEventListener('pointercancel', (e) => {
+      downs.delete(e.pointerId);
+      if (!downs.size) multi = false;
+      if (tapCand && tapCand.id === e.pointerId) tapCand = null;
       if (e.pointerId !== active) return;
       this.activeTools.cancel(ptr);
       active = null;
@@ -907,14 +957,14 @@ class App {
       if ((e.ctrlKey || e.metaKey) && e.altKey && k === 'n') { e.preventDefault(); this.solidsUI?.newProject(); return; }
       if (e.ctrlKey || e.metaKey || e.altKey) return;
       if (this.space === 'solids') {
-        const sm = { 1: 'build', 2: 'shape', 3: 'net', b: 'build', s: 'shape', n: 'net', o: 'open', e: 'edges', j: 'join', l: 'layout' };
-        if (sm[k]) this.solids.setTool(sm[k]);
-        else if (k === 'i' || k === 't') this.solids.setNavTurn();
-        else if (k === 'f') this.solids.fitAll();
+        if (k === 'escape') { if (!this.solids.cancelPlacing() && this.solids.state.mtool) this.solids.setModeTool(this.solids.state.mtool); return; }
+        if (k === '1') { this.solids.setMode('shape'); return; }
+        if (k === '2') { this.solids.setMode('solid'); return; }
+        if (k === 'f') this.solids.fitAll();
         else if (k === '.') this.solids.focusSelected();
         else if (k === '0' || k === 'home') this.solids.resetView();
-        else if (k === 'u') this.solids.unfoldAll();
-        else if (k === 'r') this.solids.refoldAll();
+        else if (k === 'u') this.solids.topUnfold();
+        else if (k === 'r') this.solids.topRefold();
         else if (k.startsWith('arrow') && !this.solids.tools.isBusy()) {
           // Arrow keys turn the view in every tool.
           e.preventDefault();

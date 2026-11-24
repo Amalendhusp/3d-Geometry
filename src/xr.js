@@ -279,6 +279,8 @@ export class XRInput {
       const w = app.pickActive(slot.ray);
       if (w) cands.push({ kind: 'work', hit: w, distance: w.distance, point: w.point, normal: w.normal });
     }
+    // Placing a shape or solid: the empty work surface is a target too.
+    if (!cands.length && !slot.held && app.space === 'solids' && app.solids.placing) return { kind: 'work', hit: null, distance: Infinity };
     if (!cands.length) return { kind: null };
     cands.sort((a, b) => a.distance - b.distance);
     return cands[0];

@@ -418,6 +418,62 @@
     .pop { animation: none; }
     .toolsheet { transition: none; }
   }
+
+  /* ---------- One workspace (v0.16): compact floating toolbars ---------- */
+  body.ws #projectBar, body.ws #projectMenu, body.ws #diagChips, body.ws #sessionBar, body.ws #navBar, body.ws #undoBar,
+  body.ws #bottomBar, body.ws #issueCard, body.ws #infoPanel, body.ws #altCard { display: none !important; }
+  .ws-menubar { position: fixed; z-index: 8; left: var(--gap); top: calc(env(safe-area-inset-top, 0px) + 10px); display: flex; align-items: center; gap: 4px; padding: 4px; max-width: 46vw; }
+  .ws-menubar button { min-height: 40px; min-width: 40px; }
+  .ws-name { padding: 0 8px 0 2px; font-weight: 700; font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .ws-name .dirty { color: var(--saffron); font-weight: 500; font-size: 12px; margin-left: 6px; }
+  .ws-menu { position: fixed; z-index: 30; left: var(--gap); top: calc(env(safe-area-inset-top, 0px) + 62px); width: min(300px, calc(100vw - 2 * var(--gap))); padding: 6px; display: flex; flex-direction: column; gap: 2px; max-height: calc(100vh - 90px); overflow: auto; }
+  .ws-menu > button { justify-content: flex-start; width: 100%; min-height: 40px; gap: 10px; }
+  .ws-sep { height: 1px; background: var(--glass-edge); margin: 4px 6px; }
+  .ws-mlabel { font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; opacity: 0.7; padding: 6px 8px 2px; }
+  .ws-seg { display: flex; gap: 2px; padding: 3px; border-radius: 11px; background: rgba(255, 255, 255, 0.06); }
+  .ws-seg button { flex: 1; min-height: 36px; font-size: 12.5px; padding: 0 6px; }
+  .ws-top { position: fixed; z-index: 7; left: 50%; transform: translateX(-50%); top: calc(env(safe-area-inset-top, 0px) + 10px); display: flex; gap: 2px; padding: 4px; }
+  .ws-top button, .ws-session button { min-height: 40px; min-width: 40px; padding: 0 10px; gap: 6px; font-size: 13px; }
+  .ws-session { position: fixed; z-index: 7; right: var(--gap); top: calc(env(safe-area-inset-top, 0px) + 10px); display: flex; gap: 2px; padding: 4px; }
+  .ws-session button[aria-pressed="true"] { background: rgba(255, 255, 255, 0.14); color: var(--washi); }
+  .ws-session button.unavailable { opacity: 0.5; }
+  .ws-left, .ws-right { position: fixed; z-index: 7; top: 50%; transform: translateY(-50%); display: flex; flex-direction: column; gap: 8px; }
+  .ws-left { left: var(--gap); }
+  .ws-right { right: var(--gap); }
+  .ws-col { display: flex; flex-direction: column; gap: 2px; padding: 4px; }
+  .ws-col button { min-width: 44px; min-height: 44px; padding: 0; position: relative; }
+  .ws-col button svg.i { width: 22px; height: 22px; }
+  .ws-col button.later, .ws-col button[aria-disabled="true"] { opacity: 0.42; }
+  .ws-col button:disabled { opacity: 0.35; }
+  .ws-pick[aria-pressed="true"] { background: var(--saffron); color: var(--ink); }
+  .ws-pick::after { content: ''; position: absolute; right: 4px; bottom: 4px; border: 4px solid transparent; border-right-color: currentColor; border-bottom-color: currentColor; opacity: 0.55; }
+  .ws-badge { position: absolute; right: 2px; top: 2px; min-width: 16px; height: 16px; border-radius: 8px; background: #3f9b5a; color: #fff; font-size: 10px; font-weight: 700; display: grid; place-items: center; padding: 0 3px; }
+  .ws-badge.bad { background: #d8452f; }
+  .ws-pickerpanel { position: fixed; z-index: 30; display: grid; grid-template-columns: repeat(2, 1fr); gap: 4px; padding: 6px; }
+  .ws-pickerpanel button { min-height: 48px; min-width: 120px; justify-content: flex-start; gap: 8px; padding: 0 10px; font-size: 13px; }
+  .ws-pop { position: fixed; z-index: 20; right: calc(var(--gap) + 62px); width: min(330px, calc(100vw - 2 * var(--gap) - 62px)); max-height: 46vh; overflow: auto; padding: 10px 12px; font-size: 13px; line-height: 1.45; }
+  .ws-pop h3 { margin: 0 0 6px; font-size: 13px; }
+  .ws-pop ul { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 4px; }
+  .ws-pop li button { width: 100%; justify-content: flex-start; text-align: left; white-space: normal; min-height: 36px; padding: 6px 8px; background: rgba(255, 255, 255, 0.06); line-height: 1.3; }
+  .ws-tabs { position: fixed; z-index: 7; left: 50%; transform: translateX(-50%); bottom: calc(env(safe-area-inset-bottom, 0px) + 12px); display: flex; gap: 4px; padding: 4px; }
+  .ws-tabs button { min-height: 48px; min-width: 150px; gap: 8px; font-size: 14px; font-weight: 600; }
+  .ws-tabs .dim2 { opacity: 0.65; font-weight: 500; }
+  body.ws #toast { bottom: calc(env(safe-area-inset-bottom, 0px) + 78px); }
+  @media (max-width: 640px) {
+    .ws-top .lbl, .ws-session .lbl { display: none; }
+    .ws-top { left: calc(var(--gap) + 54px); transform: none; }
+    .ws-top button, .ws-session button { padding: 0; min-width: 38px; min-height: 38px; }
+    .ws-name { max-width: 80px; font-size: 12px; }
+    .ws-menubar { max-width: none; }
+    .ws-name { display: none; }
+    .ws-tabs button { min-width: 0; flex: 1; padding: 0 14px; }
+    .ws-tabs { left: 12px; right: 12px; transform: none; }
+    .ws-col button { min-width: 42px; min-height: 42px; }
+    .ws-pickerpanel button { min-width: 0; }
+    .ws-pop { right: calc(var(--gap) + 58px); }
+    body.ws #toast { max-width: calc(100vw - 130px); font-size: 13px; }
+  }
+  @media (prefers-reduced-motion: reduce) { .ws-menu, .ws-pop, .ws-pickerpanel { animation: none; } }
 </style>
 <script type="importmap">
 {
@@ -458,6 +514,32 @@
   <symbol id="i-surface" viewBox="0 0 24 24"><path d="M4 17 9 6l6 4 5-3v10z"/><circle cx="9" cy="6" r="1.6"/><circle cx="15" cy="10" r="1.6"/></symbol>
   <symbol id="i-net" viewBox="0 0 24 24"><path d="M3 14h6v6H3zM9 14h6v6H9zM9 8h6v6H9zM15 8h6v6h-6z"/></symbol>
   <symbol id="i-chev" viewBox="0 0 24 24"><path d="m7 14 5-5 5 5"/></symbol>
+  <symbol id="s-tri" viewBox="0 0 24 24"><path d="M12 4 21 19H3Z"/></symbol>
+  <symbol id="s-square" viewBox="0 0 24 24"><rect x="5" y="5" width="14" height="14" rx="0.5"/></symbol>
+  <symbol id="s-pent" viewBox="0 0 24 24"><path d="M12 3.5 20.5 9.7 17.3 19.6H6.7L3.5 9.7Z"/></symbol>
+  <symbol id="s-hex" viewBox="0 0 24 24"><path d="M7.5 4.2h9L21 12l-4.5 7.8h-9L3 12Z"/></symbol>
+  <symbol id="s-oct" viewBox="0 0 24 24"><path d="M8.7 3.5h6.6l4.7 4.7v6.6l-4.7 4.7H8.7L4 14.8V8.2Z"/></symbol>
+  <symbol id="s-dec" viewBox="0 0 24 24"><path d="M9.5 3.3h5l4 2.9 1.6 4.8-1.6 4.8-4 2.9h-5l-4-2.9L3.9 11l1.6-4.8Z" transform="translate(0 1)"/></symbol>
+  <symbol id="p-cube" viewBox="0 0 24 24"><path d="M12 3 20 7.5v9L12 21l-8-4.5v-9Z"/><path d="M4 7.5 12 12l8-4.5M12 12v9"/></symbol>
+  <symbol id="p-tetra" viewBox="0 0 24 24"><path d="M12 3 21 19H3Z"/><path d="M12 3 13.5 14 21 19M13.5 14 3 19"/></symbol>
+  <symbol id="p-octa" viewBox="0 0 24 24"><path d="M12 2.5 20.5 12 12 21.5 3.5 12Z"/><path d="M3.5 12 10 14.5 20.5 12M10 14.5 12 2.5M10 14.5 12 21.5"/></symbol>
+  <symbol id="p-cubocta" viewBox="0 0 24 24"><path d="M8 3.5h8l4.5 8.5-4.5 8.5H8L3.5 12Z"/><path d="M8 3.5 12 8l4-4.5M3.5 12H20.5M8 20.5 12 16l4 4.5M12 8v8"/></symbol>
+  <symbol id="i-gallery" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="m3 16 5-5 4 4 3-3 6 6"/><circle cx="16" cy="9" r="1.6"/></symbol>
+  <symbol id="t-modify" viewBox="0 0 24 24"><path d="M4 18 10 6l8 4-6 10Z"/><circle cx="18" cy="10" r="2.2"/></symbol>
+  <symbol id="t-remove" viewBox="0 0 24 24"><path d="M5 7h14M9 7V4.5h6V7M7 7l1 13h8l1-13"/></symbol>
+  <symbol id="t-move" viewBox="0 0 24 24"><path d="M12 3v18M3 12h18M12 3 9.5 5.5M12 3l2.5 2.5M12 21l-2.5-2.5M12 21l2.5-2.5M3 12l2.5-2.5M3 12l2.5 2.5M21 12l-2.5-2.5M21 12l-2.5 2.5"/></symbol>
+  <symbol id="t-rotate" viewBox="0 0 24 24"><path d="M19 12a7 7 0 1 1-2.1-5"/><path d="M17.5 3v4.2h-4.2"/></symbol>
+  <symbol id="t-fold" viewBox="0 0 24 24"><path d="M3 19h9l-5-9H3Z"/><path d="M12 19 19 7h-5l-7 3"/></symbol>
+  <symbol id="t-cut" viewBox="0 0 24 24"><circle cx="6.5" cy="17.5" r="2.5"/><circle cx="17.5" cy="17.5" r="2.5"/><path d="M8.3 15.7 18 4M15.7 15.7 6 4"/></symbol>
+  <symbol id="t-mirror" viewBox="0 0 24 24"><path d="M12 3v18" stroke-dasharray="2 2"/><path d="M9 7 4 17h5ZM15 7l5 10h-5Z"/></symbol>
+  <symbol id="t-3d" viewBox="0 0 24 24"><path d="M12 4 19 8v8l-7 4-7-4V8Z"/><path d="M5 8l7 4 7-4M12 12v8" stroke-dasharray="2 2"/></symbol>
+  <symbol id="t-2d" viewBox="0 0 24 24"><path d="M9 3h6v6h6v6h-6v6H9v-6H3V9h6Z"/></symbol>
+  <symbol id="a-unfold" viewBox="0 0 24 24"><path d="M3 18h18"/><path d="M12 18V9M12 9 8 13M12 9l4 4M5 14 9 6h6l4 8"/></symbol>
+  <symbol id="a-refold" viewBox="0 0 24 24"><path d="M5 18 12 5l7 13Z"/><path d="M12 5v13"/></symbol>
+  <symbol id="a-arrange" viewBox="0 0 24 24"><rect x="3" y="4" width="7" height="7" rx="1"/><rect x="14" y="4" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></symbol>
+  <symbol id="a-alt" viewBox="0 0 24 24"><path d="M4 8h13l-3-3M20 16H7l3 3"/></symbol>
+  <symbol id="w-web" viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="12" rx="2"/><path d="M8 20h8M12 17v3"/></symbol>
+  <symbol id="w-ar" viewBox="0 0 24 24"><path d="M4 8V5h3M17 5h3v3M20 16v3h-3M7 19H4v-3"/><path d="M12 7l4.5 2.5v5L12 17l-4.5-2.5v-5Z"/></symbol>
 </svg>
 
 <div class="glass tl" id="projectBar">
@@ -524,6 +606,72 @@
   <button type="button" id="vrBtn"><svg class="i"><use href="#i-vr"/></svg><span><span class="t">Enter&nbsp;</span>VR</span></button>
 </div>
 
+
+<!-- One workspace: Shape (2D) and Solid (3D) -->
+<div class="glass ws-menubar" id="wsMenuBar">
+  <button type="button" class="iconbtn" id="wsMenuBtn" aria-haspopup="menu" aria-expanded="false" aria-controls="wsMenu" title="Menu"><svg class="i"><use href="#i-menu"/></svg><span class="sr">Menu</span></button>
+  <span class="ws-name" id="wsName">Untitled</span>
+</div>
+<div class="glass ws-menu pop" id="wsMenu" role="menu" hidden>
+  <button role="menuitem" id="wsNew"><svg class="i"><use href="#i-new"/></svg>New</button>
+  <button role="menuitem" id="wsOpen"><svg class="i"><use href="#i-open"/></svg>Open…</button>
+  <button role="menuitem" id="wsSave"><svg class="i"><use href="#i-save"/></svg>Save</button>
+  <button role="menuitem" id="wsSaveAs"><svg class="i"><use href="#i-save"/></svg>Save As…</button>
+  <button role="menuitem" id="wsExport"><svg class="i"><use href="#i-export"/></svg>Export…</button>
+  <button role="menuitem" id="wsImport"><svg class="i"><use href="#i-import"/></svg>Import…</button>
+  <div class="ws-sep"></div>
+  <div class="ws-mlabel">Scene · Worksurface</div>
+  <div class="ws-seg" role="group" aria-label="Worksurface">
+    <button type="button" data-surface="mat">On Cutting Mat</button><button type="button" data-surface="plain">On Table</button><button type="button" data-surface="hidden">No Table</button>
+  </div>
+  <div class="ws-mlabel">Scene · View</div>
+  <div class="ws-seg" role="group" aria-label="View">
+    <button type="button" data-env="terrace">Mountain Terrace</button><button type="button" data-env="studio">Studio</button>
+  </div>
+  <div class="ws-sep"></div>
+  <button role="menuitem" id="wsHelp"><svg class="i"><use href="#i-help"/></svg>Help</button>
+  <input id="wsImportFile" type="file" accept=".json,.obj,.glb,.svg,application/json,model/gltf-binary,image/svg+xml" hidden>
+</div>
+
+<div class="glass ws-top" id="wsTop" role="toolbar" aria-label="Net">
+  <button type="button" id="wsUnfold" title="Unfold: lay every object flat as its net"><svg class="i"><use href="#a-unfold"/></svg><span class="lbl">Unfold</span></button>
+  <button type="button" id="wsRefold" title="Refold: fold every net that can close into its solid"><svg class="i"><use href="#a-refold"/></svg><span class="lbl">Refold</span></button>
+  <button type="button" id="wsArrange" title="Arrange: lay the net out in order on the surface, for printing or SVG"><svg class="i"><use href="#a-arrange"/></svg><span class="lbl">Arrange</span></button>
+  <button type="button" id="wsAlternate" title="Alternate: switch the net to another valid arrangement"><svg class="i"><use href="#a-alt"/></svg><span class="lbl">Alternate</span></button>
+</div>
+
+<div class="glass ws-session" id="wsSession" role="group" aria-label="Web, AR or VR">
+  <button type="button" data-session="web" aria-pressed="true" title="Web: this screen (phone or desktop)"><svg class="i"><use href="#w-web"/></svg><span class="lbl">Web</span></button>
+  <button type="button" data-session="ar" title="AR: show the object in augmented reality"><svg class="i"><use href="#w-ar"/></svg><span class="lbl">AR</span></button>
+  <button type="button" data-session="vr" title="VR: open on a connected VR headset"><svg class="i"><use href="#i-vr"/></svg><span class="lbl">VR</span></button>
+</div>
+
+<aside class="ws-left" id="wsLeft" aria-label="Add">
+  <div class="glass ws-col">
+    <button type="button" id="wsPicker" class="ws-pick" title="Shapes: tap to place a square" aria-haspopup="true"><svg class="i"><use href="#s-square"/></svg><span class="sr" id="wsPickerName">Square</span></button>
+    <button type="button" id="wsGallery" title="From Gallery: add a copy of a saved model (next stage)" aria-disabled="true" class="later"><svg class="i"><use href="#i-gallery"/></svg><span class="sr">From Gallery</span></button>
+  </div>
+  <div class="glass ws-col">
+    <button type="button" id="wsUndo" title="Undo (Ctrl+Z)"><svg class="i"><use href="#i-undo"/></svg><span class="sr">Undo</span></button>
+    <button type="button" id="wsRedo" title="Redo (Ctrl+Shift+Z)"><svg class="i"><use href="#i-redo"/></svg><span class="sr">Redo</span></button>
+  </div>
+</aside>
+<div class="glass ws-pickerpanel pop" id="wsPickerPanel" hidden></div>
+
+<aside class="ws-right" id="wsRight" aria-label="Tools">
+  <div class="glass ws-col" id="wsTools" role="toolbar" aria-label="Tools"></div>
+  <div class="glass ws-col">
+    <button type="button" id="wsInfoBtn" aria-expanded="false" title="Info: counts in the workspace"><svg class="i"><use href="#i-info"/></svg><span class="sr">Info</span></button>
+    <button type="button" id="wsErrBtn" aria-expanded="false" title="Error: issues in the current mode"><svg class="i"><use href="#i-warn"/></svg><span class="ws-badge" id="wsErrCount">0</span><span class="sr">Error</span></button>
+  </div>
+</aside>
+<div class="glass ws-pop pop" id="wsInfo" hidden></div>
+<div class="glass ws-pop pop" id="wsErrors" hidden></div>
+
+<nav class="glass ws-tabs" id="wsTabs" aria-label="Modeling mode">
+  <button type="button" data-mode="shape" aria-pressed="true"><svg class="i"><use href="#s-square"/></svg>Shape <span class="dim2">(2D)</span></button>
+  <button type="button" data-mode="solid" aria-pressed="false"><svg class="i"><use href="#p-cube"/></svg>Solid <span class="dim2">(3D)</span></button>
+</nav>
 <div id="toast" role="status" aria-live="polite"></div>
 
 <nav class="glass navbar" id="navBar" aria-label="View">

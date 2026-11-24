@@ -78,6 +78,36 @@ export class Composition {
     // Merged panels: groups of coplanar adjoining faces ("solid:face" ids)
     // that form one convex panel.
     this.merge = [];
+    // Shape (2D) pieces: flat polygons placed on the work surface or
+    // attached edge to edge. `verts` are where the corners are at rest (flat
+    // while the net is being built; the closed form once it has closed).
+    this.pieces = [];
+    // Free edges glued together by folding (they snapped): pairs of
+    // "panel id#edge index".
+    this.seams = [];
+  }
+
+  isEmpty() { return !this.solids.length && !this.pieces.length; }
+
+  addPiece(n, verts) {
+    const pc = { id: this.nextId++, n, verts: verts.map((v) => v.clone()) };
+    this.pieces.push(pc);
+    return pc;
+  }
+
+  piece(id) { return this.pieces.find((p) => p.id === id) || null; }
+
+  removePiece(id) {
+    this.pieces = this.pieces.filter((p) => p.id !== id);
+    this.seams = this.seams.filter(([a, b]) => !a.startsWith(`${id}:`) && !b.startsWith(`${id}:`));
+  }
+
+  // A piece as a face, in the same form as a solid's face.
+  pieceFace(pc) {
+    const verts = pc.verts.map((v) => v.clone());
+    const normal = polyNormal(verts);
+    const centroid = verts.reduce((a, v) => a.add(v), new THREE.Vector3()).divideScalar(verts.length);
+    return { solid: { id: pc.id, type: 'piece', piece: true }, fi: 0, verts, normal, centroid, sides: verts.length };
   }
 
   isEdited() { return this.edits.size > 0 || this.tri.size > 0 || this.merge.length > 0; }
@@ -89,7 +119,7 @@ export class Composition {
   // Faces of all solids after the shape change. A linear stretch keeps
   // every face planar and maps equal vertices to equal vertices.
   shapedFaces(shape = this.shape, edits = this.edits, tri = this.tri) {
-    const faces = this.solids.flatMap((s) => s.worldFaces());
+    const faces = this.solids.flatMap((s) => s.worldFaces()).concat(this.pieces.map((pc) => this.pieceFace(pc)));
     if (!(Math.abs(shape.x - 1) < 1e-12 && Math.abs(shape.y - 1) < 1e-12 && Math.abs(shape.z - 1) < 1e-12)) {
       const S = this.shapeMatrix(shape);
       const N = new THREE.Matrix3().getNormalMatrix(S);
@@ -134,6 +164,8 @@ export class Composition {
     if (this.edits.size) out.edits = [...this.edits].map(([k, v]) => [k, ...v.toArray().map((x) => Math.round(x * 1e9) / 1e9)]);
     if (this.tri.size) out.tri = [...this.tri].map(([k, d]) => (Array.isArray(d[0]) ? [k, d.map((x) => [x[0], x[1]])] : [k, d[0], d[1]]));
     if (this.merge.length) out.merge = this.merge.map((g) => g.slice());
+    if (this.pieces.length) out.pieces = this.pieces.map((pc) => ({ id: pc.id, n: pc.n, v: pc.verts.flatMap((v) => v.toArray().map((x) => Math.round(x * 1e12) / 1e12)) }));
+    if (this.seams.length) out.seams = this.seams.map((x) => x.slice());
     return out;
   }
 
@@ -153,20 +185,33 @@ export class Composition {
       }
     }
     this.merge = Array.isArray(data.merge) ? data.merge.filter((g) => Array.isArray(g) && g.length >= 2 && g.every((x) => typeof x === 'string')).map((g) => g.slice()) : [];
+    this.pieces = [];
+    if (Array.isArray(data.pieces)) {
+      for (const d of data.pieces) {
+        if (!d || !Number.isInteger(d.id) || !Array.isArray(d.v) || d.v.length < 9 || d.v.length % 3 || !d.v.every(Number.isFinite)) continue;
+        const verts = [];
+        for (let i = 0; i < d.v.length; i += 3) verts.push(new THREE.Vector3(d.v[i], d.v[i + 1], d.v[i + 2]));
+        this.pieces.push({ id: d.id, n: d.n || verts.length, verts });
+      }
+    }
+    this.seams = Array.isArray(data.seams) ? data.seams.filter((x) => Array.isArray(x) && x.length === 2 && x.every((k) => typeof k === 'string')).map((x) => x.slice()) : [];
   }
 
   // Lowest point of all solids (y).
   minY() {
     let y = Infinity;
     for (const s of this.solids) for (const v of s.worldVerts()) y = Math.min(y, v.y);
+    for (const pc of this.pieces) for (const v of pc.verts) y = Math.min(y, v.y);
     return y;
   }
 
-  // Shift every solid so the composition rests on y = 0.
+  // Shift everything so the composition rests on y = 0.
   settle() {
-    if (!this.solids.length) return;
+    if (this.isEmpty()) return;
     const dy = -this.minY();
+    if (Math.abs(dy) < 1e-12) return;
     for (const s of this.solids) s.position.y += dy;
+    for (const pc of this.pieces) for (const v of pc.verts) v.y += dy;
   }
 
   // Which existing solid (if any) a pose would overlap.
