@@ -553,8 +553,8 @@ export class SolidsWorkspace {
   material(side, parity, state, type = 'cube') {
     const key = `${side}|${type}|${parity}|${state}`;
     if (this.matCache.has(key)) return this.matCache.get(key);
-    const tint = { none: null, selected: '#f0b44c', moving: '#ffd27a', overlap: '#ff2a12', solid: '#4a8cff', face: '#f0b44c', hover: '#5aa0ff', issue: COLORS.issue, issueInfo: COLORS.issueInfo, snap: '#2fd07a' }[state];
-    const strength = { none: 0, selected: 0.38, moving: 0.18, overlap: 0.55, solid: 0.25, face: 0.45, hover: 0.22, issue: 0.55, issueInfo: 0.4, snap: 0.5 }[state];
+    const tint = { none: null, selected: '#f0b44c', moving: '#ffd27a', overlap: '#ff2a12', solid: '#4a8cff', face: '#f0b44c', hover: '#5aa0ff', issue: COLORS.issue, issueInfo: COLORS.issueInfo, snap: '#2fd07a', detach: '#ff9b3d' }[state];
+    const strength = { none: 0, selected: 0.38, moving: 0.18, overlap: 0.55, solid: 0.25, face: 0.45, hover: 0.22, issue: 0.55, issueInfo: 0.4, snap: 0.5, detach: 0.4 }[state];
     const m = new THREE.MeshStandardMaterial({
       color: side === 'out' ? (TEMPLATES[type] || PIECE_STYLE).colors[parity] : COLORS.inside,
       roughness: 0.85,

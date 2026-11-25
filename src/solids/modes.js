@@ -2,7 +2,8 @@ import * as THREE from 'three';
 import { SolidsWorkspace, SolidsTools } from './workspace.js';
 import { template, TEMPLATES, restHeight } from './polyhedra.js';
 import { SHAPES, shapeByKey, shapeName, regularPolygon, attachedPolygon, rigidFrom, matchClosure } from './pieces.js';
-import { Solid, alignFace, isConvexLoop } from './composition.js';
+import { Solid, alignFace, isConvexLoop, polyNormal } from './composition.js';
+import { Shell } from './shell.js';
 import { solvePlanar, checkForm } from './vertexedit.js';
 
 // One workspace, two modeling modes. Shape (2D) builds and folds nets from
@@ -24,7 +25,7 @@ export const MODE_TOOLS = {
   shape: [
     { key: 'modify', name: 'Modify', tip: 'Drag a corner or an edge to reshape it, flat or folded; faces stay flat and it stops at the last valid position' },
     { key: 'remove', name: 'Remove', tip: 'Tap a face to remove it, or the edge between two faces to merge them' },
-    { key: 'move', name: 'Move', tip: 'Drag a shape or net piece to move it; near a matching free edge it snaps on (both edges green) and joins with a hinge on release' },
+    { key: 'move', name: 'Move', tip: 'Drag a net to move it with everything hinged to it; near a matching free edge it snaps on and joins with a hinge. After Cut, drag the freed part away' },
     { key: 'rotate', name: 'Rotate', tip: 'Drag a piece to turn it as a whole; its connections and folds stay' },
     { key: 'fold', name: 'Fold', tip: 'Drag a panel to swing it about its hinge; free edges that meet snap together' },
     { key: 'cut', name: 'Cut', tip: 'Tap a hinge to cut it (dashed); tap it again to make it a hinge' },
@@ -34,7 +35,7 @@ export const MODE_TOOLS = {
   solid: [
     { key: 'modify', name: 'Modify', tip: 'Drag a corner or an edge of a solid to reshape it; faces stay flat and it stops at the last valid position' },
     { key: 'remove', name: 'Remove', tip: 'Tap a solid to remove it' },
-    { key: 'move', name: 'Move', tip: 'Drag a solid to move it; over a matching face of another solid it snaps into place (green) and attaches on release' },
+    { key: 'move', name: 'Move', tip: 'Drag a solid to move it; over a matching face of another it snaps on and attaches. Tap one solid of a joined group to detach it, then drag it away' },
     { key: 'rotate', name: 'Rotate', tip: 'Drag a solid to turn it freely in any direction, like turning it in your hand' },
     { key: 'mirror', name: 'Mirror', tip: 'Not yet available: mirror across a face with a preview and a tick to confirm (next stage)', later: true },
     { key: 'preview', name: '2D', tip: 'Not yet available: preview of the net (next stage)', later: true },
@@ -278,6 +279,7 @@ W.setMode = function (m) {
   this.state.mtool = null;
   this.state.tool = 'select';
   this.selComp = null;
+  this.detach = null;
   this.modeIssues = [];
   const before = this.snapshot();
   const r = m === 'solid' ? this.foldClosable() : this.unfoldClosed();
@@ -393,11 +395,39 @@ W.closeByLibrary = function (comp) {
   return { ok: true, type: r.type };
 };
 
-// Arrange: everything flat on the surface, pieces side by side.
+// Arrange. Shape: everything flat on the surface, pieces side by side.
+// Solid: every object set down on the surface as it is, turned however
+// you left it, moved straight down (or up) until its lowest point touches.
 W.arrangeAll = function () {
   if (this.comp.isEmpty()) { this.app.toast('Nothing to arrange yet.'); return; }
-  this.tools.finishAll(); this.placing = null; this.hidePlacePreview();
+  this.tools.finishAll(); this.placing = null; this.hidePlacePreview(); this.clearDetach();
+  if (this.state.mode === 'solid') { this.setDownAll(); return; }
   this.layFlat({ arrange: true });
+};
+
+W.setDownAll = function () {
+  const sh = this.shell;
+  const before = this.snapshot();
+  const tol = this.edgeLen * 1e-6;
+  // Lowest first, so that what sits low is set down before what is above it.
+  const objs = sh.pieces().map((c) => ({ ids: c.map((p) => p.id), low: this.lowestY(c) })).sort((a, b) => a.low - b.low);
+  let moved = 0;
+  const stuck = [];
+  for (const o of objs) {
+    if (Math.abs(o.low) < tol) continue;
+    const comp = o.ids.map((id) => sh.panelById.get(id)).filter(Boolean);
+    if (!comp.length) continue;
+    const T = new THREE.Matrix4().makeTranslation(0, -o.low, 0);
+    const job = this.moveStart(comp, new THREE.Vector3());
+    const bad = this.snapProblem(job, T);
+    if (bad) { stuck.push(bad.replace(/^it /, '')); continue; }
+    this.transformComponent(comp, T);
+    moved++;
+  }
+  if (moved) this.pushHistory(before);
+  const tail = stuck.length ? ` ${stuck.length} object${stuck.length === 1 ? ' stays where it is: it' : 's stay where they are: they'} ${stuck[0]}.` : '';
+  this.app.toast(moved ? `Set ${moved} object${moved === 1 ? '' : 's'} down on the surface, turned as ${moved === 1 ? 'it was' : 'they were'}: moved straight down until the lowest point touches.${tail}` : `Everything already rests on the surface.${tail}`, 5000);
+  this.app.notify?.();
 };
 
 // Alternate: another valid net for the solids. Nets built by hand keep
@@ -419,6 +449,7 @@ W.setModeTool = function (key) {
   this.placing = null;
   this.hidePlacePreview();
   this.modHover = null; this.modHoverKey = '';
+  this.clearDetach(false);
   if (this.state.mtool === key) { this.state.mtool = null; this.state.tool = 'select'; this.app.toast(`${t.name} off.`); this.refreshStyles(); this.app.notify?.(); return; }
   this.state.mtool = key;
   const internal = { fold: 'open', cut: 'edges', modify: 'modify2d', remove: 'remove', move: 'move', rotate: 'rotate' }[key];
@@ -469,6 +500,7 @@ W.tap = function (ptr) {
   if (this.placing) { this.placeAt(ptr); return; }
   const hit = ptr.pick();
   if (!hit || !hit.panel) {
+    if (this.detach) this.clearDetach();
     if (this.selComp) { this.selComp = null; this.refreshStyles(); this.app.notify?.(); }
     return;
   }
@@ -787,10 +819,10 @@ W.checkClosure = function (P) {
 
 // Move or turn a whole object: its rest form and its pose together, so
 // hinge angles and connections stay as they are.
-W.transformComponent = function (comp, R) {
+W.transformComponent = function (comp, R, pieces = null) {
   const ids = new Set(comp.map((p) => p.id));
   const solidIds = new Set(comp.filter((p) => !this.isPiecePanel(p)).map((p) => p.solidId));
-  const pcs = this.objectPieces(comp);
+  const pcs = pieces || this.objectPieces(comp);
   const Rinv = R.clone().invert();
   const q = new THREE.Quaternion().setFromRotationMatrix(R);
   this.rebuildKeep((st) => {
@@ -807,7 +839,7 @@ W.transformComponent = function (comp, R) {
 // a panel it joins.
 W.reframeComponent = function (comp, R, T, opts = {}) {
   const ids = new Set(comp.map((p) => p.id));
-  const pcs = this.objectPieces(comp);
+  const pcs = opts.pieces || this.objectPieces(comp);
   const Rinv = R.clone().invert();
   this.rebuildKeep((st) => {
     for (const pc of pcs) for (const v of pc.verts) v.applyMatrix4(R);
@@ -858,19 +890,32 @@ W.rayPanel = function (ray, skip) {
 };
 
 // What a Move drag needs, taken when it starts.
-W.moveStart = function (comp, grab) {
+W.moveStart = function (comp, grab, det = null) {
   const sh = this.shell;
   const moving = new Set(comp);
   const M0 = new Map(comp.map((p) => [p, p.M.clone()]));
   const start = new Map(comp.map((p) => [p, sh.worldPoly(p)]));
   const startN = new Map(comp.map((p) => [p, sh.worldNormal(p).normalize()]));
+  // A solid coming away from a join: its face at the join is hidden now but
+  // is part of it (it can attach elsewhere); the face it leaves is hidden
+  // too and will be exposed, so nothing may end up inside it.
+  let extras = null;
+  if (det && det.kind === 'solid') {
+    for (const pc of det.hidden) {
+      const face = { id: `inside:${pc.id}`, edges: [] };
+      start.set(face, pc.verts.map((v) => v.clone()));
+      startN.set(face, polyNormal(pc.verts));
+    }
+    extras = det.partners.map((pc) => ({ verts: pc.verts.map((v) => v.clone()), normal: polyNormal(pc.verts) }));
+  }
   // Free edges of the moving panels that lie flat on the surface (Shape).
   const movEdges = [];
   for (const p of comp) {
     if (startN.get(p).y > -0.9999) continue;
     p.edges.forEach((e, i) => { if (e.uses.length === 1 && !this.isSeamed(p, i)) movEdges.push({ p, i }); });
   }
-  return { comp, moving, ids: new Set(comp.map((p) => p.id)), M0, start, startN, movEdges, grab: grab.clone(),
+  return { comp, moving, ids: new Set(comp.map((p) => p.id)), M0, start, startN, movEdges, grab: grab.clone(), det, extras,
+    pieces: det ? det.pcs : null,
     canFace: this.restClosed(comp) && comp.every((p) => isIdentity(p.M)) };
 };
 
@@ -882,6 +927,10 @@ W.snapProblem = function (job, T) {
   let low = Infinity;
   for (const f of faces) for (const v of f.verts) low = Math.min(low, v.y);
   if (low < -this.edgeLen * 1e-4) return 'it would go below the work surface';
+  if (job.extras && job.extras.length) {
+    const inside = Shell.prototype.meets.call({ panels: job.extras, edgeLen: this.edgeLen, worldPoly: (p) => p.verts.map((v) => v.clone()), worldNormal: (p) => p.normal.clone() }, faces);
+    if (inside) return 'it would pass through the face it comes away from';
+  }
   const hit = this.shell.meets(faces, (p) => job.moving.has(p));
   if (!hit) return null;
   return this.state.mode === 'solid' ? `it would pass through face P${hit.no}` : `it would overlap face P${hit.no}`;
@@ -981,15 +1030,16 @@ W.commitSnap = function (job, snap, before) {
   if (snap.A) {
     const targetIds = snap.targetIds;
     const Bno = snap.B.no;
-    this.transformComponent(job.comp, snap.T);
+    const former = job.det ? job.det.wholeIds : new Set();
+    this.transformComponent(job.comp, snap.T, job.pieces);
     let joined = null;
     this.rebuildKeep(() => {}, {
       defaultNet: true,
       skip: (e) => {
         if (!joined) { joined = new Set(); const p0 = sh.panels.find((p) => ids.has(p.id)); if (p0) for (const q of this.componentOf(p0)) joined.add(q); }
-        return e.uses.some((u) => joined.has(u.panel));
+        return e.uses.some((u) => joined.has(u.panel) || former.has(u.panel.id));
       },
-      after: () => { for (const id of ids) sh.bases.delete(id); for (const c of sh.pieces()) if (!c.some((p) => sh.bases.has(p.id))) sh.chooseBasesFor(c); },
+      after: () => this.tidyBases(ids),
     });
     const mine = new Set(sh.panels.filter((p) => ids.has(p.id)));
     const bad = this.overlapsWith(mine);
@@ -1000,9 +1050,10 @@ W.commitSnap = function (job, snap, before) {
       return false;
     }
     this.pushHistory(before);
+    this.detach = null;
     this.selComp = new Set(this.componentOf([...mine][0]));
     this.refreshStyles();
-    this.app.toast(`Attached to face P${Bno}: ${this.objectText([...this.selComp])} are one object now (the faces that meet are inside it). Undo separates them.`, 5000);
+    this.app.toast(`${job.det ? 'Detached and attached' : 'Attached'} to face P${Bno}: ${this.objectText([...this.selComp])} are one object now (the faces that meet are inside it). Undo separates them.`, 5000);
     return true;
   }
   // Shape: join the two edges with a hinge. The moving object goes into the
@@ -1013,8 +1064,9 @@ W.commitSnap = function (job, snap, before) {
   const fno = snap.f.p.no, name = shapeName(snap.m.p.verts.length).toLowerCase();
   const many = job.comp.length > 1;
   this.reframeComponent(job.comp, R, snap.T, {
+    pieces: job.pieces || undefined,
     hinges: [key],
-    after: () => { for (const id of ids) sh.bases.delete(id); for (const c of sh.pieces()) if (!c.some((p) => sh.bases.has(p.id))) sh.chooseBasesFor(c); },
+    after: () => this.tidyBases(ids),
   });
   const e = sh.edges.find((x) => x.uses.length === 2 && pairKey(x) === key);
   const mine = new Set(sh.panels.filter((p) => ids.has(p.id)));
@@ -1025,9 +1077,134 @@ W.commitSnap = function (job, snap, before) {
     return false;
   }
   this.pushHistory(before);
+  this.detach = null;
   this.selComp = new Set(this.componentOf([...mine][0]));
   this.refreshStyles();
   this.app.toast(`Joined: the ${many ? 'net piece' : name} is hinged to the edge of P${fno}. Fold it with Fold; Undo separates them.`, 5000);
+  return true;
+};
+
+// One base (the panel a net opens around) per object: the moving one's
+// bases go when it joins another object; objects without one get one.
+W.tidyBases = function (drop = new Set()) {
+  const sh = this.shell;
+  for (const id of drop) sh.bases.delete(id);
+  for (const c of sh.pieces()) {
+    const bs = c.filter((p) => sh.bases.has(p.id));
+    if (!bs.length) sh.chooseBasesFor(c);
+    else for (const p of bs.slice(1)) sh.bases.delete(p.id);
+  }
+};
+
+// ---------------------------------------------- detaching a joined part
+
+// What comes away if you pull at P after a join. Solid: the solid P belongs
+// to (one placed polyhedron, or the form built from shapes), at every face
+// where it meets the others. Shape: the part hinged to P, along the cut
+// (dashed) edges that hold it to the rest. Null when nothing can come away.
+W.detachFor = function (P) {
+  const sh = this.shell;
+  const comp = this.componentOf(P);
+  if (this.state.mode === 'solid') {
+    const unit = this.solidUnit(P);
+    const own = new Set(unit.map((pc) => pc.id));
+    const part = comp.filter((p) => own.has(p.solidId));
+    if (!part.length || part.length === comp.length) return null;
+    const partIds = new Set(part.map((p) => p.id));
+    const ringKeys = new Set();
+    for (const p of part) for (const e of p.edges) if (e.uses.length === 2 && e.uses.some((u) => !partIds.has(u.panel.id))) ringKeys.add(pairKey(e));
+    const hidden = [], partners = [];
+    for (const it of sh.internal) {
+      const a = this.comp.piece(Number(String(it.a).split(':')[0])), b = this.comp.piece(Number(String(it.b).split(':')[0]));
+      if (!a || !b) continue;
+      if (own.has(a.id) && !own.has(b.id)) { hidden.push(a); partners.push(b); } else if (own.has(b.id) && !own.has(a.id)) { hidden.push(b); partners.push(a); }
+    }
+    const pc0 = unit[0];
+    const name = pc0.origin != null ? (TEMPLATES[pc0.kind]?.name || 'solid').toLowerCase() : 'form';
+    return { kind: 'solid', partIds, pcs: unit, ringKeys, hidden, partners, name, wholeIds: new Set(comp.map((p) => p.id)) };
+  }
+  const sec = [...sh.hingeComponent(P)];
+  if (sec.length === comp.length) return null;
+  const partIds = new Set(sec.map((p) => p.id));
+  const ringKeys = new Set();
+  for (const p of sec) for (const e of p.edges) if (e.uses.length === 2 && e.uses.some((u) => !partIds.has(u.panel.id))) ringKeys.add(pairKey(e));
+  const pcs = sec.map((p) => this.comp.piece(p.solidId)).filter(Boolean);
+  return { kind: 'shape', partIds, pcs, ringKeys, wholeIds: new Set(comp.map((p) => p.id)), name: sec.length === 1 ? shapeName(sec[0].verts.length).toLowerCase() : `section of ${sec.length} faces` };
+};
+
+W.clearDetach = function (redraw = true) {
+  if (!this.detach) return;
+  this.detach = null;
+  if (redraw) this.refreshStyles();
+};
+
+// Move tool, a tap on a face: choose what will come away (or, tapped again,
+// keep it joined). The part and the join show in orange.
+W.moveTap = function (P) {
+  const same = this.detach && this.detach.partIds.has(P.id);
+  this.clearDetach();
+  const solid = this.state.mode === 'solid';
+  if (same) { this.app.toast(solid ? 'Kept joined. Drag to move the whole object.' : 'Drag to move it.'); return; }
+  const d = this.detachFor(P);
+  if (!d) {
+    this.app.toast(solid
+      ? 'This solid is not joined to another. Drag it to move it, or onto a matching face of another solid to attach it.'
+      : this.componentOf(P).length === 1 ? 'Drag the piece to move it; near a matching free edge of another piece it snaps on.'
+        : 'This is held by hinges, so Move takes everything hinged to it. To pull a part away, cut the hinge there first (Cut), then drag that part.', 6000);
+    return;
+  }
+  this.detach = d;
+  this.refreshStyles();
+  this.app.toast(solid
+    ? `This ${d.name} will come away (orange) at the join outlined in orange. Drag it away; tap it again to keep it joined. Dragging any other part moves the whole object.`
+    : `This ${d.name} will come away (orange) along the dashed edges outlined in orange. Drag it away.`, 6000);
+};
+
+// Faces drawn on their own while a joined solid is pulled away (the faces
+// at the join are hidden inside until the move is done).
+W.tempFaces = function (pcs, state) {
+  const group = new THREE.Group();
+  group.matrixAutoUpdate = false;
+  const origins = [];
+  for (const pc of this.comp.pieces) { const o = pc.origin ?? pc.id; if (!origins.includes(o)) origins.push(o); }
+  for (const pc of pcs) {
+    const n = polyNormal(pc.verts);
+    const pos = [], nrm = [], idx = [];
+    for (const v of pc.verts) { pos.push(v.x, v.y, v.z); nrm.push(n.x, n.y, n.z); }
+    for (let i = 1; i < pc.verts.length - 1; i++) idx.push(0, i, i + 1);
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+    g.setAttribute('normal', new THREE.Float32BufferAttribute(nrm, 3));
+    g.setIndex(idx);
+    const parity = origins.indexOf(pc.origin ?? pc.id) % 2;
+    group.add(new THREE.Mesh(g, this.material('out', parity, state, pc.kind || 'piece')), new THREE.Mesh(g, this.material('in', parity, 'none', pc.kind || 'piece')));
+  }
+  this.shellGroup.add(group);
+  return group;
+};
+
+W.dropTempFaces = function (group) {
+  if (!group) return;
+  this.shellGroup.remove(group);
+  group.traverse((o) => { if (o.geometry) o.geometry.dispose(); });
+};
+
+// Release of a part pulled away from a join (Solid), not on a snap.
+W.commitDetach = function (job, T, before) {
+  const det = job.det;
+  const sh = this.shell;
+  const own = new Set(det.pcs.map((pc) => pc.id));
+  this.transformComponent(job.comp, T, det.pcs);
+  this.rebuildKeep(() => {}, { defaultNet: true, skip: (e) => e.uses.some((u) => det.wholeIds.has(u.panel.id) || own.has(u.panel.solidId)), after: () => this.tidyBases() });
+  const mine = new Set(sh.panels.filter((p) => own.has(p.solidId)));
+  const bad = this.overlapsWith(mine);
+  if (bad) { this.restoreSnapshot(before); this.app.toast(`Not detached: it would overlap face P${bad.no}. It stays joined.`, 5000); return false; }
+  this.pushHistory(before);
+  this.detach = null;
+  this.selComp = new Set(this.componentOf([...mine][0]));
+  this.refreshStyles();
+  const high = this.lowestY([...this.selComp]) > this.edgeLen * 1e-4;
+  this.app.toast(`Detached the ${det.name} and moved it ${Math.round(new THREE.Vector3().setFromMatrixPosition(T).length() * 1000)} mm; the rest keeps its other joins.${high ? ' It is above the surface: Arrange sets it down.' : ''} Undo joins it again.`, 6000);
   return true;
 };
 
@@ -1455,22 +1632,51 @@ T.beginObjectTurn = function (ptr, hit) {
 T.beginObjectMove = function (ptr, hit) {
   const ws = this.ws;
   if (ws.comp.isEdited() || ws.comp.isShaped()) { ws.app.toast('Reset edits before moving objects.'); return null; }
-  const comp = ws.componentOf(hit.panel);
+  const solid = ws.state.mode === 'solid';
+  // What moves: in Solid the whole object, or the solid chosen to come away
+  // (tap first); in Shape everything hinged to the face you grab, so a part
+  // cut free (dashed edges) comes away on its own.
+  let comp, det = null;
+  if (solid && ws.detach && ws.detach.kind === 'solid' && ws.detach.partIds.has(hit.panel.id)) {
+    det = ws.detach;
+    comp = ws.shell.panels.filter((p) => det.partIds.has(p.id));
+  } else if (solid) {
+    ws.clearDetach();
+    comp = ws.componentOf(hit.panel);
+  } else {
+    det = ws.detachFor(hit.panel);
+    comp = det ? ws.shell.panels.filter((p) => det.partIds.has(p.id)) : ws.componentOf(hit.panel);
+    if (det) {
+      const glued = ws.comp.seams.some(([a, b]) => det.partIds.has(a.slice(0, a.lastIndexOf('#'))) !== det.partIds.has(b.slice(0, b.lastIndexOf('#'))));
+      if (glued) { ws.app.toast('That part is glued to the rest along edges that met while folding. Cut those edges (Cut) to free it.', 5000); return null; }
+      ws.detach = det;
+    } else ws.clearDetach(false);
+  }
   const ref = { dist: hit.distance, stick: true };
   const p0 = this.surfacePoint(ptr, ref);
   if (!p0) return null;
-  const job = ws.moveStart(comp, ws.toLocal(hit.point));
-  const solid = ws.state.mode === 'solid';
+  const job = ws.moveStart(comp, ws.toLocal(hit.point), det);
+  let temp = null;
   let d = new THREE.Vector3(), started = false, snap = null;
   const moved = this.dragDetector(ptr, hit);
   const before = ws.snapshot();
   ws.selComp = new Set(comp);
   ws.refreshStyles();
-  const pose = (T) => { for (const [pp, m0] of job.M0) pp.M.copy(T.clone().multiply(m0)); ws.updateMatrices(); ws.checkOverlaps(); ws.refreshMaterials(); };
-  const reset = () => { ws.hideTag(); ws.showSnap(null); for (const [pp, m0] of job.M0) pp.M.copy(m0); ws.updateMatrices(); ws.checkOverlaps(); ws.refreshMaterials(); };
+  const pose = (T) => {
+    for (const [pp, m0] of job.M0) pp.M.copy(T.clone().multiply(m0));
+    if (temp) temp.moving.matrix.copy(T);
+    ws.updateMatrices(); ws.checkOverlaps(); ws.refreshMaterials();
+  };
+  const reset = () => {
+    ws.hideTag(); ws.showSnap(null);
+    if (temp) { ws.dropTempFaces(temp.moving); ws.dropTempFaces(temp.still); temp = null; }
+    for (const [pp, m0] of job.M0) pp.M.copy(m0);
+    ws.updateMatrices(); ws.checkOverlaps(); ws.refreshMaterials();
+  };
   return {
     move: (p) => {
       if (!started && !moved(p)) return;
+      if (!started && det && det.kind === 'solid' && det.hidden.length) temp = { moving: ws.tempFaces(det.hidden, 'detach'), still: ws.tempFaces(det.partners, 'none') };
       started = true;
       const q = this.surfacePoint(p, ref);
       if (q) { d = q.clone().sub(p0); d.y = 0; }
@@ -1488,25 +1694,33 @@ T.beginObjectMove = function (ptr, hit) {
     end: () => {
       const on = snap && snap.T ? snap : null;
       reset();
-      if (!started) { ws.app.toast(solid ? 'Drag the solid to move it; over a matching face of another solid it snaps on.' : 'Drag the piece to move it; near a matching free edge it snaps on.'); return; }
+      if (!started) {
+        // A tap: choose (or drop) the part that will come away.
+        if (solid) ws.moveTap(hit.panel);
+        else if (det) ws.app.toast(`This ${det.name} comes away (orange) along the dashed edges outlined in orange: drag it away.`, 5000);
+        else ws.moveTap(hit.panel);
+        return;
+      }
+      if (!solid) ws.clearDetach(false);
       if (on) {
-        if (on.bad) { ws.app.toast(`Not ${solid ? 'attached' : 'joined'}: ${on.bad}. It stays where it was.`, 5000); return; }
+        if (on.bad) { ws.app.toast(`Not ${solid ? 'attached' : 'joined'}: ${on.bad}. It stays where it was.`, 5000); ws.refreshStyles(); return; }
         ws.commitSnap(job, on, before);
         ws.app.notify?.();
         return;
       }
-      if (d.length() < 1e-5) return;
+      if (d.length() < 1e-5) { ws.refreshStyles(); return; }
       const Tm = new THREE.Matrix4().makeTranslation(d.x, 0, d.z);
       const bad = ws.snapProblem(job, Tm);
-      if (bad) { ws.app.toast(`Not moved: ${bad}. It stays where it was.`, 5000); return; }
-      ws.transformComponent(comp, Tm);
+      if (bad) { ws.app.toast(`Not moved: ${bad}. It stays where it was.`, 5000); ws.refreshStyles(); return; }
+      if (det && det.kind === 'solid') { ws.commitDetach(job, Tm, before); ws.app.notify?.(); return; }
+      ws.transformComponent(comp, Tm, job.pieces);
       ws.pushHistory(before);
       ws.selComp = new Set(ws.componentOf(ws.shell.panelById.get(comp[0].id)) || []);
       ws.refreshStyles();
-      ws.app.toast(`Moved ${Math.round(d.length() * 1000)} mm.`);
+      ws.app.toast(det ? `The ${det.name} came away along the dashed edges and moved ${Math.round(d.length() * 1000)} mm. Undo puts it back.` : `Moved ${Math.round(d.length() * 1000)} mm.`, det ? 5000 : 3000);
       ws.app.notify?.();
     },
-    cancel: reset,
+    cancel: () => { reset(); if (!solid) ws.clearDetach(); },
   };
 };
 
@@ -1700,6 +1914,8 @@ W.toggleEdge = function (e) {
 const edgeStyle0 = W.edgeStyle;
 W.edgeStyle = function (p, e, okEdges) {
   if (this.snapEdges && this.snapEdges.has(e)) return { color: this.snapBad ? '#e0452b' : '#36d98a', w: this.edgeLen * 0.022 * 2.6 };
+  // Move: the join where the chosen part comes away.
+  if (this.detach && !this.clean && this.state.tool === 'move' && e.uses.length === 2 && this.detach.ringKeys.has(pairKey(e))) return { color: '#ff8a1f', w: this.edgeLen * 0.022 * 2.8, dashed: e.type === 'cut' && this.state.mode === 'shape' };
   // Modify: the edge (or the two edges at the corner) you are reshaping.
   const hot = this.modHot || this.modHover;
   if (hot && !this.clean && e.uses.some((u) => u.panel.id === hot.pid && hot.idx.includes(u.i))) return { color: '#f28c28', w: this.edgeLen * 0.022 * (this.modHot ? 3 : 2.2) };
@@ -1714,6 +1930,7 @@ const panelState0 = W.panelState;
 W.panelState = function (p) {
   if (this.flashPanels && this.flashPanels.has(p)) return 'issue';
   if (this.snapPanels && this.snapPanels.has(p)) return this.snapBad ? 'overlap' : 'snap';
+  if (this.detach && this.state.tool === 'move' && this.detach.partIds.has(p.id)) return 'detach';
   if (this.selComp && this.selComp.has(p) && ['select', 'rotate', 'move', 'remove', 'modify2d'].includes(this.state.tool)) return this.overlapSet.has(p) ? 'overlap' : 'selected';
   if (['select', 'rotate', 'move', 'remove', 'modify2d'].includes(this.state.tool)) {
     if (this.overlapSet.has(p)) return 'overlap';
@@ -1803,3 +2020,11 @@ function segDist(p, a, b) {
 }
 
 export { SHAPES, shapeByKey, EDGE as UNIT };
+
+// Undo, Redo and loading replace the geometry: a part chosen to come away
+// no longer applies.
+const restoreSnapshot0 = W.restoreSnapshot;
+W.restoreSnapshot = function (snap) {
+  this.detach = null;
+  restoreSnapshot0.call(this, snap);
+};
