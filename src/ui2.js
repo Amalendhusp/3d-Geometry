@@ -9,7 +9,7 @@ import { checkImport } from './solids/importcheck.js';
 
 const $ = (s) => document.querySelector(s);
 const $$ = (s) => [...document.querySelectorAll(s)];
-const TOOL_ICON = { modify: 't-modify', remove: 't-remove', move: 't-move', rotate: 't-rotate', fold: 't-fold', cut: 't-cut', mirror: 't-mirror' };
+const TOOL_ICON = { modify: 't-modify', remove: 't-remove', move: 't-move', rotate: 't-rotate', fold: 't-fold', cut: 't-join', mirror: 't-mirror' };
 const SOLID_ICON = { cube: 'p-cube', tetra: 'p-tetra', octa: 'p-octa', cubocta: 'p-cubocta' };
 
 export class WorkspaceUI {
@@ -212,7 +212,8 @@ export class WorkspaceUI {
     ip.hidden = this.drop !== 'info';
     if (!ip.hidden) {
       const c = ws.infoCounts();
-      ip.innerHTML = `<h3>Info</h3><div>${ws.infoText()}</div><div style="opacity:.75;margin-top:4px">${c.objects} object${c.objects === 1 ? '' : 's'} · ${mode === 'shape' ? 'Shape (2D)' : 'Solid (3D)'}</div>`;
+      const objs = ws.infoObjects();
+      ip.innerHTML = `<h3>Info</h3><div>${ws.infoText()}</div>${objs.length ? `<ul style="margin-top:6px">${objs.map((t) => `<li>${t}</li>`).join('')}</ul>` : ''}<div style="opacity:.75;margin-top:4px">${c.objects} object${c.objects === 1 ? '' : 's'} · ${mode === 'shape' ? 'Shape (2D)' : 'Solid (3D)'}</div>`;
     }
     const ep = $('#wsErrors');
     ep.hidden = this.drop !== 'errors';

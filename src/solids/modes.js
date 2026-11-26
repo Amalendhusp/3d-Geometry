@@ -29,7 +29,7 @@ export const MODE_TOOLS = {
     { key: 'move', name: 'Move', tip: 'Drag a shape or net to move it whole; near a matching free edge of another piece it snaps on and joins with a hinge' },
     { key: 'rotate', name: 'Rotate', tip: 'Drag a piece to turn it as a whole; its connections and folds stay' },
     { key: 'fold', name: 'Fold', tip: 'Drag a panel to swing it about its hinge; free edges that meet snap together' },
-    { key: 'cut', name: 'Scissors', tip: 'Drag a face away to cut it free: the hinge on the side you pull from is cut. A tap on a hinge cuts it (tap again to rejoin)' },
+    { key: 'cut', name: 'Cut & Join', tip: 'Pull a face away from a hinge to cut it (the hinge on the side you pull from); drag a loose piece, or a part you pull off, to a matching free edge to join it with a hinge. A tap on a hinge cuts it' },
     { key: 'mirror', name: 'Mirror', tip: 'Not yet available: reflect a shape or group across a tapped edge, with a preview first (a later stage)', later: true },
     { key: 'preview', name: '3D', tip: 'Not yet available: preview of the folded form (next stage)', later: true },
   ],
@@ -38,7 +38,7 @@ export const MODE_TOOLS = {
     { key: 'remove', name: 'Remove', tip: 'Tap a solid to remove it' },
     { key: 'move', name: 'Move', tip: 'Drag a solid or a joined group to move it whole; over a matching face of another solid it snaps on and attaches' },
     { key: 'rotate', name: 'Rotate', tip: 'Drag a solid to turn it freely in any direction, like turning it in your hand' },
-    { key: 'cut', name: 'Scissors', tip: 'Drag one solid of a joined group away to detach it at the faces where it joins' },
+    { key: 'cut', name: 'Cut & Join', tip: 'Pull one solid of a joined group away to cut it off; drag a solid onto a matching face of another to join them' },
     { key: 'mirror', name: 'Mirror', tip: 'Not yet available: mirror across a face with a preview and a tick to confirm (next stage)', later: true },
     { key: 'preview', name: '2D', tip: 'Not yet available: preview of the net (next stage)', later: true },
   ],
@@ -286,101 +286,172 @@ W.setMode = function (m) {
   const before = this.snapshot();
   const r = m === 'solid' ? this.foldClosable() : this.unfoldClosed();
   if (r.changed) this.pushHistory(before);
-  const tail = this.modeIssues.length ? ` ${this.modeIssues.length} object${this.modeIssues.length === 1 ? '' : 's'} could not ${m === 'solid' ? 'close' : 'unfold'}: see Error.` : '';
-  this.app.toast(`${m === 'solid' ? 'Solid (3D)' : 'Shape (2D)'}.${r.msg ? ` ${r.msg}` : ''}${tail}`, 5000);
+  const tail = this.modeIssues.length ? ` ${this.modeIssues.length} object${this.modeIssues.length === 1 ? '' : 's'} could not ${m === 'solid' ? 'close' : 'unfold'}: ${this.modeIssues[0].text}` : '';
+  if (r.changed && this.anim) this.anim.msg = `${m === 'solid' ? 'Solid (3D)' : 'Shape (2D)'}. ${this.anim.msg}${tail}`;
+  else this.app.toast(`${m === 'solid' ? 'Solid (3D)' : 'Shape (2D)'}.${tail}`, tail ? 7000 : 3000);
   this.refreshStyles();
   this.app.notify?.();
 };
 
-// Every closable object folds closed: closed solids that are unfolded, and
-// nets that match a solid (they get their closed form first).
-W.foldClosable = function () {
+// Is a face lying face down on the surface?
+W.lyingFlat = function (p) {
   const sh = this.shell;
-  let converted = 0;
-  for (const comp of sh.pieces()) {
-    if (!this.restFlat(comp)) continue;
-    if (!comp.every((p) => this.isPiecePanel(p))) continue;
-    const r = this.closeByLibrary(comp);
-    if (r.ok) converted++;
-    else this.modeIssues.push({ kind: 'close', text: `A net of ${comp.length} face${comp.length === 1 ? '' : 's'} stays as it is: ${r.reason}`, ids: comp.map((p) => p.id) });
+  return sh.worldNormal(p).normalize().y < -1 + 1e-6 && sh.worldPoly(p).every((v) => Math.abs(v.y) < 1e-5);
+};
+
+// The poses that lay some objects flat, from where their faces are now and
+// how they are connected: every hinge-connected piece (also the ones joined
+// to the rest only by cuts) is turned face down where it is and opened at
+// its hinges; a piece that would then overlap something slides clear.
+W.flatPlan = function (comps) {
+  const sh = this.shell;
+  const F = sh.forest();
+  const from = sh.forestAngles(F);
+  const flat = sh.flatAngles(F);
+  const to = new Map(from);
+  const rootOf = sh.pieceRoots(F);
+  const saved = sh.panels.map((p) => p.M.clone());
+  const set = new Set(comps.flat());
+  const targets = new Map();
+  const down = new THREE.Vector3(0, -1, 0);
+  const centre = (ps) => { const c = new THREE.Vector3(); let n = 0; for (const p of ps) for (const v of sh.worldPoly(p)) { c.add(v); n++; } return c.divideScalar(Math.max(1, n)); };
+  for (const comp of comps) {
+    for (const p of comp) if (F.parent.has(p)) to.set(p, flat.get(p));
+    for (const r of new Set(comp.map((p) => rootOf.get(p)))) {
+      const n = sh.worldNormal(r).normalize();
+      const c = centre([r]);
+      const q = new THREE.Quaternion().setFromUnitVectors(n, down);
+      targets.set(r, new THREE.Matrix4().makeTranslation(c.x, 0, c.z).multiply(new THREE.Matrix4().makeRotationFromQuaternion(q)).multiply(new THREE.Matrix4().makeTranslation(-c.x, -c.y, -c.z)).multiply(r.M.clone()));
+    }
   }
-  return this.animateComponents('close', converted);
+  const apply = () => sh.applyForest(F, to, targets);
+  apply();
+  // Hinges that close a loop and would be torn apart lying flat.
+  const torn = F.loops.filter((e) => set.has(e.uses[0].panel) && !sh.intact(e));
+  // Pieces that would overlap another piece or another object slide away.
+  for (const comp of comps) {
+    const rs = [...new Set(comp.map((p) => rootOf.get(p)))];
+    if (rs.length < 2) continue;
+    const of = (r) => comp.filter((p) => rootOf.get(p) === r);
+    const main = rs.find((r) => sh.bases.has(r.id)) || rs.slice().sort((a, b) => of(b).length - of(a).length)[0];
+    for (const r of rs) {
+      if (r === main) continue;
+      const mine = new Set(of(r));
+      const clash = () => sh.overlaps().pairs.some(([a, b]) => mine.has(a) !== mine.has(b));
+      if (!clash()) continue;
+      const dir = centre([...mine]).sub(centre(of(main)));
+      dir.y = 0;
+      if (dir.length() < 1e-9) dir.set(1, 0, 0);
+      dir.normalize().multiplyScalar(this.edgeLen * 0.2);
+      for (let k = 0; k < 80 && clash(); k++) { targets.get(r).premultiply(new THREE.Matrix4().makeTranslation(dir.x, 0, dir.z)); apply(); }
+    }
+  }
+  const self = sh.overlaps().pairs.filter(([a, b]) => set.has(a) && rootOf.get(a) === rootOf.get(b));
+  sh.panels.forEach((p, i) => p.M.copy(saved[i]));
+  const roots = new Map([...targets].map(([r, M]) => [r, { from: r.M.clone(), to: M }]));
+  return { F, from, to, roots, torn, self, pieces: targets.size };
 };
 
-W.unfoldClosed = function () { return this.animateComponents('open', 0); };
-
-// Top toolbar: Unfold lays every object flat (closed solids into their
-// nets, partly folded nets back flat); Refold folds every net that can close.
-W.topUnfold = function () {
-  this.tools.finishAll(); this.stopAnim(); this.placing = null; this.hidePlacePreview();
-  this.modeIssues = [];
-  const before = this.snapshot();
-  const r = this.animateComponents('open', 0, { all: true });
-  if (r.changed) this.pushHistory(before);
-  else this.app.toast('Everything already lies flat.');
-  this.app.notify?.();
-};
-
-W.topRefold = function () {
-  this.tools.finishAll(); this.stopAnim(); this.placing = null; this.hidePlacePreview();
-  this.modeIssues = [];
-  const before = this.snapshot();
-  const r = this.foldClosable();
-  if (r.changed) this.pushHistory(before);
-  if (this.modeIssues.length) this.app.toast(`${r.msg ? `${r.msg} ` : ''}${this.modeIssues.length} object${this.modeIssues.length === 1 ? '' : 's'} could not fold closed: see Error.`, 5000);
-  else if (!r.changed) this.app.toast(r.msg || 'Nothing to fold closed.');
-  this.app.notify?.();
-};
-
-W.animateComponents = function (dir, converted, opts = {}) {
+// The poses that fold some objects into their 3D (rest) form: every hinge
+// back to its rest angle and every piece back to its place, including
+// pieces joined to the rest only by cuts.
+W.foldPlan = function (comps) {
   const sh = this.shell;
   const F = sh.forest();
   const from = sh.forestAngles(F);
   const to = new Map(from);
+  const rootOf = sh.pieceRoots(F);
   const roots = new Map();
   const final = new Map();
-  const flat = sh.flatAngles(F);
-  let n = 0;
-  for (const comp of sh.pieces()) {
-    if (dir === 'open' && opts.all) {
-      // Anything not lying flat: some hinge away from its flat angle.
-      if (!comp.some((p) => F.parent.has(p) && Math.abs(from.get(p) - flat.get(p)) > 1e-6)) continue;
-    } else {
-      if (this.restFlat(comp)) continue;
-      const closed = comp.every((p) => isIdentity(p.M));
-      if (dir === 'close' && closed) continue;
-      if (dir === 'open' && !closed) continue;
-    }
-    const loop = F.loops.find((e) => comp.includes(e.uses[0].panel));
-    if (loop) { this.modeIssues.push({ kind: 'loop', text: `An object's hinges form a closed loop, so it cannot ${dir === 'close' ? 'fold' : 'unfold'}. Cut one hinge of the loop.`, ids: comp.map((p) => p.id) }); continue; }
-    n++;
-    for (const p of comp) {
-      if (F.parent.has(p)) to.set(p, dir === 'close' ? 0 : flat.get(p));
-      if (dir === 'close') final.set(p, new THREE.Matrix4());
-    }
-    const root = F.roots.find((r) => comp.includes(r));
-    if (!root) continue;
-    if (dir === 'close') { if (!isIdentity(root.M)) roots.set(root, { from: root.M.clone(), to: new THREE.Matrix4() }); } else {
-      // The root panel lies face down where it is; the net opens around it.
-      const nrm = sh.worldNormal(root).normalize();
-      const w = sh.worldPoly(root);
-      const c = w.reduce((a, v) => a.add(v), new THREE.Vector3()).divideScalar(w.length);
-      const q = new THREE.Quaternion().setFromUnitVectors(nrm, new THREE.Vector3(0, -1, 0));
-      const L = new THREE.Matrix4().makeTranslation(c.x, 0, c.z).multiply(new THREE.Matrix4().makeRotationFromQuaternion(q)).multiply(new THREE.Matrix4().makeTranslation(-c.x, -c.y, -c.z));
-      roots.set(root, { from: root.M.clone(), to: L.multiply(root.M.clone()) });
-    }
+  for (const comp of comps) {
+    for (const p of comp) { if (F.parent.has(p)) to.set(p, 0); final.set(p, new THREE.Matrix4()); }
+    for (const r of new Set(comp.map((p) => rootOf.get(p)))) roots.set(r, { from: r.M.clone(), to: new THREE.Matrix4() });
   }
-  if (!n) return { changed: converted > 0, msg: dir === 'close' ? (converted ? '' : 'Nothing to fold closed.') : 'Nothing to unfold.' };
-  this.anim = { kind: 'forest', F, from, to, roots: roots.size ? roots : null, t: 0, dur: 1.2, label: 'mode', final: final.size ? final : null,
-    msg: dir === 'close' ? `Folded ${n} object${n === 1 ? '' : 's'} closed.` : `Unfolded ${n} solid${n === 1 ? '' : 's'} into ${n === 1 ? 'its net' : 'their nets'}.` };
-  return { changed: true, msg: '' };
+  return { F, from, to, roots, final };
+};
+
+W.runPlan = function (plan, msg, check) {
+  this.anim = { kind: 'forest', F: plan.F, from: plan.from, to: plan.to, roots: plan.roots.size ? plan.roots : null, t: 0, dur: 1.2, label: 'mode', final: plan.final && plan.final.size ? plan.final : null, msg, check };
+};
+
+// Shape → Solid and Refold: nets built from shapes that close into a known
+// solid get that solid's form; then every object whose form is 3D (a solid,
+// or a box with an opening) and is not in that form folds into it.
+W.foldClosable = function () {
+  const sh = this.shell;
+  let converted = 0;
+  for (const comp of sh.pieces()) {
+    // Anything not already a closed form may close into a known solid as
+    // it is connected now (a net built from shapes, or a form a part was
+    // cut from and joined back to). An open form that does not folds into
+    // its own 3D form below.
+    if (this.restClosed(comp)) continue;
+    if (!comp.every((p) => this.isPiecePanel(p))) continue;
+    const flatRest = this.restFlat(comp);
+    if (comp.length < 3) { if (flatRest && comp.some((p) => !this.lyingFlat(p))) this.modeIssues.push({ kind: 'close', text: `${comp.length === 1 ? 'A single shape' : 'Two shapes'} cannot fold into a solid, so ${comp.length === 1 ? 'it stays' : 'they stay'} as ${comp.length === 1 ? 'it is' : 'they are'}.`, ids: comp.map((p) => p.id) }); continue; }
+    const r = this.closeByLibrary(comp);
+    if (r.ok) converted++;
+    else if (flatRest) this.modeIssues.push({ kind: 'close', text: `A net of ${comp.length} faces stays as it is: ${r.reason}`, ids: comp.map((p) => p.id) });
+  }
+  const comps = sh.pieces().filter((c) => !this.restFlat(c) && !c.every((p) => isIdentity(p.M)));
+  if (!comps.length) return { changed: converted > 0, n: 0 };
+  this.runPlan(this.foldPlan(comps), `Folded ${comps.length} object${comps.length === 1 ? '' : 's'} into ${comps.length === 1 ? 'its' : 'their'} 3D form.`, { kind: 'closed', ids: new Set(comps.flat().map((p) => p.id)) });
+  return { changed: true, n: comps.length };
+};
+
+// Solid → Shape: objects in their 3D form open into their nets.
+W.unfoldClosed = function () {
+  const comps = this.shell.pieces().filter((c) => !this.restFlat(c) && c.every((p) => isIdentity(p.M)));
+  return this.unfoldComps(comps);
+};
+
+W.unfoldComps = function (comps) {
+  if (!comps.length) return { changed: false, n: 0 };
+  const plan = this.flatPlan(comps);
+  if (plan.torn.length) {
+    const e = plan.torn[0];
+    this.modeIssues.push({ kind: 'loop', text: `Hinges form a closed loop (edge ${e.no}, between P${e.uses[0].panel.no} and P${e.uses[1].panel.no}), so that object cannot lie flat. Cut one hinge of the loop (Edit: tap it).`, ids: e.uses.map((u) => u.panel.id) });
+    return { changed: false, n: 0, blocked: true };
+  }
+  const n = comps.length;
+  const self = plan.self.length ? ` ${plan.self.length} face pair${plan.self.length === 1 ? ' overlaps' : 's overlap'} in the flat layout (red): see Error.` : '';
+  this.runPlan(plan, `Laid ${n} object${n === 1 ? '' : 's'} flat (${plan.pieces} piece${plan.pieces === 1 ? '' : 's'}, every face face down on the surface).${self}`, { kind: 'flat', ids: new Set(comps.flat().map((p) => p.id)) });
+  return { changed: true, n };
+};
+
+// Top toolbar. Unfold lays flat every object that has any face not lying
+// face down on the surface, whatever its connections. Refold folds every
+// object into its 3D form where that is possible, and says why not.
+W.topUnfold = function () {
+  this.tools.finishAll(); this.stopAnim(); this.placing = null; this.hidePlacePreview(); this.clearDetach(false);
+  this.modeIssues = [];
+  const comps = this.shell.pieces().filter((c) => c.some((p) => !this.lyingFlat(p)));
+  if (!comps.length) { this.app.toast(this.shell.panels.length ? 'Everything already lies flat: every face is face down on the surface.' : 'Nothing to unfold yet.'); return; }
+  const before = this.snapshot();
+  const r = this.unfoldComps(comps);
+  if (r.changed) this.pushHistory(before);
+  else this.app.toast(`Nothing was unfolded: ${this.modeIssues.map((m) => m.text).join(' ')}`, 7000);
+  this.app.notify?.();
+};
+
+W.topRefold = function () {
+  this.tools.finishAll(); this.stopAnim(); this.placing = null; this.hidePlacePreview(); this.clearDetach(false);
+  this.modeIssues = [];
+  const before = this.snapshot();
+  const r = this.foldClosable();
+  if (r.changed) this.pushHistory(before);
+  const why = this.modeIssues.map((m) => m.text).join(' ');
+  if (!r.changed) {
+    this.app.toast(why ? `Nothing was folded. ${why}` : this.shell.panels.length ? 'Everything is already in its 3D form.' : 'Nothing to fold yet.', 7000);
+  } else if (why && this.anim) this.anim.msg += ` Not folded: ${why}`;
+  this.app.notify?.();
 };
 
 // A net of pieces that matches a solid gets that solid's closed form as its
 // rest form, keeping its current pose, so it can fold closed.
 W.closeByLibrary = function (comp) {
   const sh = this.shell;
-  if (sh.hingeComponent(comp[0]).size !== comp.length) return { reason: 'some of its pieces only touch and are not hinged. Hinge them (Cut tool) or move them apart.' };
+  if (sh.hingeComponent(comp[0]).size !== comp.length) return { reason: 'some of its pieces are joined to the rest only by cut edges, not hinges. Join them with hinges (drag a piece back to its edge with Cut & Join, or tap a cut edge with Edit where both sides meet) first.' };
   const r = matchClosure(comp, CLOSE_TYPES, (p) => sh.worldPoly(p));
   if (r.reason) return { reason: r.reason.charAt(0).toLowerCase() + r.reason.slice(1) };
   const poses = new Map();
@@ -1109,7 +1180,10 @@ W.moveStart = function (comp, grab, det = null) {
   const movEdges = [];
   for (const p of comp) {
     if (startN.get(p).y > -0.9999) continue;
-    p.edges.forEach((e, i) => { if (e.uses.length === 1 && !this.isSeamed(p, i)) movEdges.push({ p, i }); });
+    p.edges.forEach((e, i) => {
+      if (e.uses.length === 1 && !this.isSeamed(p, i)) movEdges.push({ p, i });
+      else if (e.uses.length === 2 && e.type !== 'hinge' && !moving.has(sh.other(e, p)) && !sh.intact(e)) movEdges.push({ p, i, rejoin: e });
+    });
   }
   return { comp, moving, ids: new Set(comp.map((p) => p.id)), M0, start, startN, movEdges, grab: grab.clone(), det, extras,
     pieces: det ? det.pcs : null,
@@ -1118,12 +1192,12 @@ W.moveStart = function (comp, grab, det = null) {
 
 // Would the moving object, moved by T, overlap or pass through anything
 // (whole-face contact and shared edges are fine), or go below the surface?
-W.snapProblem = function (job, T) {
+W.snapProblem = function (job, T, { below = true } = {}) {
   const faces = [];
   for (const [p, w] of job.start) faces.push({ verts: w.map((v) => v.clone().applyMatrix4(T)), normal: job.startN.get(p).clone().transformDirection(T) });
   let low = Infinity;
   for (const f of faces) for (const v of f.verts) low = Math.min(low, v.y);
-  if (low < -this.edgeLen * 1e-4) return 'it would go below the work surface';
+  if (below && low < -this.edgeLen * 1e-4) return 'it would go below the work surface';
   if (job.extras && job.extras.length) {
     const inside = Shell.prototype.meets.call({ panels: job.extras, edgeLen: this.edgeLen, worldPoly: (p) => p.verts.map((v) => v.clone()), worldNormal: (p) => p.normal.clone() }, faces);
     if (inside) return 'it would pass through the face it comes away from';
@@ -1139,10 +1213,13 @@ W.snapProblem = function (job, T) {
 // an edge; a gentle pull further away lets it go.
 W.faceSnapAt = function (ray, job, prev) {
   if (!ray || !job.canFace) return null;
-  if (prev && prev.B && this.rayOnPanel(ray, prev.B, this.edgeLen * 0.25)) return prev;
   const hit = this.rayPanel(ray, (p) => job.moving.has(p));
+  // The face under the pointer wins; just off the snapped face (and over
+  // no other) the snap holds, until a gentle pull further away.
+  if (prev && prev.B && (!hit || hit.panel === prev.B) && this.rayOnPanel(ray, prev.B, this.edgeLen * 0.25)) return prev;
   if (!hit) return null;
   const B = hit.panel;
+  if (prev && prev.B === B) return prev;
   const comp = this.componentOf(B);
   if (!this.restClosed(comp) || !comp.every((p) => isIdentity(p.M))) return { B, why: 'solids attach to faces of closed forms' };
   const wB = this.shell.worldPoly(B), n = wB.length;
@@ -1163,7 +1240,22 @@ W.faceSnapAt = function (ray, job, prev) {
     }
   }
   if (!best) return { B, why: `no face of this solid matches face P${B.no}` };
-  return { B, A: best.A, T: best.T, targetIds: new Set(comp.map((p) => p.id)), bad: this.snapProblem(job, best.T) };
+  // A join that would reach below the surface lifts the whole result so it
+  // rests on the surface (as when placing a solid on a low face).
+  let low = this.lowestY(comp);
+  for (const w of job.start.values()) for (const v of w) low = Math.min(low, v.clone().applyMatrix4(best.T).y);
+  const lift = low < -this.edgeLen * 1e-6 ? -low : 0;
+  return { B, A: best.A, T: best.T, lift, targetIds: new Set(comp.map((p) => p.id)), bad: this.snapProblem(job, best.T, { below: false }) };
+};
+
+// While a join that lifts the result is previewed, the object it joins is
+// shown lifted too.
+W.liftPreview = function (snap) {
+  if (this.liftSaved) { for (const [p, m] of this.liftSaved) p.M.copy(m); this.liftSaved = null; }
+  if (!snap || !snap.lift || snap.bad) return;
+  this.liftSaved = new Map();
+  const L = new THREE.Matrix4().makeTranslation(0, snap.lift, 0);
+  for (const p of this.shell.panels) if (snap.targetIds.has(p.id) && !this.liftSaved.has(p)) { this.liftSaved.set(p, p.M.clone()); p.M.premultiply(L); }
 };
 
 // Shape: a free edge of the moving object near a free edge of another of
@@ -1176,7 +1268,12 @@ W.edgeSnapAt = function (job, prev, D) {
   const fix = [];
   for (const p of sh.panels) {
     if (job.moving.has(p) || sh.worldNormal(p).normalize().y > -0.9999) continue;
-    p.edges.forEach((e, i) => { if (e.uses.length === 1 && !this.isSeamed(p, i)) fix.push({ p, i }); });
+    p.edges.forEach((e, i) => {
+      if (e.uses.length === 1 && !this.isSeamed(p, i)) fix.push({ p, i });
+      // The other side of a cut the moving part came away from: it can go back.
+      // (Not judged by the current preview pose, which may already be snapped.)
+      else if (e.uses.length === 2 && e.type !== 'hinge' && job.moving.has(sh.other(e, p))) fix.push({ p, i, rejoin: e });
+    });
   }
   let best = null;
   for (const m of job.movEdges) {
@@ -1185,6 +1282,7 @@ W.edgeSnapAt = function (job, prev, D) {
     const la = a0.distanceTo(a1);
     const am = a0.clone().add(a1).multiplyScalar(0.5);
     for (const f of fix) {
+      if ((m.rejoin || null) !== (f.rejoin || null)) continue;
       const wf = sh.worldPoly(f.p), nf = wf.length;
       const b0 = wf[f.i], b1 = wf[(f.i + 1) % nf];
       if (Math.abs(b0.distanceTo(b1) - la) > la * 1e-6 || Math.abs(b0.y - a0.y) > la * 1e-4) continue;
@@ -1203,7 +1301,7 @@ W.edgeSnapAt = function (job, prev, D) {
   const b0 = wf[best.f.i], b1 = wf[(best.f.i + 1) % wf.length];
   const up = new THREE.Vector3(0, 1, 0);
   const T = rigidFrom([a0, a1, a0.clone().add(up)], [b1, b0, b1.clone().add(up)]);
-  return { m: best.m, f: best.f, T, bad: this.snapProblem(job, T) };
+  return { m: best.m, f: best.f, T, rejoin: best.m.rejoin || null, bad: this.snapProblem(job, T) };
 };
 
 // Highlights for a snap: the two meeting edges (Shape) or the two faces and
@@ -1221,7 +1319,7 @@ W.showSnap = function (snap) {
 };
 
 // Release over a valid target: move and attach as one undoable step.
-W.commitSnap = function (job, snap, before) {
+W.commitSnap = function (job, snap, before, prefix = '') {
   const sh = this.shell;
   const ids = job.ids;
   if (snap.A) {
@@ -1238,7 +1336,12 @@ W.commitSnap = function (job, snap, before) {
       },
       after: () => this.tidyBases(ids),
     });
-    const mine = new Set(sh.panels.filter((p) => ids.has(p.id)));
+    let mine = new Set(sh.panels.filter((p) => ids.has(p.id)));
+    if (mine.size) {
+      const joinedNow = this.componentOf([...mine][0]);
+      const low = this.lowestY(joinedNow);
+      if (low < -this.edgeLen * 1e-6) { this.transformComponent(joinedNow, new THREE.Matrix4().makeTranslation(0, -low, 0)); mine = new Set(sh.panels.filter((p) => ids.has(p.id))); }
+    }
     const bad = this.overlapsWith(mine);
     const together = mine.size && this.componentOf([...mine][0]).some((p) => targetIds.has(p.id));
     if (bad || !together) {
@@ -1250,7 +1353,25 @@ W.commitSnap = function (job, snap, before) {
     this.detach = null;
     this.selComp = new Set(this.componentOf([...mine][0]));
     this.refreshStyles();
-    this.app.toast(`${job.det ? 'Detached and attached' : 'Attached'} to face P${Bno}: ${this.objectText([...this.selComp])} are one object now (the faces that meet are inside it). Undo separates them.`, 5000);
+    this.app.toast(`${prefix}${job.det ? 'Cut off and attached' : 'Attached'} to face P${Bno}: ${this.objectText([...this.selComp])} are one object now (the faces that meet are inside it). Undo separates them.`, 5000);
+    return true;
+  }
+  // Shape, back to the edge it was cut from: put it there and hinge it.
+  if (snap.rejoin) {
+    const e = snap.rejoin;
+    for (const [p, m0] of job.M0) p.M.copy(snap.T.clone().multiply(m0));
+    this.updateMatrices();
+    if (!sh.intact(e)) { this.restoreSnapshot(before); this.app.toast('Not joined: the edges did not meet exactly. It stays where it was.', 5000); return false; }
+    e.type = 'hinge';
+    const mine = new Set(job.comp);
+    const bad = this.overlapsWith(mine);
+    if (bad) { this.restoreSnapshot(before); this.app.toast(`Not joined: it would overlap face P${bad.no}. It stays where it was.`, 5000); return false; }
+    this.shell.classify();
+    this.checkOverlaps();
+    this.pushHistory(before);
+    this.detach = null;
+    this.refreshStyles();
+    this.app.toast(`${prefix}Joined: back on its edge, and edge ${e.no} is a hinge again. Undo separates them.`, 5000);
     return true;
   }
   // Shape: join the two edges with a hinge. The moving object goes into the
@@ -1277,7 +1398,7 @@ W.commitSnap = function (job, snap, before) {
   this.detach = null;
   this.selComp = new Set(this.componentOf([...mine][0]));
   this.refreshStyles();
-  this.app.toast(`Joined: the ${many ? 'net piece' : name} is hinged to the edge of P${fno}. Fold it with Fold; Undo separates them.`, 5000);
+  this.app.toast(`${prefix}Joined: the ${many ? 'net piece' : name} is hinged to the edge of P${fno}. Fold it with Fold; Undo separates them.`, 5000);
   return true;
 };
 
@@ -1688,6 +1809,23 @@ W.infoCounts = function () {
     hinges: sh.edges.filter((e) => e.shared && e.type === 'hinge').length, objects: sh.pieces().length };
 };
 
+// One line per object for the Info panel: what it is, its connections,
+// and the form it is in now.
+W.infoObjects = function () {
+  const sh = this.shell;
+  return sh.pieces().map((c, k) => {
+    const ids = new Set(c.map((p) => p.id));
+    const mine = sh.edges.filter((e) => ids.has(e.uses[0].panel.id));
+    const hinges = mine.filter((e) => e.uses.length === 2 && e.type === 'hinge').length;
+    const cuts = mine.filter((e) => e.uses.length === 2 && e.type !== 'hinge').length;
+    const free = mine.filter((e) => e.uses.length === 1).length;
+    const atRest = c.every((p) => isIdentity(p.M));
+    const flat = c.every((p) => this.lyingFlat(p));
+    const state = flat ? 'lying flat' : atRest ? (this.restClosed(c) ? 'folded closed' : 'in its 3D form, with an opening') : 'partly folded';
+    return `Object ${k + 1}: ${this.objectText(c)} · ${c.length} face${c.length === 1 ? '' : 's'} · ${hinges} hinge${hinges === 1 ? '' : 's'} · ${cuts} cut edge${cuts === 1 ? '' : 's'}${free ? ` · ${free} free edge${free === 1 ? '' : 's'}` : ''} · ${state}`;
+  });
+};
+
 W.infoText = function () {
   const c = this.infoCounts();
   const parts = [];
@@ -1844,7 +1982,7 @@ T.beginObjectMove = function (ptr, hit) {
     ws.updateMatrices(); ws.checkOverlaps(); ws.refreshMaterials();
   };
   const reset = () => {
-    ws.hideTag(); ws.showSnap(null);
+    ws.hideTag(); ws.showSnap(null); ws.liftPreview(null);
     if (temp) { ws.dropTempFaces(temp.moving); ws.dropTempFaces(temp.still); temp = null; }
     for (const [pp, m0] of job.M0) pp.M.copy(m0);
     ws.updateMatrices(); ws.checkOverlaps(); ws.refreshMaterials();
@@ -1859,7 +1997,8 @@ T.beginObjectMove = function (ptr, hit) {
       snap = solid ? ws.faceSnapAt(ws.localRay(p), job, snap) : ws.edgeSnapAt(job, snap, d);
       const on = snap && snap.T ? snap : null;
       ws.showSnap(on);
-      pose(on ? on.T : new THREE.Matrix4().makeTranslation(d.x, 0, d.z));
+      ws.liftPreview(on);
+      pose(on ? (on.lift && !on.bad ? new THREE.Matrix4().makeTranslation(0, on.lift, 0).multiply(on.T) : on.T) : new THREE.Matrix4().makeTranslation(d.x, 0, d.z));
       if (on) {
         const at = solid ? on.B.centroid.clone() : on.f.p.verts[on.f.i].clone().add(on.f.p.verts[(on.f.i + 1) % on.f.p.verts.length]).multiplyScalar(0.5).applyMatrix4(on.f.p.M);
         at.y += ws.edgeLen * 0.5;
@@ -1872,8 +2011,8 @@ T.beginObjectMove = function (ptr, hit) {
       reset();
       if (!started) {
         ws.app.toast(solid
-          ? 'Drag the solid to move it (with everything joined to it); over a matching face of another solid it snaps on. To pull one solid out of a group, use Scissors.'
-          : 'Drag to move it with everything joined to it; near a matching free edge of another piece it snaps on. To pull a part away, use Scissors.', 5000);
+          ? 'Drag the solid to move it (with everything joined to it); over a matching face of another solid it snaps on. To pull one solid out of a group, use Cut & Join.'
+          : 'Drag to move it with everything joined to it; near a matching free edge of another piece it snaps on. To pull a part away, use Cut & Join.', 5000);
         return;
       }
       if (!solid) ws.clearDetach(false);
@@ -2053,32 +2192,40 @@ T.beginModify = function (ptr, hit) {
   };
 };
 
-// Scissors. Solid: drag one solid of a joined group away (it comes away at
-// every face where it joins the others). Shape: drag a face away from the
-// hinge you want to cut: the hinge on the side you pull from is cut and the
-// face comes away with everything hinged to it on the other sides. A tap on
-// an edge between two faces switches it between hinge and cut.
+// Cut & Join. Pull an attached part away to cut its join; drag a loose
+// part (or the part you are pulling off) to a matching target to join it.
+// Solid: the solid you grab comes away from every face where it joins the
+// others; over a matching face of another solid it snaps on. Shape: the
+// hinge on the side you pull from is cut and the face comes away with
+// everything hinged to it on its other sides; a free edge near a matching
+// free edge snaps on and joins with a hinge. The cut and the join show
+// while you drag (orange: what comes away; green: where it joins) and are
+// one Undo step. A tap on an edge between two faces switches it between
+// hinge and cut.
 T.beginScissors = function (ptr, hit) {
-  return this.ws.state.mode === 'solid' ? this.beginScissorsSolid(ptr, hit) : this.beginScissorsShape(ptr, hit);
+  return this.ws.state.mode === 'solid' ? this.beginCutJoinSolid(ptr, hit) : this.beginCutJoinShape(ptr, hit);
 };
 
-T.beginScissorsSolid = function (ptr, hit) {
+T.beginCutJoinSolid = function (ptr, hit) {
   const ws = this.ws;
   const det = ws.detachFor(hit.panel);
-  if (!det) return { move: () => {}, end: () => ws.app.toast('This solid is not joined to another, so there is nothing to cut. Move moves it.', 4500), cancel: () => {} };
   const ref = { dist: hit.distance, stick: true };
   const p0 = this.surfacePoint(ptr, ref);
   if (!p0) return null;
-  // Show what will come away as soon as it is pressed.
-  ws.detach = det;
-  ws.refreshStyles();
-  const comp = ws.shell.panels.filter((p) => det.partIds.has(p.id));
+  const comp = det ? ws.shell.panels.filter((p) => det.partIds.has(p.id)) : ws.componentOf(hit.panel);
+  if (det) { ws.detach = det; ws.refreshStyles(); }
   const job = ws.moveStart(comp, ws.toLocal(hit.point), det);
   const before = ws.snapshot();
   const moved = this.dragDetector(ptr, hit);
-  let temp = null, d = new THREE.Vector3(), started = false;
+  let temp = null, d = new THREE.Vector3(), started = false, snap = null;
+  const name = det ? det.name : ws.objectText(comp);
+  const pose = (T) => {
+    for (const [pp, m0] of job.M0) pp.M.copy(T.clone().multiply(m0));
+    if (temp) temp.moving.matrix.copy(T);
+    ws.updateMatrices(); ws.checkOverlaps(); ws.refreshMaterials();
+  };
   const reset = () => {
-    ws.hideTag();
+    ws.hideTag(); ws.showSnap(null); ws.liftPreview(null);
     if (temp) { ws.dropTempFaces(temp.moving); ws.dropTempFaces(temp.still); temp = null; }
     for (const [pp, m0] of job.M0) pp.M.copy(m0);
     ws.updateMatrices(); ws.checkOverlaps(); ws.refreshMaterials();
@@ -2086,33 +2233,48 @@ T.beginScissorsSolid = function (ptr, hit) {
   return {
     move: (p) => {
       if (!started && !moved(p)) return;
-      if (!started && det.hidden.length) temp = { moving: ws.tempFaces(det.hidden, 'detach'), still: ws.tempFaces(det.partners, 'none') };
+      if (!started && det && det.hidden.length) temp = { moving: ws.tempFaces(det.hidden, 'detach'), still: ws.tempFaces(det.partners, 'none') };
       started = true;
       const q = this.surfacePoint(p, ref);
       if (q) { d = q.clone().sub(p0); d.y = 0; }
-      const T = new THREE.Matrix4().makeTranslation(d.x, 0, d.z);
-      for (const [pp, m0] of job.M0) pp.M.copy(T.clone().multiply(m0));
-      if (temp) temp.moving.matrix.copy(T);
-      ws.updateMatrices(); ws.checkOverlaps(); ws.refreshMaterials();
-      const bad = ws.snapProblem(job, T);
-      const c = ws.objectCentre(comp);
-      ws.setTag(bad ? `Not here: ${bad}` : `Detach the ${det.name} · release`, ws.shellGroup.localToWorld(c.add(new THREE.Vector3(0, ws.edgeLen * 0.7, 0))));
+      snap = ws.faceSnapAt(ws.localRay(p), job, snap);
+      const on = snap && snap.T ? snap : null;
+      ws.showSnap(on);
+      ws.liftPreview(on);
+      const T = on ? (on.lift && !on.bad ? new THREE.Matrix4().makeTranslation(0, on.lift, 0).multiply(on.T) : on.T) : new THREE.Matrix4().makeTranslation(d.x, 0, d.z);
+      pose(T);
+      if (on) ws.setTag(on.bad ? `Not here: ${on.bad}` : `${det ? 'Cut off and attach' : 'Attach'} to face P${on.B.no} · release`);
+      else if (snap && snap.why) ws.setTag(`No join here: ${snap.why}`);
+      else ws.setTag(det ? `Cut: the ${det.name} comes away · release` : 'Drag it onto a matching face of another solid to join');
     },
     end: () => {
+      const on = snap && snap.T ? snap : null;
       reset();
-      if (!started) { ws.app.toast(`This ${det.name} will come away (orange) at the join outlined in orange: drag it away. Tap elsewhere to cancel.`, 5000); return; }
+      if (!started) {
+        ws.app.toast(det ? `This ${det.name} will come away (orange) at the join outlined in orange: pull it away to cut it off, or onto another face to join it there. Tap elsewhere to cancel.` : 'This solid is not joined to another: drag it onto a matching face of another solid to join them.', 5500);
+        return;
+      }
+      if (on) {
+        if (on.bad) { ws.clearDetach(); ws.app.toast(`Not joined: ${on.bad}. It stays where it was.`, 5000); return; }
+        ws.commitSnap(job, on, before);
+        ws.app.notify?.();
+        return;
+      }
       if (d.length() < 1e-5) { ws.clearDetach(); return; }
       const T = new THREE.Matrix4().makeTranslation(d.x, 0, d.z);
       const bad = ws.snapProblem(job, T);
-      if (bad) { ws.clearDetach(); ws.app.toast(`Not detached: ${bad}. It stays joined.`, 5000); return; }
-      ws.commitDetach(job, T, before);
+      if (bad) { ws.clearDetach(); ws.app.toast(`${det ? 'Not cut off' : 'Not moved'}: ${bad}. It stays where it was.`, 5000); return; }
+      if (det) { ws.commitDetach(job, T, before); ws.app.notify?.(); return; }
+      ws.transformComponent(comp, T);
+      ws.pushHistory(before);
+      ws.app.toast(`Moved the ${name} ${Math.round(d.length() * 1000)} mm; drop it on a matching face of another solid to join them.`, 4500);
       ws.app.notify?.();
     },
     cancel: () => { reset(); ws.clearDetach(); },
   };
 };
 
-T.beginScissorsShape = function (ptr, hit) {
+T.beginCutJoinShape = function (ptr, hit) {
   const ws = this.ws, sh = ws.shell;
   const P = hit.panel;
   const comp = ws.componentOf(P);
@@ -2125,10 +2287,12 @@ T.beginScissorsShape = function (ptr, hit) {
   const cW = wP.reduce((a, v) => a.add(v), new THREE.Vector3()).divideScalar(wP.length);
   const before = ws.snapshot();
   const moved = this.dragDetector(ptr, hit);
-  let plan = null, d = new THREE.Vector3(), started = false;
+  let plan = null, job = null, snap = null, d = new THREE.Vector3(), started = false;
   const seamSide = (k) => k.slice(0, k.lastIndexOf('#'));
-  // The hinge of P on the side the pull comes from (within 70° of straight
-  // behind it), and what comes away when it is cut.
+  // What a pull in direction `dir` does: cut the hinge of P on the side the
+  // pull comes from (within 70° of straight behind it) and take what comes
+  // away; or, with no such hinge, take the whole object (a loose piece or a
+  // net) to join it somewhere.
   const planFor = (dir) => {
     const dd = dir.clone().addScaledVector(nW, -dir.dot(nW));
     if (dd.length() < 1e-9) return null;
@@ -2141,29 +2305,28 @@ T.beginScissorsShape = function (ptr, hit) {
       const dot = out.dot(dd);
       if (dot < bd) { bd = dot; e = x; }
     });
-    const part = [...sh.hingeComponent(P, e)];
-    const partIds = new Set(part.map((p) => p.id));
-    if (!e && part.length === comp.length) return { none: true, key: 'none' };
-    // Still held: another route of hinges back to the other side (a loop),
-    // or edges glued while folding.
+    const part = e ? [...sh.hingeComponent(P, e)] : [...sh.hingeComponent(P)];
+    const whole = !e && part.length === comp.length;
+    const use = whole ? comp : part;
+    const partIds = new Set(use.map((p) => p.id));
     const hold = new Set();
     if (e) {
       const Q = sh.other(e, P);
       if (partIds.has(Q.id)) for (const h of ws.hingePath(P, Q, e) || []) hold.add(pairKey(h));
     }
-    const glued = ws.comp.seams.filter(([a, b]) => partIds.has(seamSide(a)) !== partIds.has(seamSide(b)));
+    const glued = whole ? [] : ws.comp.seams.filter(([a, b]) => partIds.has(seamSide(a)) !== partIds.has(seamSide(b)));
     const ringKeys = new Set();
-    for (const p of part) for (const x of p.edges) if (x.uses.length === 2 && x.uses.some((u) => !partIds.has(u.panel.id))) ringKeys.add(pairKey(x));
-    const name = part.length === 1 ? shapeName(part[0].verts.length).toLowerCase() : `part of ${part.length} faces`;
-    return { e, part, partIds, ringKeys, hold, glued, held: hold.size > 0 || glued.length > 0, name, key: `${e ? pairKey(e) : '-'}|${part.length}` };
+    if (!whole) for (const p of use) for (const x of p.edges) if (x.uses.length === 2 && x.uses.some((u) => !partIds.has(u.panel.id))) ringKeys.add(pairKey(x));
+    const name = use.length === 1 ? shapeName(use[0].verts.length).toLowerCase() : whole ? `net of ${use.length} faces` : `part of ${use.length} faces`;
+    return { e, whole, part: use, partIds, ringKeys, hold, glued, held: hold.size > 0 || glued.length > 0, name, key: `${e ? pairKey(e) : '-'}|${use.length}` };
   };
   const resetPose = () => { for (const [pp, m0] of M0) pp.M.copy(m0); };
   const show = (pl) => {
-    ws.detach = pl && !pl.none ? { kind: 'shape', partIds: pl.partIds, ringKeys: pl.ringKeys, name: pl.name } : null;
+    ws.detach = pl && !pl.whole ? { kind: 'shape', partIds: pl.partIds, ringKeys: pl.ringKeys, name: pl.name } : null;
     ws.holdKeys = pl && pl.hold && pl.hold.size ? pl.hold : null;
     ws.refreshStyles();
   };
-  const finish = () => { ws.hideTag(); resetPose(); ws.updateMatrices(); ws.detach = null; ws.holdKeys = null; ws.checkOverlaps(); ws.refreshStyles(); };
+  const finish = () => { ws.hideTag(); ws.showSnap(null); resetPose(); ws.updateMatrices(); ws.detach = null; ws.holdKeys = null; ws.checkOverlaps(); ws.refreshStyles(); };
   return {
     move: (p) => {
       if (!started && !moved(p)) return;
@@ -2172,47 +2335,64 @@ T.beginScissorsShape = function (ptr, hit) {
       if (q) { d = q.clone().sub(p0); d.y = 0; }
       const next = planFor(d);
       if (!next) return;
-      if (!plan || next.key !== plan.key) { resetPose(); plan = next; show(plan); }
-      const at = ws.shellGroup.localToWorld(cW.clone().add(new THREE.Vector3(0, ws.edgeLen * 0.5, 0)));
-      if (plan.none) { ws.updateMatrices(); ws.setTag('Pull away from a hinge to cut it', at); return; }
+      if (!plan || next.key !== plan.key) {
+        resetPose();
+        ws.showSnap(null);
+        plan = next;
+        snap = null;
+        job = plan.held ? null : ws.moveStart(plan.part, ws.toLocal(hit.point));
+        if (job && !plan.whole) job.pieces = plan.part.map((x) => ws.comp.piece(x.solidId)).filter(Boolean);
+        show(plan);
+      }
       if (plan.held) {
         ws.updateMatrices();
-        ws.setTag(`Still held by ${plan.hold.size ? `${plan.hold.size} other hinge${plan.hold.size === 1 ? '' : 's'}` : ''}${plan.hold.size && plan.glued.length ? ' and ' : ''}${plan.glued.length ? `${plan.glued.length} glued edge${plan.glued.length === 1 ? '' : 's'}` : ''}`, at);
+        ws.setTag(`Still held by ${plan.hold.size ? `${plan.hold.size} other hinge${plan.hold.size === 1 ? '' : 's'}` : ''}${plan.hold.size && plan.glued.length ? ' and ' : ''}${plan.glued.length ? `${plan.glued.length} glued edge${plan.glued.length === 1 ? '' : 's'}` : ''}`);
         return;
       }
-      const T = new THREE.Matrix4().makeTranslation(d.x, 0, d.z);
+      snap = ws.edgeSnapAt(job, snap, d);
+      const on = snap && snap.T ? snap : null;
+      ws.showSnap(on);
+      const T = on ? on.T : new THREE.Matrix4().makeTranslation(d.x, 0, d.z);
       for (const pp of plan.part) pp.M.copy(T.clone().multiply(M0.get(pp)));
       ws.updateMatrices(); ws.checkOverlaps(); ws.refreshMaterials();
-      ws.setTag(plan.e ? `Cut hinge ${plan.e.no} · release` : 'Comes away along the dashed edges · release', at);
+      const cutText = plan.e ? `Cut hinge ${plan.e.no}` : plan.whole ? '' : 'Comes away along the dashed edges';
+      if (on) ws.setTag(on.bad ? `Not here: ${on.bad}` : `${cutText ? `${cutText} and join` : 'Edges meet: join'} · release`);
+      else ws.setTag(plan.whole ? 'Drag it to a matching free edge to join' : `${cutText} · release`);
     },
     end: () => {
-      const pl = plan;
+      const pl = plan, on = snap && snap.T ? snap : null, jb = job;
       finish();
       if (!started) {
-        // A tap: switch the edge under it between hinge and cut.
         const e = ws.edgeNear(P, hit.local, 0.2);
         if (e && e.uses.length === 2) ws.toggleEdge(e);
-        else ws.app.toast('Drag a face away from the hinge you want to cut (pulling right cuts the hinge on its left), or tap a hinge to cut it.', 5000);
+        else ws.app.toast('Pull a face away from a hinge to cut it (pulling right cuts the hinge on its left); drag a loose piece to a matching free edge to join it. A tap on a hinge cuts it.', 5500);
         return;
       }
-      if (!pl || pl.none) { ws.app.toast('Nothing was cut: pull a face away from one of its hinges (the hinge on the side you pull from is cut).', 5000); return; }
+      if (!pl) return;
       if (pl.held) {
         ws.app.toast(`Nothing was cut: the ${pl.name} is still held by ${pl.hold.size ? `${pl.hold.size} other hinge${pl.hold.size === 1 ? '' : 's'}` : ''}${pl.hold.size && pl.glued.length ? ' and ' : ''}${pl.glued.length ? `${pl.glued.length} edge${pl.glued.length === 1 ? '' : 's'} glued while folding` : ''} (shown red while you pull). Cut ${pl.hold.size + pl.glued.length === 1 ? 'it' : 'one of those'} too, then pull again.`, 6000);
+        return;
+      }
+      const no = pl.e ? pl.e.no : null;
+      if (on) {
+        if (on.bad) { ws.app.toast(`Not joined: ${on.bad}. Everything stays as it was.`, 5000); return; }
+        if (pl.e) pl.e.type = 'cut';
+        ws.commitSnap(jb, on, before, no ? `Cut hinge ${no}. ` : '');
+        ws.app.notify?.();
         return;
       }
       if (d.length() < 1e-5) return;
       const T = new THREE.Matrix4().makeTranslation(d.x, 0, d.z);
       const part = pl.part.map((x) => sh.panelById.get(x.id)).filter(Boolean);
-      const job = ws.moveStart(part, ws.toLocal(hit.point));
-      const bad = ws.snapProblem(job, T);
-      if (bad) { ws.app.toast(`Not cut: pulled there, ${bad}. Everything stays as it was.`, 5000); return; }
-      const no = pl.e ? pl.e.no : null;
+      const bad = ws.snapProblem(ws.moveStart(part, ws.toLocal(hit.point)), T);
+      if (bad) { ws.app.toast(`${pl.whole ? 'Not moved' : 'Not cut'}: pulled there, ${bad}. Everything stays as it was.`, 5000); return; }
       if (pl.e) pl.e.type = 'cut';
-      ws.transformComponent(part, T, part.map((x) => ws.comp.piece(x.solidId)).filter(Boolean));
+      ws.transformComponent(part, T, pl.whole ? null : part.map((x) => ws.comp.piece(x.solidId)).filter(Boolean));
       ws.pushHistory(before);
       ws.selComp = null;
       ws.refreshStyles();
-      ws.app.toast(`${no ? `Cut hinge ${no} and pulled` : 'Pulled'} the ${pl.name} away ${Math.round(d.length() * 1000)} mm${pl.part.length > 1 ? '; its other hinges stay' : ''}. Undo puts it back.`, 5000);
+      ws.app.toast(pl.whole ? `Moved the ${pl.name} ${Math.round(d.length() * 1000)} mm; drop it with a free edge on a matching free edge to join them.`
+        : `${no ? `Cut hinge ${no} and pulled` : 'Pulled'} the ${pl.name} away ${Math.round(d.length() * 1000)} mm${pl.part.length > 1 ? '; its other hinges stay' : ''}. Undo puts it back.`, 5000);
       ws.app.notify?.();
     },
     cancel: () => finish(),
@@ -2377,7 +2557,13 @@ W.finishAnim = function (a) {
   this.updateMatrices();
   this.afterMotion(false);
   this.shell.classify();
-  this.app.toast(a.msg, 4000);
+  let msg = a.msg;
+  if (a.check) {
+    const ps = this.shell.panels.filter((p) => a.check.ids.has(p.id));
+    const off = a.check.kind === 'flat' ? ps.filter((p) => !this.lyingFlat(p)) : ps.filter((p) => !isIdentity(p.M));
+    if (off.length) msg += ` But ${off.length} face${off.length === 1 ? ' is' : 's are'} still not ${a.check.kind === 'flat' ? 'lying flat' : 'in place'} (${off.slice(0, 4).map((p) => `P${p.no}`).join(', ')}).`;
+  }
+  this.app.toast(msg, 5000);
   this.app.notify?.();
 };
 
@@ -2397,4 +2583,75 @@ const restoreSnapshot0 = W.restoreSnapshot;
 W.restoreSnapshot = function (snap) {
   this.detach = null;
   restoreSnapshot0.call(this, snap);
+};
+
+// Feedback while dragging goes to a strip at the top of the screen, outside
+// the working area, instead of floating over the model. (In a headset it
+// stays beside the model, where the panel cannot be.) The fold tool's
+// running angle badge is not shown: the hinge it turns about stays
+// highlighted.
+const setTag0 = W.setTag, hideTag0 = W.hideTag;
+W.setTag = function (text, world) {
+  if (/^Fold · /.test(text)) return;
+  this.tagText = text;
+  if (this.app.renderer?.xr?.isPresenting) { if (world) setTag0.call(this, text, world); return; }
+  const el = typeof document !== 'undefined' && document.getElementById('wsHint');
+  if (el) { el.textContent = text; el.hidden = false; }
+};
+W.hideTag = function () {
+  this.tagText = '';
+  hideTag0.call(this);
+  const el = typeof document !== 'undefined' && document.getElementById('wsHint');
+  if (el) el.hidden = true;
+};
+
+// Tapping an issue (Error list): the faces it names show red and carry
+// their numbers, on the faces themselves.
+const focusIds0 = W.focusIds;
+W.focusIds = function (ids) {
+  focusIds0.call(this, ids);
+  // The red highlight stays as long as the numbers do.
+  clearTimeout(this.flashPanelsTimer);
+  this.flashPanelsTimer = setTimeout(() => { this.flashPanels = null; this.refreshStyles(); }, 8000);
+  this.showIdLabels(this.shell.panels.filter((p) => ids.includes(p.id)));
+};
+
+W.showIdLabels = function (panels) {
+  if (this.idLabels) { for (const s of this.idLabels) { this.shellGroup.remove(s); s.material.map.dispose(); s.material.dispose(); } }
+  this.idLabels = [];
+  clearTimeout(this.idLabelTimer);
+  if (typeof document === 'undefined') return;
+  // Where each number goes: on its face; numbers that would sit on top of
+  // each other (faces lying over one another) are spread side by side.
+  const spots = panels.map((p) => {
+    const w = this.shell.worldPoly(p);
+    return w.reduce((a, v) => a.add(v), new THREE.Vector3()).divideScalar(w.length).addScaledVector(this.shell.worldNormal(p).normalize(), -this.edgeLen * 0.08);
+  });
+  this.shellGroup.updateWorldMatrix(true, false);
+  const right = new THREE.Vector3(1, 0, 0).applyQuaternion(this.app.camera.getWorldQuaternion(new THREE.Quaternion()))
+    .applyQuaternion(this.shellGroup.getWorldQuaternion(new THREE.Quaternion()).invert()).normalize();
+  const near = spots.map((a, i) => spots.filter((b, j) => j !== i && b.distanceTo(a) < this.edgeLen * 0.5).length);
+  if (near.some((n) => n > 0)) spots.forEach((v, i) => v.addScaledVector(right, (i - (spots.length - 1) / 2) * this.edgeLen * 0.62));
+  panels.forEach((p, k) => {
+    const c = document.createElement('canvas');
+    c.width = 128; c.height = 64;
+    const g = c.getContext('2d');
+    g.fillStyle = '#d8452f';
+    g.beginPath(); g.roundRect(4, 4, 120, 56, 26); g.fill();
+    g.fillStyle = '#ffffff';
+    g.font = '700 38px "Zen Kaku Gothic New", system-ui, sans-serif';
+    g.textAlign = 'center'; g.textBaseline = 'middle';
+    g.fillText(`P${p.no}`, 64, 34);
+    const tex = new THREE.CanvasTexture(c);
+    const spr = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, depthTest: false, transparent: true }));
+    spr.position.copy(spots[k]);
+    const h = this.edgeLen * 0.28;
+    spr.scale.set(h * 2, h, 1);
+    spr.renderOrder = 20;
+    spr.userData.ui = true;
+    spr.userData.text = `P${p.no}`;
+    this.shellGroup.add(spr);
+    this.idLabels.push(spr);
+  });
+  this.idLabelTimer = setTimeout(() => this.showIdLabels([]), 8000);
 };
