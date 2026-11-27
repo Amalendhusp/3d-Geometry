@@ -173,6 +173,8 @@ W.adoptSolids = function () {
 
 const loadData0 = W.loadData;
 W.loadData = function (data, verb) {
+  this.lastRefold = null;
+  this.selComp = null;
   const ok = loadData0.call(this, data, verb);
   if (ok && this.comp.solids.length) { const before = this.history.pop(); this.adoptSolids(); if (before) this.history.push(before); }
   return ok;
@@ -287,7 +289,9 @@ W.setMode = function (m) {
   const before = this.snapshot();
   const r = m === 'solid' ? this.foldClosable() : this.unfoldClosed();
   if (r.changed) this.pushHistory(before);
-  const tail = this.modeIssues.length ? ` ${this.modeIssues.length} object${this.modeIssues.length === 1 ? '' : 's'} could not ${m === 'solid' ? 'close' : 'unfold'}: ${this.modeIssues[0].text}` : '';
+  if (m === 'solid' && this.modeIssues.length && !(this.anim && this.anim.check && this.anim.check.kind === 'zip')) this.setRefoldReport({ summary: `${this.modeIssues.length} object${this.modeIssues.length === 1 ? '' : 's'} could not close`, issues: this.modeIssues });
+  if (this.anim && this.anim.check && this.anim.check.kind === 'zip') this.anim.check.issues = this.modeIssues.slice();
+  const tail = this.modeIssues.length ? (m === 'solid' ? ` ${this.modeIssues.length} object${this.modeIssues.length === 1 ? '' : 's'} could not close · details in Info` : ` ${this.modeIssues.length} object${this.modeIssues.length === 1 ? '' : 's'} could not unfold: ${this.modeIssues[0].text}`) : '';
   if (r.changed && this.anim) this.anim.msg = `${m === 'solid' ? 'Solid (3D)' : 'Shape (2D)'}. ${this.anim.msg}${tail}`;
   else this.app.toast(`${m === 'solid' ? 'Solid (3D)' : 'Shape (2D)'}.${tail}`, tail ? 7000 : 3000);
   this.refreshStyles();
@@ -390,7 +394,7 @@ W.foldClosable = function () {
     if (this.restClosed(comp)) continue;
     if (!comp.every((p) => this.isPiecePanel(p))) continue;
     const flatRest = this.restFlat(comp);
-    if (comp.length < 3) { if (flatRest && comp.some((p) => !this.lyingFlat(p))) this.modeIssues.push({ kind: 'close', text: `${comp.length === 1 ? 'A single shape' : 'Two shapes'} cannot fold into a solid, so ${comp.length === 1 ? 'it stays' : 'they stay'} as ${comp.length === 1 ? 'it is' : 'they are'}.`, ids: comp.map((p) => p.id) }); continue; }
+    if (comp.length < 3) { if (flatRest && comp.some((p) => !this.lyingFlat(p))) this.modeIssues.push({ kind: 'close', short: `${comp.length === 1 ? 'a single shape' : 'two shapes'} cannot fold into a solid`, text: `${comp.length === 1 ? 'A single shape' : 'Two shapes'} cannot fold into a solid, so ${comp.length === 1 ? 'it stays' : 'they stay'} as ${comp.length === 1 ? 'it is' : 'they are'}.`, ids: comp.map((p) => p.id) }); continue; }
     const r = this.closeByLibrary(comp);
     if (r.ok) converted++;
     else zipIds.push({ id: comp[0].id, n: comp.length, flatRest, reason: r.reason });
@@ -405,8 +409,8 @@ W.foldClosable = function () {
     const r = this.zipFold(comp, F, { rest: !z.flatRest });
     if (r.reason || !r.pairs.length) {
       if (z.flatRest) {
-        const why = r.reason || (r.open ? this.zipOpenText(r).join('; ') : '');
-        this.modeIssues.push({ kind: 'close', text: `A net of ${z.n} faces stays as it is: no free edges can be brought together${why ? ` (${why})` : ''}.`, ids: comp.map((p) => p.id) });
+        const rows = r.open ? this.zipRows(r) : [];
+        this.modeIssues.push({ kind: 'close', short: r.reason ? 'some pieces are joined only by cut edges' : 'no edges can be brought together', text: `A net of ${z.n} faces stays as it is: ${r.reason || 'no free edges can be brought together'}.`, ids: comp.map((p) => p.id), rows });
       }
       continue;
     }
@@ -445,7 +449,7 @@ W.foldClosable = function () {
     ? `Folded ${n} object${n === 1 ? '' : 's'}.`
     : `Folded ${comps.length} object${comps.length === 1 ? '' : 's'} into ${comps.length === 1 ? 'its' : 'their'} 3D form.`;
   this.runPlan(plan, msg, zips.length
-    ? { kind: 'zip', ids: new Set(comps.flat().map((p) => p.id)), zips: zips.map(({ comp, r }) => ({ id: comp[0].id, pairs: r.pairs.map(([a, b]) => [{ p: a.p, i: a.i }, { p: b.p, i: b.i }]), text: this.zipOpenText(r), open: r.open.length })) }
+    ? { kind: 'zip', ids: new Set(comps.flat().map((p) => p.id)), zips: zips.map(({ comp, r }) => ({ id: comp[0].id, n: comp.length, pairs: r.pairs.map(([a, b]) => [{ p: a.p, i: a.i }, { p: b.p, i: b.i }]), rows: this.zipRows(r), open: r.open.length })) }
     : { kind: 'closed', ids: new Set(comps.flat().map((p) => p.id)) });
   return { changed: true, n };
 };
@@ -493,11 +497,45 @@ W.topRefold = function () {
   const before = this.snapshot();
   const r = this.foldClosable();
   if (r.changed) this.pushHistory(before);
-  const why = this.modeIssues.map((m) => m.text).join(' ');
   if (!r.changed) {
-    this.app.toast(why ? `Nothing was folded. ${why}` : this.shell.panels.length ? 'Everything is already in its 3D form.' : 'Nothing to fold yet.', 7000);
-  } else if (why && this.anim) this.anim.msg += ` Not folded: ${why}`;
+    if (this.modeIssues.length) {
+      this.setRefoldReport({ summary: `Not folded · ${this.modeIssues.length === 1 ? (this.modeIssues[0].short || 'it cannot fold') : `${this.modeIssues.length} objects cannot fold`}`, issues: this.modeIssues });
+      this.app.toast(`${this.lastRefold.summary} · details in Info`, 5000);
+    } else this.app.toast(this.shell.panels.length ? 'Everything is already in its 3D form.' : 'Nothing to fold yet.', 4000);
+  } else if (this.anim && this.modeIssues.length && !(this.anim.check && this.anim.check.kind === 'zip')) {
+    this.setRefoldReport({ summary: `Folded · ${this.modeIssues.length} not folded`, issues: this.modeIssues });
+    this.anim.msg += ` ${this.modeIssues.length} object${this.modeIssues.length === 1 ? '' : 's'} not folded · details in Info`;
+  }
+  if (this.anim && this.anim.check && this.anim.check.kind === 'zip') this.anim.check.issues = this.modeIssues.slice();
   this.app.notify?.();
+};
+
+// The last Refold's full report (Info → Last Refold): a summary and rows,
+// each naming the edges Refold tried to join and the faces in the way.
+W.setRefoldReport = function ({ summary, sections = [], issues = [] }) {
+  const secs = sections.slice();
+  for (const m of issues) secs.push({ title: m.text, rows: (m.rows && m.rows.length) ? m.rows : [{ text: m.text, edges: [], blockers: m.ids || [] }] });
+  this.lastRefold = { summary, sections: secs, at: Date.now() };
+};
+
+// Tapping a row of the report: the edges it names light up (orange) and the
+// faces in the way turn red, with their numbers, for a few seconds.
+W.focusRefold = function (row) {
+  const sh = this.shell;
+  const edges = new Set(), faces = new Set();
+  for (const [id, i] of row.edges || []) { const P = sh.panelById.get(id); if (P && P.edges[i]) { edges.add(P.edges[i]); faces.add(P); } }
+  const blockers = new Set((row.blockers || []).map((id) => sh.panelById.get(id)).filter(Boolean));
+  this.refoldEdges = edges.size ? edges : null;
+  this.flashPanels = blockers.size ? blockers : null;
+  this.refreshStyles();
+  const named = [...new Set([...faces, ...blockers])];
+  this.showIdLabels(named);
+  const box = new THREE.Box3();
+  for (const P of named) for (const v of sh.worldPoly(P)) box.expandByPoint(v);
+  if (!box.isEmpty()) this.app.focusBox?.(this.worldBox(box));
+  this.setTag(row.text.length > 110 ? `${row.text.slice(0, 108)}…` : row.text);
+  clearTimeout(this.refoldTimer);
+  this.refoldTimer = setTimeout(() => { this.refoldEdges = null; this.flashPanels = null; this.refreshStyles(); this.hideTag(); }, 8000);
 };
 
 // A net of pieces that matches a solid gets that solid's closed form as its
@@ -569,22 +607,89 @@ W.alternateNet = function (opts = {}) {
   this.tools.finishAll(); this.stopAnim(); this.placing = null; this.hidePlacePreview(); this.clearDetach(false);
   const sh = this.shell;
   const objs = sh.pieces();
-  let comp = this.selComp && this.selComp.size ? this.componentOf([...this.selComp][0]) : null;
+  // The selected object, if the selection is of faces that still exist.
+  const selP = this.selComp && this.selComp.size ? [...this.selComp].find((p) => sh.panelById.get(p.id) === p) : null;
+  let comp = selP ? this.componentOf(selP) : null;
   if (!comp || !comp.length) comp = objs.slice().sort((a, b) => b.length - a.length)[0];
   if (comp.length < 2) { this.app.toast('Alternate needs a net of at least two faces.'); return; }
   const t0 = performance.now();
   const r = this.findAlternate(comp, opts);
   if (r.error) { this.app.toast(r.error, 6500); return; }
   const before = this.snapshot();
+  const ids = new Set(comp.map((p) => p.id));
+  // Check the new layout where it will lie, then go back and show the
+  // change: the current layout folds up into the solid, then the solid
+  // opens out into the new net (in Solid too, so the net can be seen).
   const ok = this.applyAlternate(comp, r);
   if (!ok.ok) { this.restoreSnapshot(before); this.app.toast(`No other layout could be placed: ${ok.why}. Your layout stays as it is.`, 6000); return; }
+  const finalMs = new Map(sh.panels.filter((p) => ids.has(p.id)).map((p) => [p.id, p.M.clone()]));
+  this.restoreSnapshot(before);
   this.pushHistory(before);
   this.netCycle = null;
   const ch = r.choice;
-  const which = r.options.length > 1 ? ` (${r.index + 1} of ${r.options.length} different layouts found${r.exhaustive ? '' : ' so far'})` : '';
-  const how = ch.cuts ? `${ch.cuts} extra cut${ch.cuts === 1 ? ' was' : 's were'} needed to avoid overlaps, giving ${ch.pieces} pieces` : 'one piece, no extra cuts';
-  this.app.toast(`Alternate net${which}: a different flat layout of the same ${r.name}, ${how}. It folds back into the same ${r.name} (Refold). Undo brings back your layout. (${Math.round(performance.now() - t0)} ms)`, 8000);
+  const which = r.options.length > 1 ? ` ${r.index + 1} of ${r.options.length}${r.exhaustive ? '' : '+'}` : '';
+  const how = ch.cuts ? `${ch.pieces} pieces (${ch.cuts} extra cut${ch.cuts === 1 ? '' : 's'} to avoid overlaps)` : 'one piece';
+  const msg = `Alternate net${which} · ${r.name} · ${how}. Refold folds it back; Undo restores your layout.`;
+  this.altTiming = Math.round(performance.now() - t0);
+  this.startAlternateAnim(ids, r, finalMs, msg);
   this.app.notify?.();
+};
+
+// The two halves of Alternate's animation. First the current layout folds
+// up (about its own hinges) into the closed solid, around its base face;
+// then, with the new hinges, the solid opens out into the new net.
+W.startAlternateAnim = function (ids, r, finalMs, msg) {
+  const sh = this.shell;
+  const comp = sh.panels.filter((p) => ids.has(p.id));
+  const F = sh.forest();
+  const closedOf = (p) => (r.closed && r.closed.get(p.id)) || p.verts;
+  const R = new Map(comp.map((p) => [p, rigidFrom(p.verts.slice(0, 3), closedOf(p).slice(0, 3))]));
+  const roots = F.roots.filter((x) => ids.has(x.id));
+  const base = roots.slice().sort((x, y) => sh.hingeComponent(y).size - sh.hingeComponent(x).size)[0] || comp[0];
+  const A = base.M.clone().multiply(R.get(base).clone().invert());
+  const target = new Map(comp.map((p) => [p, A.clone().multiply(R.get(p))]));
+  const st = { ids, r, finalMs, msg, A };
+  const same = (m, n) => m.elements.every((v, i) => Math.abs(v - n.elements[i]) < 1e-9);
+  if (comp.every((p) => same(p.M, target.get(p)))) { this.alternateOpen(st, true); return; }
+  const from = sh.forestAngles(F);
+  const saved = comp.map((p) => p.M.clone());
+  for (const p of comp) p.M.copy(target.get(p));
+  const ta = sh.forestAngles(F);
+  comp.forEach((p, i) => p.M.copy(saved[i]));
+  const to = new Map(from);
+  for (const p of comp) if (F.parent.has(p)) to.set(p, from.get(p) + wrapAngle(ta.get(p) - from.get(p)));
+  const rootsMap = new Map(roots.map((x) => [x, { from: x.M.clone(), to: target.get(x).clone() }]));
+  this.anim = { kind: 'forest', F, from, to, roots: rootsMap, t: 0, dur: 0.85, label: 'alt-fold', final: target, alt: st };
+};
+
+// Second half: the new hinges, and the solid opening into the new net.
+// (Straight to the result when the animation was cut short.)
+W.alternateOpen = function (st, animate) {
+  const sh = this.shell;
+  const comp = sh.panels.filter((p) => st.ids.has(p.id));
+  const ok = this.applyAlternate(comp, st.r, { Ms: st.finalMs });
+  if (!ok.ok) { this.app.toast(`The alternate net could not be placed: ${ok.why}. Undo restores your layout.`, 6000); this.app.notify?.(); return; }
+  const mine = sh.panels.filter((p) => st.ids.has(p.id));
+  const finals = new Map(mine.map((p) => [p, p.M.clone()]));
+  const done = () => {
+    for (const [p, m] of finals) p.M.copy(m);
+    this.updateMatrices();
+    this.afterMotion(false);
+    this.checkOverlaps?.();
+    this.refreshStyles();
+    this.frameView?.(true);
+    this.app.toast(st.msg, 6000);
+    this.app.notify?.();
+  };
+  if (!animate) { done(); return; }
+  const F = sh.forest();
+  const to = sh.forestAngles(F);
+  for (const p of mine) p.M.copy(st.A);
+  const from = sh.forestAngles(F);
+  for (const [p, v] of from) to.set(p, st.ids.has(p.id) ? v + wrapAngle(to.get(p) - v) : v);
+  const roots = F.roots.filter((x) => st.ids.has(x.id));
+  this.updateMatrices();
+  this.anim = { kind: 'forest', F, from, to, roots: new Map(roots.map((x) => [x, { from: st.A.clone(), to: finals.get(x).clone() }])), t: 0, dur: 1.1, label: 'alt-open', final: finals, done };
 };
 
 // A fingerprint of a flat layout that is the same for the same layout
@@ -704,15 +809,14 @@ W.findAlternate = function (comp, opts = {}) {
 // Put the chosen layout in place of the object's: same solid, the new
 // hinges, lying flat on the surface where the old layout was (beside it if
 // that would overlap something). In Solid the solid stays closed.
-W.applyAlternate = function (comp, r) {
+W.applyAlternate = function (comp, r, opts = {}) {
   const sh = this.shell;
   const ids = new Set(comp.map((p) => p.id));
   const keys = [...r.choice.hinges].map(pairKey);
-  const solid = this.state.mode === 'solid';
   // Lay the layout down: its faces turned face down, on the surface, centred
-  // where the old layout was.
+  // where the old layout (or the solid) was.
   const Ms = new Map();
-  if (solid && !r.closed) for (const id of r.choice.Ms.keys()) Ms.set(id, new THREE.Matrix4());
+  if (opts.Ms) for (const [id, m] of opts.Ms) Ms.set(id, m.clone());
   else {
     const sub = r.sub;
     const anyId = [...r.choice.Ms.keys()][0];
@@ -755,7 +859,7 @@ W.applyAlternate = function (comp, r) {
   if (mine.length !== comp.length) return { ok: false, why: 'the faces did not match up' };
   const inside = sh.overlaps().pairs.filter(([a, b]) => ids.has(a.id) || ids.has(b.id));
   if (inside.length) return { ok: false, why: `faces P${inside[0][0].no} and P${inside[0][1].no} would overlap` };
-  if (!(solid && !r.closed) && !mine.every((p) => sh.worldNormal(p).y < -1 + 1e-6 && sh.worldPoly(p).every((v) => Math.abs(v.y) < 1e-6))) return { ok: false, why: 'the layout would not lie flat' };
+  if (!mine.every((p) => sh.worldNormal(p).y < -1 + 1e-6 && sh.worldPoly(p).every((v) => Math.abs(v.y) < 1e-6))) return { ok: false, why: 'the layout would not lie flat' };
   return { ok: true };
 };
 
@@ -1336,7 +1440,7 @@ W.checkClosure = function (P) {
 
 // Least squares over hinge angles (Levenberg-Marquardt). `pose(x)` poses
 // the panels; `resid()` gives the residual vector at the current pose.
-function solveAngles(x0, pose, resid, jac, { iters = 80, tol = 1e-10 } = {}) {
+function solveAngles(x0, pose, resid, jac, { iters = 80, tol = 1e-10, maxStep = Infinity } = {}) {
   const n = x0.length;
   let x = x0.slice();
   pose(x);
@@ -1354,6 +1458,10 @@ function solveAngles(x0, pose, resid, jac, { iters = 80, tol = 1e-10 } = {}) {
       const M = A.map((row, i) => row.map((v, j) => (i === j ? v + lam * (v + 1e-6) : v)));
       const d = gaussSolve(M, g.map((v) => -v));
       if (!d) { lam *= 4; continue; }
+      // Small steps, so the folds follow on from where they start (and do
+      // not jump through flat to the mirror-image solution).
+      const big = Math.max(...d.map(Math.abs));
+      if (big > maxStep) for (let k = 0; k < d.length; k++) d[k] *= maxStep / big;
       const xn = x.map((v, k) => v + d[k]);
       pose(xn);
       const rn = resid(), fn = sq(rn);
@@ -1452,16 +1560,20 @@ W.zipFold = function (comp, F, { rest = false } = {}) {
   // try to meet `cons` starting from the accepted angles `base`
   const attempt = (cons, base) => {
     const vars = varsFor(cons);
-    const kicks = [-0.5, 0, -1.2, 0.5];
+    const kicks = [-0.5, -1.2, 0, -2, 0.5];
     let last = null;
     for (const k of kicks) {
       for (const [p, v] of base) ang.set(p, v);
-      const x0 = vars.map((p) => (k && flatRest.has(p) && Math.abs(base.get(p)) < 0.03 ? k : base.get(p)));
-      const r = solveAngles(x0, (x) => { vars.forEach((p, i) => ang.set(p, x[i])); pose(); }, residOf(cons), jacOf(cons, vars));
-      if (r.err > 1e-6) { last = { why: 'far', gap: r.err * L }; continue; }
+      const kicked = new Set(k ? vars.filter((p) => flatRest.has(p) && Math.abs(base.get(p)) < 0.03) : []);
+      const x0 = vars.map((p) => (kicked.has(p) ? k : base.get(p)));
+      const r = solveAngles(x0, (x) => { vars.forEach((p, i) => ang.set(p, x[i])); pose(); }, residOf(cons), jacOf(cons, vars), { maxStep: 0.35, iters: 120 });
+      if (r.err > 1e-6) { if (!last || last.why === 'far') last = { why: 'far', gap: r.err * L }; continue; }
+      // A fold bent one way that ends up bent the other way went through flat.
+      if (vars.some((p, i) => kicked.has(p) && r.x[i] * k < 0 && Math.abs(r.x[i]) > 0.05)) { if (!last) last = { why: 'far', gap: 0 }; continue; }
       vars.forEach((p, i) => ang.set(p, wrapAngle(r.x[i])));
       pose();
-      if (vars.some((p) => Math.abs(ang.get(p)) > Math.PI - 0.02)) { last = { why: 'flat' }; continue; }
+      const fp = vars.find((p) => Math.abs(ang.get(p)) > Math.PI - 0.02);
+      if (fp) { last = { why: 'flat', fp: [fp.id, F.parent.get(fp).parent.id] }; continue; }
       const o = overlapIn();
       if (o) { last = { why: 'overlap', o }; continue; }
       return { ok: true, ang: new Map(ang) };
@@ -1488,8 +1600,8 @@ W.zipFold = function (comp, F, { rest = false } = {}) {
     const pairs = [], tried = new Map();
     for (let guard = 0; guard < 400; guard++) {
       const info = new Map();
-      const at = (k) => { const r = find(k); if (!info.has(r)) info.set(r, { sum: 0, count: 0, ins: [], outs: [] }); return info.get(r); };
-      for (const p of comp) for (let j = 0; j < p.verts.length; j++) { const c = at(key(p, j)); c.sum += this.cornerAngle(p, j); c.count++; }
+      const at = (k) => { const r = find(k); if (!info.has(r)) info.set(r, { sum: 0, count: 0, ins: [], outs: [], panels: new Set() }); return info.get(r); };
+      for (const p of comp) for (let j = 0; j < p.verts.length; j++) { const c = at(key(p, j)); c.sum += this.cornerAngle(p, j); c.count++; c.panels.add(p.id); }
       for (const h of half) if (!h.done) { at(key(h.p, h.i + 1)).ins.push(h); at(key(h.p, h.i)).outs.push(h); }
       let best = null;
       // Two sides of a cut edge: they belong together.
@@ -1509,7 +1621,7 @@ W.zipFold = function (comp, F, { rest = false } = {}) {
           if (forbid.has(pid(h1, h2))) { tried.set(pid(h1, h2), { h1, h2, why: 'blocks' }); continue; }
           if (Math.abs(h1.len - h2.len) > L * 1e-4) { tried.set(pid(h1, h2), { h1, h2, why: 'length', a: h1.len, b: h2.len }); continue; }
           if (c.count < 3) continue;
-          if (c.sum > 2 * Math.PI - 1e-4) { tried.set(pid(h1, h2), { h1, h2, why: 'full', sum: c.sum, count: c.count }); continue; }
+          if (c.sum > 2 * Math.PI + 1e-4) { tried.set(pid(h1, h2), { h1, h2, why: 'full', sum: c.sum, count: c.count, corner: [...c.panels] }); continue; }
           const better = !best || (largestFirst ? c.sum > best.sum + 1e-9 : c.sum < best.sum - 1e-9) || (Math.abs(c.sum - best.sum) <= 1e-9 && c.count > best.count);
           if (better) best = { h1, h2, sum: c.sum, count: c.count };
         }
@@ -1518,7 +1630,7 @@ W.zipFold = function (comp, F, { rest = false } = {}) {
       const { h1, h2 } = best;
       const test = best.cut ? [...cons, ...vmatch(h1.p, h1.i, h2.p, h2.i)] : [...cons, ...glueCons(h1, h2)];
       const r = attempt(test, acc);
-      if (!r.ok) { tried.set(pid(h1, h2), { h1, h2, why: r.why, gap: r.gap, o: r.o, sum: best.sum }); continue; }
+      if (!r.ok) { tried.set(pid(h1, h2), { h1, h2, why: r.why, gap: r.gap, o: r.o, fp: r.fp, sum: best.sum, path: [h1.p.id, ...[...pathVars(h1.p, h2.p)].map((q) => q.id), h2.p.id] }); continue; }
       acc = r.ang;
       cons.length = 0; cons.push(...test);
       h1.done = h2.done = true;
@@ -1557,29 +1669,31 @@ W.zipFold = function (comp, F, { rest = false } = {}) {
   return { pairs: best.pairs, x, rootTo, rest, open: best.open, tried: best.tried };
 };
 
-// Why each edge left open stays open, in words.
-W.zipOpenText = function (z) {
-  const L = this.edgeLen;
+// The edges left open, one row each: why, the edges Refold tried to join,
+// and the faces that stopped them meeting.
+W.zipRows = function (z) {
   const mm = (v) => `${(v * 1000).toFixed(0)} mm`;
-  const name = (h) => `P${h.p.no} edge ${h.p.edges[h.i].no || h.i + 1}`;
-  const said = new Set(), lines = [];
+  const said = new Set(), rows = [];
+  const edge = (h) => [h.p.id, h.i];
   for (const t of z.tried.values()) {
     if (!z.open.includes(t.h1) && !z.open.includes(t.h2)) continue;
     const k = [t.h1, t.h2].map((h) => `${h.p.id}#${h.i}`).sort().join('|');
     if (said.has(k)) continue;
     said.add(k);
     const pair = `P${t.h1.p.no} and P${t.h2.p.no}`;
-    if (t.why === 'length') lines.push(`${pair}: the edges that would meet are different lengths (${mm(t.a)} and ${mm(t.b)})`);
-    else if (t.why === 'full') lines.push(`${pair}: the faces around that corner already make a full turn (${t.count} faces, ${Math.round(deg(t.sum))}°), so those edges cannot meet there`);
-    else if (t.why === 'overlap') lines.push(`${pair}: to meet, faces P${t.o[0].no} and P${t.o[1].no} would pass through each other`);
-    else if (t.why === 'flat') lines.push(`${pair}: to meet, a face would have to fold flat onto its neighbour`);
-    else if (t.why === 'blocks') lines.push(`${pair}: joining these would stop more edges from meeting elsewhere`);
-    else lines.push(`${pair}: the rigid faces cannot bring these edges together${t.gap ? ` (they stay ${mm(t.gap)} apart)` : ''}`);
+    let text, blockers = [];
+    if (t.why === 'length') text = `${pair}: the edges that would meet are different lengths (${mm(t.a)} and ${mm(t.b)})`;
+    else if (t.why === 'full') { text = `${pair}: the faces around that corner already add up to more than a full turn (${t.count} faces, ${Math.round(deg(t.sum))}°)`; blockers = t.corner || []; }
+    else if (t.why === 'overlap') { text = `${pair}: to meet, faces P${t.o[0].no} and P${t.o[1].no} would pass through each other`; blockers = [t.o[0].id, t.o[1].id]; }
+    else if (t.why === 'flat') { text = `${pair}: to meet, a face would have to fold flat onto its neighbour`; blockers = t.fp || []; }
+    else if (t.why === 'blocks') text = `${pair}: left open because joining them stops more edges meeting elsewhere`;
+    else { text = `${pair}: the rigid faces between them cannot bring these edges together${t.gap ? ` (they stay ${mm(t.gap)} apart)` : ''}`; blockers = t.path || []; }
+    rows.push({ text, edges: [edge(t.h1), edge(t.h2)], blockers: [...new Set(blockers)] });
     for (const h of [t.h1, t.h2]) said.add(`${h.p.id}#${h.i}`);
   }
   const rest = z.open.filter((h) => !said.has(`${h.p.id}#${h.i}`));
-  if (rest.length) lines.push(`${rest.map(name).slice(0, 6).join(', ')}${rest.length > 6 ? '…' : ''}: no free edge of the same length comes to meet ${rest.length === 1 ? 'it' : 'them'}`);
-  return lines;
+  for (const h of rest) rows.push({ text: `P${h.p.no}: no free edge of the same length comes to meet this edge`, edges: [edge(h)], blockers: [] });
+  return rows;
 };
 
 // ------------------------------------------------------- rotate and move
@@ -2336,11 +2450,13 @@ W.infoObjects = function () {
     const mine = sh.edges.filter((e) => ids.has(e.uses[0].panel.id));
     const hinges = mine.filter((e) => e.uses.length === 2 && e.type === 'hinge').length;
     const cuts = mine.filter((e) => e.uses.length === 2 && e.type !== 'hinge').length;
-    const free = mine.filter((e) => e.uses.length === 1).length;
+    const freeE = mine.filter((e) => e.uses.length === 1);
+    const seamed = freeE.filter((e) => this.isSeamed(e.uses[0].panel, e.uses[0].i)).length;
+    const free = freeE.length - seamed;
     const atRest = c.every((p) => isIdentity(p.M));
     const flat = c.every((p) => this.lyingFlat(p));
     const state = flat ? 'lying flat' : atRest ? (this.restClosed(c) ? 'folded closed' : 'in its 3D form, with an opening') : 'partly folded';
-    return `Object ${k + 1}: ${this.objectText(c)} · ${c.length} face${c.length === 1 ? '' : 's'} · ${hinges} hinge${hinges === 1 ? '' : 's'} · ${cuts} cut edge${cuts === 1 ? '' : 's'}${free ? ` · ${free} free edge${free === 1 ? '' : 's'}` : ''} · ${state}`;
+    return `Object ${k + 1}: ${this.objectText(c)} · ${c.length} face${c.length === 1 ? '' : 's'} · ${hinges} hinge${hinges === 1 ? '' : 's'} · ${cuts} cut edge${cuts === 1 ? '' : 's'}${seamed ? ` · ${seamed / 2} seam${seamed === 2 ? '' : 's'} (joined while folding)` : ''}${free ? ` · ${free} free edge${free === 1 ? '' : 's'}` : ''} · ${state}`;
   });
 };
 
@@ -2382,6 +2498,8 @@ W.focusIds = function (ids) {
 
 W.newEmpty = function () {
   this.showPlaceZone(false);
+  this.lastRefold = null;
+  this.selComp = null;
   this.newProject('empty');
   this.state.mode = 'shape';
   this.state.mtool = null;
@@ -3019,6 +3137,8 @@ W.edgeStyle = function (p, e, okEdges) {
   if (this.snapEdges && this.snapEdges.has(e)) return { color: this.snapBad ? '#e0452b' : '#36d98a', w: this.edgeLen * 0.022 * 2.6 };
   // Fold: free edges coming together.
   if (this.nearEdges && this.nearEdges.has(e)) return { color: '#f0b44c', w: this.edgeLen * 0.022 * 2.2 };
+  // Info → Last Refold: the edges a row names.
+  if (this.refoldEdges && this.refoldEdges.has(e)) return { color: '#ff8a1f', w: this.edgeLen * 0.022 * 3 };
   // Move: the join where the chosen part comes away.
   if (this.holdKeys && !this.clean && e.uses.length === 2 && this.holdKeys.has(pairKey(e))) return { color: '#e0452b', w: this.edgeLen * 0.022 * 2.8 };
   if (this.detach && !this.clean && ['move', 'scissors'].includes(this.state.tool) && e.uses.length === 2 && this.detach.ringKeys.has(pairKey(e))) return { color: '#ff8a1f', w: this.edgeLen * 0.022 * 2.8, dashed: e.type === 'cut' && this.state.mode === 'shape' };
@@ -3114,6 +3234,13 @@ W.liftWanted = function () { return false; };
 // Mode animation end: exact poses and a message.
 const finishAnim0 = W.finishAnim;
 W.finishAnim = function (a) {
+  if (a.label === 'alt-fold') {
+    for (const [p, m] of a.final) p.M.copy(m);
+    this.updateMatrices();
+    this.alternateOpen(a.alt, a.t >= 1);
+    return;
+  }
+  if (a.label === 'alt-open') { a.done(); return; }
   if (a.label !== 'mode') { finishAnim0.call(this, a); return; }
   if (a.final) for (const [p, m] of a.final) p.M.copy(m);
   this.updateMatrices();
@@ -3122,22 +3249,57 @@ W.finishAnim = function (a) {
   let msg = a.msg;
   if (a.check && a.check.kind === 'zip') {
     // Join the edges that came together; close the form if nothing is left open.
-    const parts = [];
     for (const z of a.check.zips) this.recordSeams(z.pairs.filter(([m, f]) => m.p.edges[m.i].uses.length === 1 && f.p.edges[f.i].uses.length === 1));
+    let joined = 0, open = 0, notClosed = 0;
+    const sections = [];
     for (const z of a.check.zips) {
       const P = this.shell.panelById.get(z.id);
       const seams = z.pairs.map(([m, f]) => `P${m.p.no}–P${f.p.no}`);
-      const closed = P && !z.open && this.checkClosure(P);
-      if (closed) parts.push(`Refold joined ${seams.length} pair${seams.length === 1 ? '' : 's'} of edges (${seams.slice(0, 8).join(', ')}${seams.length > 8 ? '…' : ''}) and the form closed: it is a solid now.`);
-      else parts.push(`Refold joined ${seams.length} pair${seams.length === 1 ? '' : 's'} of edges (${seams.slice(0, 8).join(', ')}${seams.length > 8 ? '…' : ''}).${z.open ? ` ${z.open} edge${z.open === 1 ? ' stays' : 's stay'} open: ${z.text.join('; ')}.` : ''}`);
+      const quiet = this.app.toast;
+      let why = '';
+      this.app.toast = (m) => { why = m; };
+      let closed = false;
+      const inside = P && !z.open ? this.shell.overlaps((x, y) => x.solidId !== undefined && this.componentOf(P).includes(x) && this.componentOf(P).includes(y)).pairs : [];
+      try { closed = !!(P && !z.open && this.checkClosure(P)); } finally { this.app.toast = quiet; }
+      joined += seams.length; open += z.open;
+      const rows = [{ text: `Joined ${seams.length} pair${seams.length === 1 ? '' : 's'} of edges: ${seams.join(', ')}`, edges: z.pairs.flat().map((h) => [h.p.id, h.i]), blockers: [] }, ...z.rows];
+      let title;
+      if (closed) title = `${z.n} faces · closed: it is a solid now`;
+      else if (!z.open) {
+        notClosed++;
+        title = `${z.n} faces · every edge met, but it is not used as a solid`;
+        rows.push({ text: why || 'The form did not close.', edges: [], blockers: inside.flat().map((x) => x.id) });
+      } else title = `${z.n} faces · partly folded · ${seams.length} seam${seams.length === 1 ? '' : 's'} joined · ${z.open} edge${z.open === 1 ? '' : 's'} open`;
+      sections.push({ title, rows });
     }
-    this.lastZip = parts;
+    const summary = open ? `Partly folded · ${joined} seam${joined === 1 ? '' : 's'} joined · ${open} edge${open === 1 ? '' : 's'} open`
+      : notClosed ? `Folded · ${joined} seam${joined === 1 ? '' : 's'} joined · not closed`
+      : `Folded closed · ${joined} seam${joined === 1 ? '' : 's'} joined`;
+    this.setRefoldReport({ summary, sections, issues: a.check.issues || [] });
+    this.lastZip = sections.map((x) => x.title);
     this.refreshStyles();
-    msg = `${a.msg} ${parts.join(' ')}`;
+    msg = `${a.msg.replace(/^(Solid \(3D\)\. )?Folded \d+ objects?\.\s*/, '$1')}${summary}${open || notClosed || (a.check.issues || []).length ? ' · details in Info' : '.'}`;
   } else if (a.check) {
     const ps = this.shell.panels.filter((p) => a.check.ids.has(p.id));
     const off = a.check.kind === 'flat' ? ps.filter((p) => !this.lyingFlat(p)) : ps.filter((p) => !isIdentity(p.M));
     if (off.length) msg += ` But ${off.length} face${off.length === 1 ? ' is' : 's are'} still not ${a.check.kind === 'flat' ? 'lying flat' : 'in place'} (${off.slice(0, 4).map((p) => `P${p.no}`).join(', ')}).`;
+  }
+  // A folded object left hanging above the surface (or reaching into it)
+  // is set down so its lowest point touches, as it was turned.
+  if (a.check && a.check.kind !== 'flat') {
+    const ids = new Set(a.check.ids);
+    for (const z of a.check.zips || []) ids.add(z.id);
+    for (const id of ids) {
+      const P = this.shell.panelById.get(id);
+      if (!P) continue;
+      const comp = this.componentOf(P);
+      const low = this.lowestY(comp);
+      if (Math.abs(low) < this.edgeLen * 1e-5) continue;
+      const T = new THREE.Matrix4().makeTranslation(0, -low, 0);
+      if (this.snapProblem(this.moveStart(comp, new THREE.Vector3()), T, { below: false })) continue;
+      this.transformComponent(comp, T);
+      for (const p of comp) ids.delete(p.id);
+    }
   }
   this.app.toast(msg, 5000);
   this.app.notify?.();

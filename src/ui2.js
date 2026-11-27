@@ -214,6 +214,42 @@ export class WorkspaceUI {
       const c = ws.infoCounts();
       const objs = ws.infoObjects();
       ip.innerHTML = `<h3>Info</h3><div>${ws.infoText()}</div>${objs.length ? `<ul style="margin-top:6px">${objs.map((t) => `<li>${t}</li>`).join('')}</ul>` : ''}<div style="opacity:.75;margin-top:4px">${c.objects} object${c.objects === 1 ? '' : 's'} · ${mode === 'shape' ? 'Shape (2D)' : 'Solid (3D)'}</div>`;
+      // Last Refold: the full report. Tapping a row shows its edges (orange)
+      // and the faces in the way (red, numbered) on the model.
+      const lr = ws.lastRefold;
+      if (lr) {
+        const box = document.createElement('div');
+        box.className = 'ws-refold';
+        const h = document.createElement('h3');
+        h.textContent = 'Last Refold';
+        h.style.marginTop = '10px';
+        const sum = document.createElement('div');
+        sum.textContent = lr.summary;
+        box.append(h, sum);
+        for (const sec of lr.sections) {
+          const t = document.createElement('div');
+          t.textContent = sec.title;
+          t.style.cssText = 'margin-top:6px;opacity:.8';
+          const ul = document.createElement('ul');
+          ul.style.marginTop = '4px';
+          for (const row of sec.rows) {
+            const li = document.createElement('li');
+            const b = document.createElement('button');
+            b.type = 'button';
+            b.dataset.refoldRow = '';
+            b.textContent = row.text;
+            b.addEventListener('click', () => {
+              ws.focusRefold(row);
+              // On a narrow screen the list would hide the model: close it.
+              if (innerWidth < 700) { this.drop = null; this.render(); }
+            });
+            li.appendChild(b);
+            ul.appendChild(li);
+          }
+          box.append(t, ul);
+        }
+        ip.appendChild(box);
+      }
     }
     const ep = $('#wsErrors');
     ep.hidden = this.drop !== 'errors';
