@@ -8,6 +8,7 @@ import { XRInput } from './xr.js';
 import { UI } from './ui.js';
 import { SolidsWorkspace } from './solids/workspace.js';
 import './solids/modes.js';
+import './solids/preview.js';
 import { SolidsUI } from './solids/ui.js';
 import { WorkspaceUI } from './ui2.js';
 import { Placement, SURFACES, SURFACE_LABELS } from './placement.js';
@@ -191,15 +192,8 @@ class App {
     this.tableTopMesh.position.set(0, -0.02, 0);
     this.legPos = [[-(tw / 2 - 0.06), -(td / 2 - 0.06)], [tw / 2 - 0.06, -(td / 2 - 0.06)], [-(tw / 2 - 0.06), td / 2 - 0.06], [tw / 2 - 0.06, td / 2 - 0.06]];
     const mw = Math.min(tw - 0.06, Math.max(W, H) + 0.16), md = Math.min(td - 0.06, Math.max(W, H) + 0.12);
-    const key = `${mw.toFixed(3)}x${md.toFixed(3)}`;
-    if (this.matKey !== key) {
-      this.matKey = key;
-      if (this.mat.material.map) this.mat.material.map.dispose();
-      this.mat.material.map = makeMatTexture(mw, md);
-      this.mat.material.needsUpdate = true;
-    }
-    this.mat.scale.set(mw, md, 1);
-    this.mat.position.set(0, 0.0005, 0);
+    this.matBase = { mw, md };
+    this.layoutMat();
 
     const sc = this.sun.shadow.camera;
     const shadowExt = Math.max(tw, td) * 0.75 + 0.2;
@@ -268,6 +262,29 @@ class App {
     this.notify();
   }
 
+  // The cutting mat: its usual size, or (while placing, on the mat) exactly
+  // the placement area, so the mat's own edges are the boundary. The grid
+  // stays 1 cm; only the part shown changes.
+  layoutMat() {
+    const o = this.matOverride, b = this.matBase;
+    if (!b) return;
+    const mw = o ? o.w : b.mw, md = o ? o.d : b.md;
+    const key = `${mw.toFixed(3)}x${md.toFixed(3)}`;
+    if (this.matKey !== key) {
+      this.matKey = key;
+      if (this.mat.material.map) this.mat.material.map.dispose();
+      this.mat.material.map = makeMatTexture(mw, md);
+      this.mat.material.needsUpdate = true;
+    }
+    this.mat.scale.set(mw, md, 1);
+    this.mat.position.set(o ? o.cx : 0, 0.0005, o ? o.cz : 0);
+  }
+
+  setMatArea(rect) {
+    this.matOverride = rect || null;
+    this.layoutMat();
+  }
+
   cycleSurface() {
     this.setSurface(SURFACES[(SURFACES.indexOf(this.state.surface) + 1) % SURFACES.length]);
   }
@@ -279,6 +296,8 @@ class App {
     this.table.visible = !hidden;
     this.mat.visible = !hidden && style === 'mat';
     this.wood.color.set(style === 'plain' ? '#d8c6a6' : '#a77b52');
+    // Placement shows its boundary differently on the mat and elsewhere.
+    this.solids?.refreshPlaceZone?.();
   }
 
   initPreviews() {

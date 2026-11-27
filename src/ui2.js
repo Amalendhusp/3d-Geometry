@@ -180,6 +180,8 @@ export class WorkspaceUI {
     $('#wsRedo').disabled = !ws.canRedo();
     // Tools
     const box = $('#wsTools');
+    const pv = box.querySelector('[data-mtool="preview"]');
+    if (pv) pv.setAttribute('aria-pressed', String(!!(ws.previewOn && ws.previewOn[mode])));
     const sig = `${mode}|${ws.state.mtool}`;
     if (box.dataset.sig !== sig) {
       box.dataset.sig = sig;

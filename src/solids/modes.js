@@ -31,7 +31,7 @@ export const MODE_TOOLS = {
     { key: 'fold', name: 'Fold', tip: 'Drag a panel to swing it about its hinge; free edges coming together light up, and close enough they snap together (a neighbouring panel turns to meet it if needed)' },
     { key: 'cut', name: 'Cut & Join', tip: 'Pull a face away from a hinge to cut it (the hinge on the side you pull from; one hinge per drag, and pulling it back onto its edge keeps it); drag a loose piece, or a part you pull off, to a matching free edge to join it with a hinge. A tap on a hinge cuts it' },
     { key: 'mirror', name: 'Mirror', tip: 'Not yet available: reflect a shape or group across a tapped edge, with a preview first (a later stage)', later: true },
-    { key: 'preview', name: '3D', tip: 'Not yet available: preview of the folded form (next stage)', later: true },
+    { key: 'preview', name: '3D', tip: 'Show or hide a translucent preview of the net’s folded form beside it (read-only; it follows your edits)' },
   ],
   solid: [
     { key: 'modify', name: 'Modify', tip: 'Drag a corner or an edge of a solid to reshape it; faces stay flat and it stops at the last valid position' },
@@ -40,7 +40,7 @@ export const MODE_TOOLS = {
     { key: 'rotate', name: 'Rotate', tip: 'Drag a solid to turn it freely in any direction, like turning it in your hand' },
     { key: 'cut', name: 'Cut & Join', tip: 'Pull one solid of a joined group away to cut it off; drag a solid onto a matching face of another to join them' },
     { key: 'mirror', name: 'Mirror', tip: 'Not yet available: mirror across a face with a preview and a tick to confirm (next stage)', later: true },
-    { key: 'preview', name: '2D', tip: 'Not yet available: preview of the net (next stage)', later: true },
+    { key: 'preview', name: '2D', tip: 'Show or hide a translucent preview of the solid’s net beside it (read-only; it follows your edits)' },
   ],
 };
 
@@ -870,6 +870,8 @@ W.setModeTool = function (key) {
   const t = tools.find((x) => x.key === key);
   if (!t) return;
   if (t.later) { this.app.toast(t.tip); return; }
+  // The preview is a view toggle: it changes no tool, tab, pose or history.
+  if (key === 'preview') { this.togglePreview(); return; }
   this.tools.finishAll();
   this.placing = null;
   this.hidePlacePreview();
@@ -949,8 +951,11 @@ W.surfaceRect = function () {
     if (surf) { this.shellGroup.updateWorldMatrix(true, false); surf.updateWorldMatrix(true, false); o = surf.worldToLocal(this.shellGroup.localToWorld(new THREE.Vector3())); }
     x0 = o.x - EDGE * 2; x1 = o.x + EDGE * 2; z0 = o.z - EDGE * 2; z1 = o.z + EDGE * 2;
   } else { x0 = box.min.x - m; x1 = box.max.x + m; z0 = box.min.z - m; z1 = box.max.z + m; }
-  const hx = t.tw / 2 - 0.01, hz = t.td / 2 - 0.01;
-  x0 = Math.max(x0, -hx); x1 = Math.min(x1, hx); z0 = Math.max(z0, -hz); z1 = Math.min(z1, hz);
+  // Edges on whole centimetres (the mat's grid), inside the table top.
+  const cm = (v, f) => f(v * 100 - 1e-6) / 100;
+  const hx = Math.floor((t.tw / 2 - 0.01) * 100) / 100, hz = Math.floor((t.td / 2 - 0.01) * 100) / 100;
+  x0 = Math.max(cm(x0, Math.floor), -hx); x1 = Math.min(Math.ceil(x1 * 100 - 1e-6) / 100, hx);
+  z0 = Math.max(cm(z0, Math.floor), -hz); z1 = Math.min(Math.ceil(z1 * 100 - 1e-6) / 100, hz);
   return { cx: (x0 + x1) / 2, cz: (z0 + z1) / 2, hw: Math.max(0.01, (x1 - x0) / 2), hd: Math.max(0.01, (z1 - z0) / 2) };
 };
 
@@ -965,11 +970,24 @@ W.inPlaceZone = function (local) {
   return Math.abs(p.x - r.cx) <= r.hw + 1e-6 && Math.abs(p.z - r.cz) <= r.hd + 1e-6;
 };
 
+// The surface style changed while placing: show the boundary the new way.
+W.refreshPlaceZone = function () {
+  if (this.placing) this.showPlaceZone(true);
+};
+
 W.showPlaceZone = function (on) {
   const surf = this.app.surface;
   if (!surf) return;
-  if (!on) { this.placeRect = null; if (this.placeZone) this.placeZone.visible = false; return; }
+  if (!on) { this.placeRect = null; this.app.setMatArea?.(null); if (this.placeZone) this.placeZone.visible = false; return; }
   const r = this.placeRect = this.surfaceRect();
+  // On the cutting mat the mat's own edges are the boundary (no outline);
+  // on the table or without one, the dashed outline.
+  if (this.app.mat && this.app.mat.visible) {
+    this.app.setMatArea?.({ cx: r.cx, cz: r.cz, w: 2 * r.hw, d: 2 * r.hd });
+    if (this.placeZone) this.placeZone.visible = false;
+    return;
+  }
+  this.app.setMatArea?.(null);
   if (!this.placeZone) {
     this.placeZone = new THREE.Group();
     this.placeZone.userData.ui = true;
@@ -3204,7 +3222,7 @@ W.panelRows = function (row, B, M, Wd, y0) {
   else pickRow.push({ label: 'Next shape', w: 1.4, action: () => { const i = SHAPES.findIndex((x) => x.key === s.shapeType); a.setPickerType(SHAPES[(i + 1) % SHAPES.length].key); } });
   pickRow.push({ label: 'From Gallery', w: 1.2, action: () => a.app.toast('From Gallery comes in the next stage.'), disabled: true });
   row(y0 + 82, 62, pickRow, 6);
-  row(y0 + 152, 62, MODE_TOOLS[mode].map((t) => ({ label: t.name, action: () => a.setModeTool(t.key), active: s.mtool === t.key, disabled: !!t.later })), 6);
+  row(y0 + 152, 62, MODE_TOOLS[mode].map((t) => ({ label: t.name, action: () => a.setModeTool(t.key), active: t.key === 'preview' ? !!(a.previewOn && a.previewOn[mode]) : s.mtool === t.key, disabled: !!t.later })), 6);
   row(y0 + 222, 62, [
     { label: 'Unfold', action: () => a.topUnfold() },
     { label: 'Refold', action: () => a.topRefold() },
