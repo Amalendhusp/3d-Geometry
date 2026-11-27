@@ -1068,6 +1068,35 @@ W.surfaceAt = function (ptr) {
   return new THREE.Ray(o, dir).intersectPlane(new THREE.Plane(new THREE.Vector3(0, 1, 0), 0), new THREE.Vector3());
 };
 
+// The free edge of a shape lying on the surface that a tap on the empty
+// surface, just outside it, points at: within half the edge's length of the
+// edge, on its outer side, nearest first (the same edge a tap just inside
+// the shape would choose).
+W.freeEdgeOutside = function (pt) {
+  const sh = this.shell;
+  let best = null;
+  for (const P of sh.panels) {
+    if (!this.lyingFlat(P)) continue;
+    const w = sh.worldPoly(P), n = w.length;
+    const c = w.reduce((a, v) => a.add(v), new THREE.Vector3()).divideScalar(n);
+    for (let i = 0; i < n; i++) {
+      if (P.edges[i].uses.length !== 1 || this.isSeamed(P, i)) continue;
+      const a = w[i], b = w[(i + 1) % n];
+      const ab = new THREE.Vector3(b.x - a.x, 0, b.z - a.z), L = ab.length();
+      if (L < 1e-9) continue;
+      const t = ((pt.x - a.x) * ab.x + (pt.z - a.z) * ab.z) / (L * L);
+      const tc = THREE.MathUtils.clamp(t, 0, 1);
+      const d = Math.hypot(pt.x - (a.x + ab.x * tc), pt.z - (a.z + ab.z * tc));
+      // Outer side: the tap and the shape's centre lie on opposite sides of the edge.
+      const side = (v) => ab.x * (v.z - a.z) - ab.z * (v.x - a.x);
+      if (side(pt) * side(c) >= 0) continue;
+      if (d > L * 0.5) continue;
+      if (!best || d < best.d) best = { P, i, d };
+    }
+  }
+  return best;
+};
+
 W.freeEdgeNear = function (P, local, frac = 0.45) {
   let best = null, bd = this.edgeLen * frac;
   const n = P.verts.length;
@@ -1094,6 +1123,15 @@ W.planPlacement = function (ptr, hit) {
     }
     const pt = this.surfaceAt(ptr);
     if (!pt) return { error: 'Point at the work surface.' };
+    // Just outside the outer edge of a net lying on the surface: that edge.
+    // (A free square centred there would lie over the net, so this is what
+    // the tap means.)
+    const out = this.freeEdgeOutside(pt);
+    if (out) {
+      const P = out.P, n = P.verts.length;
+      const verts = attachedPolygon(shp.n, P.verts[out.i], P.verts[(out.i + 1) % n], P.normal);
+      return { kind: 'shape', shp, verts, M: P.M.clone(), target: { P, i: out.i } };
+    }
     return { kind: 'shape', shp, verts: regularPolygon(shp.n, EDGE, pt, 0), M: new THREE.Matrix4(), target: null };
   }
   const type = this.state.solidType;
@@ -1156,7 +1194,11 @@ W.placeAt = function (ptr) {
     const bad = P && this.overlapsWith(new Set([P]));
     if (!P || bad) {
       this.restoreSnapshot(before);
-      this.app.toast(`That ${plan.shp.name.toLowerCase()} would overlap ${bad ? `face P${bad.no}` : 'another face'}. Nothing was placed.`, 4500);
+      const pb = bad && this.shell.panelById.get(bad.id);
+      if (pb) this.flashPanel(pb);
+      this.app.toast(plan.target
+        ? `A ${plan.shp.name.toLowerCase()} on that edge of P${plan.target.P.no} would overlap ${bad ? `face P${bad.no}` : 'another face'}, so nothing was placed.`
+        : `That ${plan.shp.name.toLowerCase()} would overlap ${bad ? `face P${bad.no}` : 'another face'}. Nothing was placed.`, 4500);
       return false;
     }
     label = plan.target ? `${plan.shp.name} attached to the edge of P${plan.target.P.no}, ${Math.round(plan.verts[0].distanceTo(plan.verts[1]) * 1000)} mm sides` : `${plan.shp.name} placed (${Math.round(EDGE * 1000)} mm sides)`;
