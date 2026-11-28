@@ -522,6 +522,8 @@ class App {
     this.panel.invalidate();
   }
 
+  clearToast() { this.ui?.clearToast?.(); }
+
   toast(msg, ms = 2600) {
     this.statusText = msg;
     this.ui?.toast(msg, ms);

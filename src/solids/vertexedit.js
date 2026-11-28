@@ -122,11 +122,13 @@ export function solvePlanar(model, start, pins, targets, iters = 400) {
     if (dev < 1e-10) break;
     for (const [k, a] of acc) P.get(k).addScaledVector(a.v, 1 / a.n);
   }
+  const bad = [];
   for (const f of quads) {
     const d = planarDev(f.keys.map((k) => P.get(k)));
     if (d > worst.dev) worst = { dev: d, face: f.id };
+    if (d > 1e-6) bad.push(f.id);
   }
-  return { P, dev: worst.dev, face: worst.face };
+  return { P, dev: worst.dev, face: worst.face, bad };
 }
 
 function signedVolume(model, P) {

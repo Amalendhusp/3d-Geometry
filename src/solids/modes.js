@@ -1051,6 +1051,7 @@ W.tap = function (ptr) {
   }
   if (this.state.tool === 'remove') { this.removeAt(hit); return; }
   if (this.state.tool === 'select') this.selectObject(hit.panel);
+  if (this.state.tool === 'modify2d') this.app.toast(this.state.mode === 'solid' ? 'Press on a corner or an edge of a face (within a fingertip of it) and drag to reshape it. Drag elsewhere to turn the view.' : 'Press on a corner or an edge (within a fingertip of it) and drag: a corner changes its angle and edges, an edge makes the face deeper or narrower. A tap on an edge between two faces switches it between hinge and cut.', 5000);
 };
 
 W.selectObject = function (P) {
@@ -2311,6 +2312,62 @@ W.mergePieces = function (e) {
 
 // ------------------------------------------------ modify (both modes)
 
+// What a finger on a screen grabs: the nearest visible corner or edge of a
+// face, measured on the screen (a finger is ~40 px wide; a face on a phone
+// can be 50 px across). A corner counts within about a third of the face's
+// shortest edge (at most 24 px), an edge within a quarter (at most 18 px);
+// the one nearest its own reach wins. A press that is near neither orbits
+// the view. Hidden corners and edges (behind other faces) are not offered.
+W.modifyPickAt = function (ptr) {
+  const cam = this.app.camera, el = this.app.renderer.domElement;
+  const rect = el.getBoundingClientRect();
+  const sh = this.shell;
+  const px = (w) => { const v = w.clone().project(cam); return { x: (v.x + 1) / 2 * rect.width, y: (1 - v.y) / 2 * rect.height }; };
+  const m = px(ptr.ray.origin.clone().addScaledVector(ptr.ray.direction, 1));
+  const dl = this.localRay(ptr).direction;
+  const world = (P, v) => this.shellGroup.localToWorld(v.clone().applyMatrix4(P.M));
+  const cands = [];
+  for (const P of sh.panels) {
+    if (!this.isPiecePanel(P)) continue;
+    const n = P.verts.length;
+    const W3 = P.verts.map((v) => world(P, v));
+    const S = W3.map(px);
+    let Lpx = Infinity;
+    for (let i = 0; i < n; i++) Lpx = Math.min(Lpx, Math.hypot(S[i].x - S[(i + 1) % n].x, S[i].y - S[(i + 1) % n].y));
+    if (!Number.isFinite(Lpx)) continue;
+    const facing = Math.abs(sh.worldNormal(P).normalize().dot(dl));
+    const rv = THREE.MathUtils.clamp(0.36 * Lpx, 14, 26), re = THREE.MathUtils.clamp(0.28 * Lpx, 10, 20);
+    for (let k = 0; k < n; k++) {
+      const d = Math.hypot(S[k].x - m.x, S[k].y - m.y);
+      if (d <= rv) cands.push({ P, kind: 'corner', k, score: d / rv <= 0.55 ? d / rv - 1 : 0.9 * d / rv, facing, point: W3[k] });
+    }
+    for (let i = 0; i < n; i++) {
+      const a = S[i], b = S[(i + 1) % n];
+      const abx = b.x - a.x, aby = b.y - a.y, l2 = abx * abx + aby * aby;
+      if (l2 < 1e-9) continue;
+      const t = THREE.MathUtils.clamp(((m.x - a.x) * abx + (m.y - a.y) * aby) / l2, 0, 1);
+      const d = Math.hypot(a.x + abx * t - m.x, a.y + aby * t - m.y);
+      if (d <= re) cands.push({ P, kind: 'edge', k: i, score: d / re + 0.0001, facing, point: W3[i].clone().lerp(W3[(i + 1) % n], t) });
+    }
+  }
+  cands.sort((x, y) => (Math.abs(x.score - y.score) > 1e-3 ? x.score - y.score : y.facing - x.facing));
+  const org = ptr.ray.origin;
+  for (const c of cands) {
+    if (c.facing < 0.04) continue;
+    // Hidden behind another face?
+    const dist = c.point.distanceTo(org);
+    this.raycaster.set(org, c.point.clone().sub(org).normalize());
+    this.raycaster.far = dist;
+    const hits = this.raycaster.intersectObjects(this.pickables || [], false);
+    if (hits.length && hits[0].distance < dist - 0.004) continue;
+    const P = c.P, n = P.verts.length;
+    const grab = c.kind === 'corner' ? { kind: 'corner', verts: [c.k], edges: [(c.k + n - 1) % n, c.k] } : { kind: 'edge', verts: [c.k, (c.k + 1) % n], edges: [c.k] };
+    const normal = sh.worldNormal(P).transformDirection(this.shellGroup.matrixWorld);
+    return { panel: P, grab, point: c.point, distance: dist, normal, local: null };
+  }
+  return null;
+};
+
 // What a press on a face grabs: a corner (with its two edges) or an edge.
 W.modifyGrab = function (P, local) {
   const n = P.verts.length;
@@ -2346,6 +2403,9 @@ W.modifyStart = function (P, grab) {
   const moving = [...new Set(grab.verts.map(keyAt))];
   // The rest of the grabbed face holds still; other faces follow to stay flat.
   const pins = new Set(pcP.verts.map((v, i) => keyAt(i)).filter((k) => !moving.includes(k)));
+  // A grabbed corner moves alone: every other corner holds still (letting
+  // neighbours follow is a choice for the person, not done unasked).
+  const pinsAll = new Set([...start.keys()].filter((k) => !moving.includes(k)));
   const F = sh.forest();
   const ang = new Map(), flat = new Map();
   for (const [c, { parent, e }] of F.parent) { ang.set(c.id, sh.angle(e, c, parent)); flat.set(c.id, sh.flatAngle(e, c, parent)); }
@@ -2357,7 +2417,7 @@ W.modifyStart = function (P, grab) {
   const ids = new Set(comp.map((p) => p.id));
   const key2 = (a, b) => [a.id, b.id].sort().join('|');
   const overl0 = new Set(sh.overlaps().pairs.filter(([a, b]) => ids.has(a.id) || ids.has(b.id)).map(([a, b]) => key2(a, b)));
-  return { pid: P.id, pc: pcP, grab, model: { pos: start, faces, edges: [...edges.values()], open: !this.restClosed(comp) }, start, refs, moving, pins,
+  return { pid: P.id, faceName: `P${P.no}`, pc: pcP, grab, model: { pos: start, faces, edges: [...edges.values()], open: !this.restClosed(comp) }, start, refs, moving, pins, pinsAll,
     st: this.stateById(), ang, flat, lie, allFlat, ids, overl0, key2, low0: this.lowestY(comp), closed: comp.every((p) => isIdentity(p.M)) };
 };
 
@@ -2423,13 +2483,25 @@ W.modifyPosedProblem = function (job) {
 W.modifyTo = function (job, delta) {
   const attempt = (t) => {
     const targets = new Map(job.moving.map((k) => [k, job.start.get(k).clone().addScaledVector(delta, t)]));
-    const s = solvePlanar(job.model, job.start, job.pins, targets);
-    if (s.dev > 1e-6) return { ok: false, reason: `face ${s.face} would bend out of plane` };
+    const corner = job.grab.kind === 'corner';
+    const s = solvePlanar(job.model, job.start, corner ? job.pinsAll : job.pins, targets);
+    if (s.dev > 1e-6) {
+      // One face is named: the grabbed one when it would bend, else the worst.
+      const mine = job.faceName && s.bad && s.bad.includes(job.faceName) ? job.faceName : s.face;
+      // Would it work if the corners next to it followed? Say so (not done unasked).
+      if (corner) {
+        const r = solvePlanar(job.model, job.start, job.pins, targets);
+        if (r.dev <= 1e-6 && !checkForm(job.model, r.P)) return { ok: false, reason: `face ${mine} would bend unless neighbouring corners followed this corner` };
+      }
+      return { ok: false, reason: `face ${mine} would bend out of plane` };
+    }
     const why = checkForm(job.model, s.P);
     if (why) return { ok: false, reason: why };
     this.modifySet(job, s.P);
     const pw = this.modifyPosedProblem(job);
-    return { ok: !pw, reason: pw, P: s.P };
+    let followed = 0;
+    for (const [k, v] of s.P) if (!job.moving.includes(k) && v.distanceTo(job.start.get(k)) > this.edgeLen * 1e-6) followed++;
+    return { ok: !pw, reason: pw, P: s.P, followed };
   };
   const full = attempt(1);
   let best = full.ok ? full : null, t = 1;
@@ -2440,7 +2512,7 @@ W.modifyTo = function (job, delta) {
   }
   this.modifySet(job, best ? best.P : job.start);
   this.refreshAll();
-  return { t, reason: full.ok ? null : full.reason };
+  return { t, reason: full.ok ? null : full.reason, followed: best && best.followed || 0 };
 };
 
 // After a reshape: a closed form that rested on the surface rests there again.
@@ -2589,6 +2661,15 @@ T.down = function (ptr, override) {
     // Taps: recognised on release on a screen (drags orbit the view).
     if (ptr.kind === 'screen') return false;
     this.active.set(ptr.id, { move: () => {}, end: () => ws.tap(ptr) });
+    return true;
+  }
+  if (tool === 'modify2d' && ptr.kind === 'screen') {
+    // A finger: the nearest visible corner or edge on the screen (see modifyPickAt).
+    const h = ws.modifyPickAt(ptr);
+    if (!h) return false;
+    const g = this.beginModify(ptr, h, h.grab);
+    if (!g) return false;
+    this.active.set(ptr.id, g);
     return true;
   }
   if (['rotate', 'move', 'modify2d', 'scissors'].includes(tool)) {
@@ -2820,14 +2901,20 @@ T.beginSolidTurn = function (ptr, hit) {
 // plane of the face you grab, whatever pose the net is in; in Solid it moves
 // with the pointer in space. Shared corners move as one, other faces follow
 // to stay flat, and the move stops at the last valid position.
-T.beginModify = function (ptr, hit) {
+T.beginModify = function (ptr, hit, picked = null) {
   const ws = this.ws;
   const P = hit.panel;
   if (!ws.isPiecePanel(P)) { ws.app.toast('This face cannot be reshaped.'); return null; }
-  const grab = ws.modifyGrab(P, hit.local);
+  const grab = picked || ws.modifyGrab(P, hit.local);
   if (!grab) return { move: () => {}, end: () => ws.app.toast('Drag a corner or an edge of a face to reshape it.'), cancel: () => {} };
   const solid = ws.state.mode === 'solid';
-  const normal = solid ? (ptr.ray ? ptr.ray.direction.clone().negate() : ws.app.camera.getWorldDirection(new THREE.Vector3()).negate()) : hit.normal.clone();
+  // Shape: in the face's own plane. Solid: a corner of a face with four or
+  // more corners stays in that face's plane (the face must stay flat); a
+  // triangle's corner, or an edge, moves in the plane facing the viewer.
+  const faceN = ws.shell.worldNormal(P).transformDirection(ws.shellGroup.matrixWorld).normalize();
+  const view = ptr.ray ? ptr.ray.direction.clone().negate() : ws.app.camera.getWorldDirection(new THREE.Vector3()).negate();
+  const inFace = !solid || (grab.kind === 'corner' && P.verts.length >= 4);
+  const normal = inFace ? (picked ? faceN : hit.normal.clone()) : view;
   const plane = new THREE.Plane().setFromNormalAndCoplanarPoint(normal.normalize(), hit.point);
   const stick = ptr.kind !== 'screen' && ptr.grabPoint ? ptr.grabPoint(hit).stick : false;
   const onPlane = (p) => {
@@ -2837,7 +2924,10 @@ T.beginModify = function (ptr, hit) {
   };
   const inv = P.M.clone().invert();
   const restOf = (w) => ws.toLocal(w).applyMatrix4(inv);
-  const r0 = restOf(hit.point);
+  // The drag starts where the finger is on the plane, so the corner moves
+  // by what the finger moves (no jump when it was grabbed a little off).
+  const down0 = ptr.kind === 'screen' && ptr.ray ? ptr.ray.intersectPlane(plane, new THREE.Vector3()) : null;
+  const r0 = restOf(down0 || hit.point);
   // Shape: an edge moves straight out from the face or back in (the face
   // gets deeper or narrower, the edge keeps its length and direction).
   let across = null;
@@ -2855,14 +2945,15 @@ T.beginModify = function (ptr, hit) {
   return {
     move: (p) => {
       if (!job && !moved(p)) return;
-      if (!job) { ws.stopAnim(); job = ws.modifyStart(P, grab); }
+      if (!job) { ws.stopAnim(); job = ws.modifyStart(P, grab); ws.app.clearToast?.(); }
       const w = onPlane(p);
       if (!w) return;
       const delta = restOf(w).sub(r0);
       if (across) { const k = delta.dot(across); delta.copy(across).multiplyScalar(k); }
       res = ws.modifyTo(job, delta);
       const at = ws.modifyWorld(job) || hit.point;
-      ws.setTag(res.reason ? `Stopped: ${res.reason}` : ws.modifyText(job), at);
+      const fol = res.followed ? ` · ${res.followed} neighbouring corner${res.followed === 1 ? '' : 's'} followed` : '';
+      ws.setTag(res.reason ? `Stopped: ${res.reason}` : `${ws.modifyText(job)}${fol}`, at);
       if (grab.kind === 'corner') { const Q = ws.shell.panelById.get(job.pid); if (Q) ws.showModDot(job.pc.verts[grab.verts[0]].clone().applyMatrix4(Q.M)); }
     },
     end: () => {
@@ -2884,7 +2975,8 @@ T.beginModify = function (ptr, hit) {
       ws.pushHistory(before);
       ws.refreshStyles();
       const what = job.grab.kind === 'corner' ? 'corner' : 'edge';
-      ws.app.toast(res && res.reason ? `Stopped at the last valid position: ${res.reason}.` : `Reshaped: ${what} moved ${ws.modifyText(job).replace(/^\S+ \+/, '').replace(' · ', ', neighbouring edges now ')}. Faces stay flat; joined edges keep matching lengths.`, 5000);
+      const folEnd = res && res.followed ? ` ${res.followed} neighbouring corner${res.followed === 1 ? '' : 's'} followed to keep faces flat.` : '';
+      ws.app.toast(res && res.reason ? `Stopped at the last valid position: ${res.reason}.` : `Reshaped: ${what} moved ${ws.modifyText(job).replace(/^\S+ \+/, '').replace(' · ', ', neighbouring edges now ')}. Faces stay flat; joined edges keep matching lengths.${folEnd}`, 5000);
       ws.app.notify?.();
     },
     cancel: () => { clear(); if (job) ws.restoreSnapshot(before); else ws.refreshStyles(); },

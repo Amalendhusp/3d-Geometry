@@ -164,6 +164,13 @@ export class UI {
     $('#arBtn').hidden = !app.xrSupport?.ar;
   }
 
+  clearToast() {
+    const t = $('#toast');
+    if (!t) return;
+    clearTimeout(this.toastTimer);
+    t.classList.remove('show');
+  }
+
   toast(msg, ms = 2600) {
     const t = $('#toast');
     t.textContent = msg;
